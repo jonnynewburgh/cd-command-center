@@ -51,12 +51,37 @@ else:
         "or `python etl/load_charter_schools.py --file <your-csv>` to load real data."
     )
 
+# Phase 2 summary — census tracts + NMTC
+tract_summary = db.get_census_tract_summary()
+nmtc_summary = db.get_nmtc_project_summary()
+
+if tract_summary and tract_summary.get("total_tracts", 0) > 0:
+    st.markdown("---")
+    st.subheader("Phase 2: NMTC Tracker + Census Demographics")
+    t1, t2, t3, t4 = st.columns(4)
+    t1.metric("Total Tracts", f"{tract_summary.get('total_tracts', 0):,}")
+    t2.metric("NMTC Eligible", f"{tract_summary.get('eligible_tracts', 0):,}")
+    t3.metric("Severely Distressed", f"{tract_summary.get('severely_distressed', 0):,}")
+    t4.metric("Deep Distress", f"{tract_summary.get('deep_distress', 0):,}")
+
+    if nmtc_summary and nmtc_summary.get("total_projects", 0) > 0:
+        total_qlici = nmtc_summary.get("total_qlici") or 0
+        st.caption(
+            f"NMTC projects: {nmtc_summary.get('total_projects', 0):,} | "
+            f"Total QLICI: ${total_qlici/1e9:.1f}B | "
+            f"CDEs: {nmtc_summary.get('unique_cdes', 0):,}"
+        )
+    else:
+        st.caption(
+            "No NMTC project data loaded yet. Download and load the CDFI Fund public data file."
+        )
+
 st.markdown("---")
 st.markdown(
     """
     **Build phases:**
-    - ✅ **Phase 1** (current): Charter schools + LEA accountability data
-    - ⬜ Phase 2: NMTC tracker + census demographics
+    - ✅ **Phase 1**: Charter schools + LEA accountability data
+    - ✅ **Phase 2**: NMTC tracker + census demographics
     - ⬜ Phase 3: FQHC / health centers
     - ⬜ Phase 4: ECE facility data
     - ⬜ Phase 5: 990 / philanthropy data

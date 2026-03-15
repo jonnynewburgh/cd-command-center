@@ -100,18 +100,76 @@ def init_db():
             tract_name TEXT,
             -- ACS demographics
             total_population INTEGER,
-            median_household_income REAL,
+            median_household_income REAL,       -- median household income (ACS B19013)
+            median_family_income REAL,          -- median family income (ACS B19113, used for NMTC LIC)
             poverty_rate REAL,                  -- % below poverty line
             pct_minority REAL,
             unemployment_rate REAL,
-            -- NMTC eligibility (Low-Income Community criteria)
-            is_nmtc_eligible INTEGER,           -- 1 = eligible, 0 = not
-            nmtc_eligibility_reason TEXT,       -- 'Poverty', 'Income', 'Unemployment', etc.
+            -- NMTC eligibility tiers (Low-Income Community criteria)
+            is_nmtc_eligible INTEGER,           -- 1 = eligible (LIC or higher), 0 = not
+            nmtc_eligibility_reason TEXT,       -- 'Poverty', 'Income', 'Both'
+            nmtc_eligibility_tier TEXT,         -- 'Not Eligible', 'LIC', 'Severely Distressed', 'Deep Distress'
             -- Geography
             county_name TEXT,
             state TEXT,
             data_year INTEGER,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Add nmtc_eligibility_tier to existing census_tracts tables that predate this column
+    try:
+        cur.execute("ALTER TABLE census_tracts ADD COLUMN median_family_income REAL")
+    except Exception:
+        pass  # Column already exists
+    try:
+        cur.execute("ALTER TABLE census_tracts ADD COLUMN nmtc_eligibility_tier TEXT")
+    except Exception:
+        pass  # Column already exists
+
+    # NMTC projects — project-level QALICB investments from CDFI Fund public data release
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS nmtc_projects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cdfi_project_id TEXT UNIQUE,        -- CDFI Fund internal project identifier
+            cde_name TEXT,                      -- Community Development Entity name
+            cde_id TEXT,                        -- CDE identifier
+            project_name TEXT,
+            project_type TEXT,                  -- 'Real Estate' or 'Non-Real Estate'
+            state TEXT,
+            city TEXT,
+            address TEXT,
+            zip_code TEXT,
+            census_tract_id TEXT,               -- 11-digit FIPS (joins to census_tracts)
+            latitude REAL,
+            longitude REAL,
+            total_investment REAL,              -- total project investment in dollars
+            qlici_amount REAL,                  -- Qualified Low-Income Community Investment amount
+            allocation_year INTEGER,            -- year CDE received the NMTC allocation
+            fiscal_year INTEGER,                -- fiscal year the investment was made
+            jobs_created INTEGER,
+            jobs_retained INTEGER,
+            project_description TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # CDE allocations — CDE-level NMTC allocation awards from CDFI Fund
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS cde_allocations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cde_name TEXT NOT NULL,
+            cde_id TEXT,
+            state TEXT,                         -- CDE headquarters state
+            city TEXT,
+            hq_address TEXT,
+            allocation_amount REAL,             -- total NMTC allocation awarded (dollars)
+            allocation_year INTEGER,            -- calendar year of award
+            round_number INTEGER,               -- NMTC application round number
+            amount_deployed REAL,               -- amount invested to date (from project data)
+            service_areas TEXT,                 -- text description of service geography
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (cde_name, allocation_year)
         )
     """)
 
@@ -283,6 +341,240 @@ def get_nmtc_eligible_tracts(states=None) -> pd.DataFrame:
     df = pd.read_sql_query(query, conn, params=params)
     conn.close()
     return df
+
+
+def get_census_tracts(
+    states=None,
+    min_poverty_rate=None,
+    max_median_income=None,
+    nmtc_eligible_only=False,
+    eligibility_tiers=None,
+    county_fips=None,
+) -> pd.DataFrame:
+    """
+    Return census tracts matching the given filters as a DataFrame.
+
+    Args:
+        states: list of state abbreviations, e.g. ['CA', 'TX']
+        min_poverty_rate: minimum poverty rate % (inclusive)
+        max_median_income: maximum median family income in dollars (inclusive)
+        nmtc_eligible_only: if True, only return tracts with is_nmtc_eligible=1
+        eligibility_tiers: list of tier strings, e.g. ['Severely Distressed', 'Deep Distress']
+        county_fips: 5-digit county FIPS code to filter to a single county
+    """
+    conditions = []
+    params = []
+
+    if states:
+        placeholders = ",".join("?" * len(states))
+        conditions.append(f"state IN ({placeholders})")
+        params.extend(states)
+
+    if nmtc_eligible_only:
+        conditions.append("is_nmtc_eligible = 1")
+
+    if eligibility_tiers:
+        placeholders = ",".join("?" * len(eligibility_tiers))
+        conditions.append(f"nmtc_eligibility_tier IN ({placeholders})")
+        params.extend(eligibility_tiers)
+
+    if min_poverty_rate is not None:
+        conditions.append("poverty_rate >= ?")
+        params.append(min_poverty_rate)
+
+    if max_median_income is not None:
+        conditions.append("(median_family_income <= ? OR median_family_income IS NULL)")
+        params.append(max_median_income)
+
+    if county_fips:
+        conditions.append("county_fips = ?")
+        params.append(county_fips)
+
+    where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+    query = f"SELECT * FROM census_tracts {where_clause} ORDER BY state, poverty_rate DESC"
+
+    conn = get_connection()
+    df = pd.read_sql_query(query, conn, params=params)
+    conn.close()
+    return df
+
+
+def get_census_tract_summary() -> dict:
+    """Return high-level summary counts for the NMTC dashboard header."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT
+            COUNT(*) as total_tracts,
+            SUM(CASE WHEN is_nmtc_eligible = 1 THEN 1 ELSE 0 END) as eligible_tracts,
+            SUM(CASE WHEN nmtc_eligibility_tier = 'Severely Distressed' THEN 1 ELSE 0 END) as severely_distressed,
+            SUM(CASE WHEN nmtc_eligibility_tier = 'Deep Distress' THEN 1 ELSE 0 END) as deep_distress,
+            SUM(total_population) as total_population_covered
+        FROM census_tracts
+    """)
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else {}
+
+
+def get_census_tract_states() -> list:
+    """Return sorted list of states that have census tract data."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT DISTINCT state FROM census_tracts WHERE state IS NOT NULL ORDER BY state")
+    states = [row[0] for row in cur.fetchall()]
+    conn.close()
+    return states
+
+
+# ---------------------------------------------------------------------------
+# NMTC project queries
+# ---------------------------------------------------------------------------
+
+def get_nmtc_projects(
+    states=None,
+    census_tract_id=None,
+    cde_name=None,
+    project_type=None,
+    min_year=None,
+    max_year=None,
+) -> pd.DataFrame:
+    """
+    Return NMTC projects matching the given filters as a DataFrame.
+
+    Args:
+        states: list of state abbreviations
+        census_tract_id: exact census tract FIPS to filter to a single tract
+        cde_name: substring match on CDE name
+        project_type: 'Real Estate' or 'Non-Real Estate'
+        min_year: minimum fiscal_year (inclusive)
+        max_year: maximum fiscal_year (inclusive)
+    """
+    conditions = []
+    params = []
+
+    if states:
+        placeholders = ",".join("?" * len(states))
+        conditions.append(f"state IN ({placeholders})")
+        params.extend(states)
+
+    if census_tract_id:
+        conditions.append("census_tract_id = ?")
+        params.append(census_tract_id)
+
+    if cde_name:
+        conditions.append("cde_name LIKE ?")
+        params.append(f"%{cde_name}%")
+
+    if project_type:
+        conditions.append("project_type = ?")
+        params.append(project_type)
+
+    if min_year is not None:
+        conditions.append("fiscal_year >= ?")
+        params.append(min_year)
+
+    if max_year is not None:
+        conditions.append("fiscal_year <= ?")
+        params.append(max_year)
+
+    where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+    query = f"""
+        SELECT * FROM nmtc_projects
+        {where_clause}
+        ORDER BY state, fiscal_year DESC, qlici_amount DESC
+    """
+
+    conn = get_connection()
+    df = pd.read_sql_query(query, conn, params=params)
+    conn.close()
+    return df
+
+
+def get_nmtc_project_summary() -> dict:
+    """Return high-level NMTC investment summary counts."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT
+            COUNT(*) as total_projects,
+            SUM(qlici_amount) as total_qlici,
+            SUM(total_investment) as total_investment,
+            SUM(jobs_created) as total_jobs_created,
+            COUNT(DISTINCT cde_name) as unique_cdes,
+            COUNT(DISTINCT state) as states_served
+        FROM nmtc_projects
+    """)
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else {}
+
+
+def get_cde_allocations(states=None) -> pd.DataFrame:
+    """Return CDE allocation records, optionally filtered by state."""
+    conditions = []
+    params = []
+
+    if states:
+        placeholders = ",".join("?" * len(states))
+        conditions.append(f"state IN ({placeholders})")
+        params.extend(states)
+
+    where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+    query = f"""
+        SELECT * FROM cde_allocations
+        {where_clause}
+        ORDER BY state, allocation_amount DESC
+    """
+
+    conn = get_connection()
+    df = pd.read_sql_query(query, conn, params=params)
+    conn.close()
+    return df
+
+
+def upsert_nmtc_project(record: dict):
+    """Insert or update an NMTC project record (keyed on cdfi_project_id)."""
+    conn = get_connection()
+    cur = conn.cursor()
+
+    columns = list(record.keys())
+    values = list(record.values())
+    placeholders = ",".join("?" * len(values))
+    update_clause = ",".join(
+        f"{col}=excluded.{col}" for col in columns if col != "cdfi_project_id"
+    )
+
+    sql = f"""
+        INSERT INTO nmtc_projects ({",".join(columns)})
+        VALUES ({placeholders})
+        ON CONFLICT(cdfi_project_id) DO UPDATE SET {update_clause}
+    """
+    cur.execute(sql, values)
+    conn.commit()
+    conn.close()
+
+
+def upsert_cde_allocation(record: dict):
+    """Insert or update a CDE allocation record (keyed on cde_name + allocation_year)."""
+    conn = get_connection()
+    cur = conn.cursor()
+
+    columns = list(record.keys())
+    values = list(record.values())
+    placeholders = ",".join("?" * len(values))
+    update_clause = ",".join(
+        f"{col}=excluded.{col}" for col in columns if col not in ("cde_name", "allocation_year")
+    )
+
+    sql = f"""
+        INSERT INTO cde_allocations ({",".join(columns)})
+        VALUES ({placeholders})
+        ON CONFLICT(cde_name, allocation_year) DO UPDATE SET {update_clause}
+    """
+    cur.execute(sql, values)
+    conn.commit()
+    conn.close()
 
 
 # ---------------------------------------------------------------------------
