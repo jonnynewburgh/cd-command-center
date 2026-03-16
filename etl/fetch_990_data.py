@@ -88,6 +88,35 @@ def _match_score(query: str, result: str) -> float:
     return len(q_words & r_words) / len(q_words)
 
 
+def _clean_org_name(name: str) -> str:
+    """
+    Strip NCES boilerplate from lea_name before searching ProPublica.
+    NCES stores district names like 'ACE Charter High District' but the
+    actual nonprofit on ProPublica is just 'ACE Charter High'.
+    """
+    if not name:
+        return name
+    # Order matters — try longest suffixes first so we don't leave partial text
+    suffixes = [
+        " Unified School District",
+        " City School District",
+        " Union High School District",
+        " Union Elementary District",
+        " Union School District",
+        " Elementary School District",
+        " High School District",
+        " School District",
+        " Charter District",
+        " District",
+    ]
+    cleaned = name.strip()
+    for suffix in suffixes:
+        if cleaned.lower().endswith(suffix.lower()):
+            cleaned = cleaned[: -len(suffix)].strip()
+            break
+    return cleaned
+
+
 def search_propublica(name: str, state: str) -> list[dict]:
     """
     Search ProPublica for a nonprofit by name and state.
@@ -244,7 +273,12 @@ def fetch_990_for_charter_schools(states=None, limit=None, overwrite=False, verb
         seen_lea.add(lea_id)
         search_name = lea_name or school_name
         if search_name:
-            orgs.append({"lea_id": lea_id, "name": search_name, "state": state})
+            orgs.append({
+                "lea_id": lea_id,
+                "name": search_name,
+                "school_name": school_name,
+                "state": state,
+            })
 
     # Apply limit after dedup
     if limit:
@@ -257,17 +291,28 @@ def fetch_990_for_charter_schools(states=None, limit=None, overwrite=False, verb
     failed = 0
 
     for i, org in enumerate(orgs, 1):
-        results = search_propublica(org["name"], org["state"])
+        raw_name  = org["name"]
+        clean_name = _clean_org_name(raw_name)
+        school_name = org.get("school_name", "")
+
+        # Try cleaned lea_name first; fall back to school_name if 0 results
+        results = search_propublica(clean_name, org["state"])
         time.sleep(API_SLEEP)
+        search_used = clean_name
+
+        if not results and school_name and school_name != raw_name:
+            results = search_propublica(school_name, org["state"])
+            time.sleep(API_SLEEP)
+            search_used = school_name
 
         if verbose:
-            print(f"\n  [{i}] Search: '{org['name']}' ({org['state']})")
+            print(f"\n  [{i}] Search: '{search_used}' (raw: '{raw_name}') ({org['state']})")
             print(f"       API returned {len(results)} results")
             for r in results[:3]:
-                score = _match_score(org["name"], r.get("name", ""))
+                score = _match_score(search_used, r.get("name", ""))
                 print(f"       • {r.get('name')} — score={score:.2f}")
 
-        match = best_match(org["name"], results)
+        match = best_match(search_used, results)
         if not match:
             if verbose:
                 print(f"       → NO MATCH (threshold={MIN_MATCH_SCORE})")
