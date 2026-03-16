@@ -6,7 +6,11 @@ All map creation logic lives here so the app file stays clean.
 
 import folium
 from folium import FeatureGroup
+from folium.plugins import MarkerCluster
 import pandas as pd
+
+# Above this count, use clustered markers for schools to keep the map fast
+SCHOOL_CLUSTER_THRESHOLD = 500
 
 
 # Color scheme for charter school survival risk tiers
@@ -71,6 +75,18 @@ def make_unified_map(
         school_layer = FeatureGroup(name="Schools", show=True)
         schools_with_coords = schools_df.dropna(subset=["latitude", "longitude"])
 
+        # Use clustered markers when there are many schools to keep the map responsive.
+        # MarkerCluster groups nearby markers at low zoom and expands them as you zoom in.
+        use_cluster = len(schools_with_coords) > SCHOOL_CLUSTER_THRESHOLD
+        if use_cluster:
+            cluster = MarkerCluster(
+                name="Schools (clustered)",
+                options={"maxClusterRadius": 40, "disableClusteringAtZoom": 12},
+            )
+            marker_target = cluster
+        else:
+            marker_target = school_layer
+
         for _, row in schools_with_coords.iterrows():
             is_charter = row.get("is_charter", 1)
             if is_charter:
@@ -91,7 +107,10 @@ def make_unified_map(
                 fill_opacity=0.75,
                 popup=folium.Popup(popup_html, max_width=300),
                 tooltip=f"{prefix}: {label}",
-            ).add_to(school_layer)
+            ).add_to(marker_target)
+
+        if use_cluster:
+            cluster.add_to(school_layer)
 
         school_layer.add_to(m)
 
