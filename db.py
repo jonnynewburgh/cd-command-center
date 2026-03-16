@@ -13,6 +13,13 @@ import sqlite3
 import os
 import pandas as pd
 
+# Streamlit caching — imported conditionally so ETL scripts don't need Streamlit
+try:
+    import streamlit as st
+    _HAS_STREAMLIT = True
+except ImportError:
+    _HAS_STREAMLIT = False
+
 # Path to the SQLite database file
 DB_PATH = os.path.join(os.path.dirname(__file__), "data", "cd_command_center.sqlite")
 
@@ -33,9 +40,9 @@ def init_db():
     conn = get_connection()
     cur = conn.cursor()
 
-    # Charter schools — one row per school site
+    # Schools — one row per school site (all public schools, not just charters)
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS charter_schools (
+        CREATE TABLE IF NOT EXISTS schools (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             nces_id TEXT UNIQUE,           -- National Center for Ed Stats school ID
             school_name TEXT NOT NULL,
@@ -52,6 +59,7 @@ def init_db():
             enrollment INTEGER,
             grade_low TEXT,
             grade_high TEXT,
+            is_charter INTEGER DEFAULT 0,  -- 1 = charter school, 0 = traditional public
             -- Demographics (shares of enrollment)
             pct_free_reduced_lunch REAL,
             pct_ell REAL,                  -- English language learners
@@ -63,7 +71,7 @@ def init_db():
             school_status TEXT,            -- e.g. 'Open', 'Closed', 'Pending'
             year_opened INTEGER,
             year_closed INTEGER,
-            -- Survival model output
+            -- Survival model output (charter schools only)
             survival_score REAL,           -- 0–1 probability of remaining open
             survival_risk_tier TEXT,       -- 'Low', 'Medium', 'High'
             -- Metadata
@@ -73,11 +81,47 @@ def init_db():
         )
     """)
 
+    # Migrate from old charter_schools table if it exists
+    try:
+        cur.execute("SELECT COUNT(*) FROM charter_schools")
+        old_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM schools")
+        new_count = cur.fetchone()[0]
+        if old_count > 0 and new_count == 0:
+            # Copy data from old table, setting is_charter=1 since old table was charter-only
+            cur.execute("""
+                INSERT INTO schools (
+                    nces_id, school_name, lea_name, lea_id, state, city, address,
+                    zip_code, county, census_tract_id, latitude, longitude, enrollment,
+                    grade_low, grade_high, is_charter,
+                    pct_free_reduced_lunch, pct_ell, pct_sped, pct_black, pct_hispanic, pct_white,
+                    school_status, year_opened, year_closed,
+                    survival_score, survival_risk_tier, data_year, created_at, updated_at
+                )
+                SELECT
+                    nces_id, school_name, lea_name, lea_id, state, city, address,
+                    zip_code, county, census_tract_id, latitude, longitude, enrollment,
+                    grade_low, grade_high, 1,
+                    pct_free_reduced_lunch, pct_ell, pct_sped, pct_black, pct_hispanic, pct_white,
+                    school_status, year_opened, year_closed,
+                    survival_score, survival_risk_tier, data_year, created_at, updated_at
+                FROM charter_schools
+            """)
+            print(f"  Migrated {old_count:,} records from charter_schools → schools table")
+    except Exception:
+        pass  # charter_schools doesn't exist, that's fine
+
+    # Add is_charter column to schools table if it was created without it
+    try:
+        cur.execute("ALTER TABLE schools ADD COLUMN is_charter INTEGER DEFAULT 0")
+    except Exception:
+        pass
+
     # LEA (district) accountability scores
     cur.execute("""
         CREATE TABLE IF NOT EXISTS lea_accountability (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            lea_id TEXT,                   -- NCES LEA ID (joins to charter_schools.lea_id)
+            lea_id TEXT,                   -- NCES LEA ID (joins to schools.lea_id)
             lea_name TEXT,
             state TEXT,
             accountability_score REAL,     -- State-reported composite score
@@ -117,15 +161,15 @@ def init_db():
         )
     """)
 
-    # Add nmtc_eligibility_tier to existing census_tracts tables that predate this column
+    # Add columns to existing census_tracts tables that predate these
     try:
         cur.execute("ALTER TABLE census_tracts ADD COLUMN median_family_income REAL")
     except Exception:
-        pass  # Column already exists
+        pass
     try:
         cur.execute("ALTER TABLE census_tracts ADD COLUMN nmtc_eligibility_tier TEXT")
     except Exception:
-        pass  # Column already exists
+        pass
 
     # NMTC projects — project-level QALICB investments from CDFI Fund public data release
     cur.execute("""
@@ -178,10 +222,24 @@ def init_db():
 
 
 # ---------------------------------------------------------------------------
-# Charter School queries
+# Caching helper — wraps @st.cache_data when Streamlit is available
 # ---------------------------------------------------------------------------
 
-def get_charter_schools(
+def _cached(ttl=300):
+    """Decorator: applies @st.cache_data(ttl=ttl) if Streamlit is loaded."""
+    def decorator(func):
+        if _HAS_STREAMLIT:
+            return st.cache_data(ttl=ttl, show_spinner=False)(func)
+        return func
+    return decorator
+
+
+# ---------------------------------------------------------------------------
+# School queries (formerly charter_schools)
+# ---------------------------------------------------------------------------
+
+@_cached(ttl=300)
+def get_schools(
     states=None,
     min_enrollment=None,
     max_enrollment=None,
@@ -191,9 +249,10 @@ def get_charter_schools(
     school_status=None,
     county=None,
     census_tract_id=None,
+    charter_only=False,
 ) -> pd.DataFrame:
     """
-    Return charter schools matching the given filters as a DataFrame.
+    Return schools matching the given filters as a DataFrame.
     All parameters are optional — omitting them returns all schools.
 
     Args:
@@ -206,115 +265,174 @@ def get_charter_schools(
         school_status: list of status strings, e.g. ['Open']
         county: county name substring match
         census_tract_id: exact census tract FIPS code
+        charter_only: if True, only return charter schools (is_charter=1)
     """
     conditions = []
     params = []
 
+    if charter_only:
+        conditions.append("s.is_charter = 1")
+
     if states:
         placeholders = ",".join("?" * len(states))
-        conditions.append(f"cs.state IN ({placeholders})")
+        conditions.append(f"s.state IN ({placeholders})")
         params.extend(states)
 
     if min_enrollment is not None:
-        conditions.append("cs.enrollment >= ?")
+        conditions.append("s.enrollment >= ?")
         params.append(min_enrollment)
 
     if max_enrollment is not None:
-        conditions.append("cs.enrollment <= ?")
+        conditions.append("s.enrollment <= ?")
         params.append(max_enrollment)
 
     if risk_tiers:
         placeholders = ",".join("?" * len(risk_tiers))
-        conditions.append(f"cs.survival_risk_tier IN ({placeholders})")
+        conditions.append(f"s.survival_risk_tier IN ({placeholders})")
         params.extend(risk_tiers)
 
     if min_survival_score is not None:
-        conditions.append("cs.survival_score >= ?")
+        conditions.append("s.survival_score >= ?")
         params.append(min_survival_score)
 
     if max_survival_score is not None:
-        conditions.append("cs.survival_score <= ?")
+        conditions.append("s.survival_score <= ?")
         params.append(max_survival_score)
 
     if school_status:
         placeholders = ",".join("?" * len(school_status))
-        conditions.append(f"cs.school_status IN ({placeholders})")
+        conditions.append(f"s.school_status IN ({placeholders})")
         params.extend(school_status)
 
     if county:
-        conditions.append("cs.county LIKE ?")
+        conditions.append("s.county LIKE ?")
         params.append(f"%{county}%")
 
     if census_tract_id:
-        conditions.append("cs.census_tract_id = ?")
+        conditions.append("s.census_tract_id = ?")
         params.append(census_tract_id)
 
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
-    query = f"""
-        SELECT
-            cs.*,
-            la.accountability_score,
-            la.accountability_rating,
-            la.proficiency_reading,
-            la.proficiency_math
-        FROM charter_schools cs
-        LEFT JOIN lea_accountability la
-            ON cs.lea_id = la.lea_id
-            AND la.data_year = (
-                SELECT MAX(data_year) FROM lea_accountability WHERE lea_id = cs.lea_id
-            )
-        {where_clause}
-        ORDER BY cs.school_name
-    """
 
+    # Try to query from the 'schools' table; fall back to 'charter_schools' for old DBs
+    for table_name in ["schools", "charter_schools"]:
+        try:
+            query = f"""
+                SELECT
+                    {table_name[0]}.*,
+                    la.accountability_score,
+                    la.accountability_rating,
+                    la.proficiency_reading,
+                    la.proficiency_math
+                FROM {table_name} {table_name[0]}
+                LEFT JOIN lea_accountability la
+                    ON {table_name[0]}.lea_id = la.lea_id
+                    AND la.data_year = (
+                        SELECT MAX(data_year) FROM lea_accountability WHERE lea_id = {table_name[0]}.lea_id
+                    )
+                {where_clause}
+                ORDER BY {table_name[0]}.school_name
+            """
+            conn = get_connection()
+            df = pd.read_sql_query(query, conn, params=params)
+            conn.close()
+            return df
+        except Exception:
+            continue
+
+    return pd.DataFrame()
+
+
+# Backward-compatible wrappers for code that still uses old names
+def get_charter_schools(**kwargs) -> pd.DataFrame:
+    """Backward-compatible wrapper: calls get_schools(charter_only=True)."""
+    kwargs["charter_only"] = True
+    return get_schools(**kwargs)
+
+
+@_cached(ttl=300)
+def get_school_by_id(school_id: int) -> dict:
+    """Return a single school by its primary key id."""
     conn = get_connection()
-    df = pd.read_sql_query(query, conn, params=params)
+    cur = conn.cursor()
+    for table in ["schools", "charter_schools"]:
+        try:
+            cur.execute(f"SELECT * FROM {table} WHERE id = ?", (school_id,))
+            row = cur.fetchone()
+            if row:
+                conn.close()
+                return dict(row)
+        except Exception:
+            continue
     conn.close()
-    return df
+    return {}
 
 
 def get_charter_school_by_id(school_id: int) -> dict:
-    """Return a single charter school by its primary key id."""
+    """Backward-compatible wrapper."""
+    return get_school_by_id(school_id)
+
+
+@_cached(ttl=300)
+def get_school_states() -> list:
+    """Return sorted list of states that have school data."""
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM charter_schools WHERE id = ?", (school_id,))
-    row = cur.fetchone()
+    for table in ["schools", "charter_schools"]:
+        try:
+            cur.execute(f"SELECT DISTINCT state FROM {table} WHERE state IS NOT NULL ORDER BY state")
+            states = [row[0] for row in cur.fetchall()]
+            conn.close()
+            return states
+        except Exception:
+            continue
     conn.close()
-    return dict(row) if row else {}
+    return []
 
 
 def get_charter_school_states() -> list:
-    """Return sorted list of states that have charter school data."""
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT DISTINCT state FROM charter_schools WHERE state IS NOT NULL ORDER BY state")
-    states = [row[0] for row in cur.fetchall()]
-    conn.close()
-    return states
+    """Backward-compatible wrapper."""
+    return get_school_states()
 
 
-def get_charter_school_summary() -> dict:
+@_cached(ttl=300)
+def get_school_summary(charter_only=False) -> dict:
     """Return high-level summary counts for the dashboard header."""
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("""
-        SELECT
-            COUNT(*) as total_schools,
-            SUM(CASE WHEN school_status = 'Open' THEN 1 ELSE 0 END) as open_schools,
-            SUM(CASE WHEN survival_risk_tier = 'High' THEN 1 ELSE 0 END) as high_risk_schools,
-            AVG(survival_score) as avg_survival_score,
-            SUM(enrollment) as total_enrollment
-        FROM charter_schools
-    """)
-    row = cur.fetchone()
+    charter_filter = "WHERE is_charter = 1" if charter_only else ""
+
+    for table in ["schools", "charter_schools"]:
+        try:
+            cur.execute(f"""
+                SELECT
+                    COUNT(*) as total_schools,
+                    SUM(CASE WHEN school_status = 'Open' THEN 1 ELSE 0 END) as open_schools,
+                    SUM(CASE WHEN survival_risk_tier = 'High' THEN 1 ELSE 0 END) as high_risk_schools,
+                    AVG(survival_score) as avg_survival_score,
+                    SUM(enrollment) as total_enrollment
+                FROM {table}
+                {charter_filter}
+            """)
+            row = cur.fetchone()
+            conn.close()
+            return dict(row) if row else {}
+        except Exception:
+            continue
     conn.close()
-    return dict(row) if row else {}
+    return {}
+
+
+def get_charter_school_summary() -> dict:
+    """Backward-compatible wrapper."""
+    return get_school_summary(charter_only=True)
 
 
 # ---------------------------------------------------------------------------
 # Census tract queries
 # ---------------------------------------------------------------------------
 
+@_cached(ttl=300)
 def get_census_tract(census_tract_id: str) -> dict:
     """Return demographic data for a single census tract."""
     conn = get_connection()
@@ -325,6 +443,7 @@ def get_census_tract(census_tract_id: str) -> dict:
     return dict(row) if row else {}
 
 
+@_cached(ttl=300)
 def get_nmtc_eligible_tracts(states=None) -> pd.DataFrame:
     """Return all NMTC-eligible census tracts, optionally filtered by state."""
     conditions = ["is_nmtc_eligible = 1"]
@@ -343,6 +462,7 @@ def get_nmtc_eligible_tracts(states=None) -> pd.DataFrame:
     return df
 
 
+@_cached(ttl=300)
 def get_census_tracts(
     states=None,
     min_poverty_rate=None,
@@ -399,6 +519,7 @@ def get_census_tracts(
     return df
 
 
+@_cached(ttl=300)
 def get_census_tract_summary() -> dict:
     """Return high-level summary counts for the NMTC dashboard header."""
     conn = get_connection()
@@ -417,6 +538,7 @@ def get_census_tract_summary() -> dict:
     return dict(row) if row else {}
 
 
+@_cached(ttl=300)
 def get_census_tract_states() -> list:
     """Return sorted list of states that have census tract data."""
     conn = get_connection()
@@ -431,6 +553,7 @@ def get_census_tract_states() -> list:
 # NMTC project queries
 # ---------------------------------------------------------------------------
 
+@_cached(ttl=300)
 def get_nmtc_projects(
     states=None,
     census_tract_id=None,
@@ -491,6 +614,7 @@ def get_nmtc_projects(
     return df
 
 
+@_cached(ttl=300)
 def get_nmtc_project_summary() -> dict:
     """Return high-level NMTC investment summary counts."""
     conn = get_connection()
@@ -510,6 +634,7 @@ def get_nmtc_project_summary() -> dict:
     return dict(row) if row else {}
 
 
+@_cached(ttl=300)
 def get_cde_allocations(states=None) -> pd.DataFrame:
     """Return CDE allocation records, optionally filtered by state."""
     conditions = []
@@ -531,6 +656,112 @@ def get_cde_allocations(states=None) -> pd.DataFrame:
     df = pd.read_sql_query(query, conn, params=params)
     conn.close()
     return df
+
+
+# ---------------------------------------------------------------------------
+# Global search — across schools, NMTC projects, CDEs
+# ---------------------------------------------------------------------------
+
+@_cached(ttl=60)
+def search_all(query_text: str) -> dict:
+    """
+    Search across schools, NMTC projects, and CDEs by name/city.
+    Returns a dict with keys 'schools', 'projects', 'cdes' — each a DataFrame.
+    """
+    if not query_text or not query_text.strip():
+        return {"schools": pd.DataFrame(), "projects": pd.DataFrame(), "cdes": pd.DataFrame()}
+
+    like = f"%{query_text.strip()}%"
+    conn = get_connection()
+
+    # Search schools
+    school_table = "schools"
+    try:
+        schools_df = pd.read_sql_query(
+            f"""SELECT * FROM {school_table}
+                WHERE school_name LIKE ? OR city LIKE ? OR lea_name LIKE ?
+                  OR nces_id LIKE ? OR state LIKE ?
+                ORDER BY school_name LIMIT 200""",
+            conn, params=[like, like, like, like, like],
+        )
+    except Exception:
+        school_table = "charter_schools"
+        schools_df = pd.read_sql_query(
+            f"""SELECT * FROM {school_table}
+                WHERE school_name LIKE ? OR city LIKE ? OR lea_name LIKE ?
+                  OR nces_id LIKE ? OR state LIKE ?
+                ORDER BY school_name LIMIT 200""",
+            conn, params=[like, like, like, like, like],
+        )
+
+    # Search NMTC projects
+    try:
+        projects_df = pd.read_sql_query(
+            """SELECT * FROM nmtc_projects
+               WHERE project_name LIKE ? OR cde_name LIKE ? OR city LIKE ?
+                 OR state LIKE ? OR census_tract_id LIKE ?
+               ORDER BY project_name LIMIT 200""",
+            conn, params=[like, like, like, like, like],
+        )
+    except Exception:
+        projects_df = pd.DataFrame()
+
+    # Search CDEs
+    try:
+        cdes_df = pd.read_sql_query(
+            """SELECT * FROM cde_allocations
+               WHERE cde_name LIKE ? OR city LIKE ? OR state LIKE ?
+                 OR service_areas LIKE ?
+               ORDER BY cde_name LIMIT 200""",
+            conn, params=[like, like, like, like],
+        )
+    except Exception:
+        cdes_df = pd.DataFrame()
+
+    conn.close()
+    return {"schools": schools_df, "projects": projects_df, "cdes": cdes_df}
+
+
+# ---------------------------------------------------------------------------
+# Upsert functions (write — not cached)
+# ---------------------------------------------------------------------------
+
+def upsert_school(record: dict):
+    """
+    Insert or update a school record.
+    Uses nces_id as the unique key — if a school with that ID exists,
+    update it; otherwise insert a new row.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+
+    columns = list(record.keys())
+    values = list(record.values())
+    placeholders = ",".join("?" * len(values))
+    update_clause = ",".join(f"{col}=excluded.{col}" for col in columns if col != "nces_id")
+
+    # Try schools table first, fall back to charter_schools for old DBs
+    for table in ["schools", "charter_schools"]:
+        try:
+            sql = f"""
+                INSERT INTO {table} ({",".join(columns)})
+                VALUES ({placeholders})
+                ON CONFLICT(nces_id) DO UPDATE SET {update_clause}, updated_at=CURRENT_TIMESTAMP
+            """
+            cur.execute(sql, values)
+            conn.commit()
+            conn.close()
+            return
+        except Exception:
+            continue
+    conn.close()
+
+
+def upsert_charter_school(record: dict):
+    """Backward-compatible wrapper: inserts with is_charter=1."""
+    record = dict(record)
+    record["is_charter"] = 1
+    upsert_school(record)
 
 
 def upsert_nmtc_project(record: dict):
@@ -581,6 +812,7 @@ def upsert_cde_allocation(record: dict):
 # LEA accountability queries
 # ---------------------------------------------------------------------------
 
+@_cached(ttl=300)
 def get_lea_accountability(lea_ids=None, states=None) -> pd.DataFrame:
     """Return LEA accountability data, optionally filtered."""
     conditions = []
@@ -603,30 +835,6 @@ def get_lea_accountability(lea_ids=None, states=None) -> pd.DataFrame:
     df = pd.read_sql_query(query, conn, params=params)
     conn.close()
     return df
-
-
-def upsert_charter_school(record: dict):
-    """
-    Insert or update a charter school record.
-    Uses nces_id as the unique key — if a school with that ID exists,
-    update it; otherwise insert a new row.
-    """
-    conn = get_connection()
-    cur = conn.cursor()
-
-    columns = list(record.keys())
-    values = list(record.values())
-    placeholders = ",".join("?" * len(values))
-    update_clause = ",".join(f"{col}=excluded.{col}" for col in columns if col != "nces_id")
-
-    sql = f"""
-        INSERT INTO charter_schools ({",".join(columns)})
-        VALUES ({placeholders})
-        ON CONFLICT(nces_id) DO UPDATE SET {update_clause}, updated_at=CURRENT_TIMESTAMP
-    """
-    cur.execute(sql, values)
-    conn.commit()
-    conn.close()
 
 
 def upsert_lea_accountability(record: dict):
@@ -670,4 +878,22 @@ def upsert_census_tract(record: dict):
     """
     cur.execute(sql, values)
     conn.commit()
+    conn.close()
+
+
+def update_school_census_tract(nces_id: str, census_tract_id: str):
+    """Update the census_tract_id for a single school by nces_id."""
+    conn = get_connection()
+    cur = conn.cursor()
+    for table in ["schools", "charter_schools"]:
+        try:
+            cur.execute(
+                f"UPDATE {table} SET census_tract_id = ?, updated_at = CURRENT_TIMESTAMP WHERE nces_id = ?",
+                (census_tract_id, nces_id),
+            )
+            conn.commit()
+            conn.close()
+            return
+        except Exception:
+            continue
     conn.close()

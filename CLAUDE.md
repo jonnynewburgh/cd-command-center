@@ -30,13 +30,7 @@ cd-command-center/
 ├── README.md
 ├── requirements.txt
 ├── app.py                 # Main Streamlit entry point
-├── pages/
-│   ├── 01_charter_schools.py
-│   ├── 02_nmtc_tracker.py
-│   ├── 03_fqhc.py
-│   ├── 04_ece.py
-│   ├── 05_philanthropy.py
-│   └── 06_compare.py      # Side-by-side facility/deal comparison
+├── pages/                     # (empty — unified single-page layout in app.py)
 ├── data/
 │   ├── cd_command_center.sqlite  # Main database
 │   └── raw/                      # Raw source files (CSV, etc.) — NOT committed to Git
@@ -57,7 +51,7 @@ cd-command-center/
 
 The database (`cd_command_center.sqlite`) consolidates all data sources. Key tables:
 
-- `charter_schools` — school-level data with location, enrollment, demographics, accountability scores, survival model predictions
+- `schools` — all public schools (charter + traditional) with location, enrollment, demographics, is_charter flag, survival model predictions (charters only)
 - `nmtc_projects` — NMTC awards and project-level data from CDFI Fund
 - `cde_allocations` — CDE-level allocation data
 - `fqhc` — HRSA health center data (UDS, site-level)
@@ -72,24 +66,34 @@ Every facility table has `latitude`, `longitude`, and `census_tract_id` columns 
 
 Build in this order. Each phase should produce a working, usable version of the dashboard.
 
-### Phase 1: Charter schools + LEA data (CURRENT)
-- Import charter school data and LEA accountability data into SQLite
-- Charter school survival model integration (existing Python model)
-- Map view: charter schools by location, colored by risk/survival score
-- Filter by state, district, enrollment, demographics, accountability score
-- Census tract overlay showing NMTC eligibility
+### Phase 1: Schools + LEA data ✅
+- Import all public school data (charter + traditional) from NCES via Urban Institute API
+- Charter school survival model integration (heuristic scoring)
+- Map view: schools by location, colored by risk/survival score (charters) or blue (traditional)
+- Filter by state, district, enrollment, demographics, school type
+- Census tract assignment via batch geocoding
 
-### Phase 2: NMTC tracker + census data
-- NMTC project and CDE allocation data
-- Census tract demographics and eligibility indicators
-- Geographic search: "show me NMTC-eligible tracts in [geography] with [characteristics]"
+### Phase 2: NMTC tracker + census data ✅
+- NMTC project and CDE allocation data from CDFI Fund Excel
+- Census tract demographics and 4-tier NMTC eligibility (LIC / Severely Distressed / Deep Distress)
+- Geographic search by address with radius filtering
+
+### Phase 2.5: Unified GIS layout ✅
+- Single-page dashboard with layer toggles (Schools, NMTC Projects, CDEs)
+- Unified map with Folium FeatureGroups and LayerControl
+- Global search across schools, projects, CDEs
+- Side-by-side school comparison
+- Data caching for performance
+- Filterable/sortable data tables with CSV export
 
 ### Phase 3: FQHC/health center data
 - HRSA UDS data integration
-- Health center service area mapping
+- Health center markers as a new map layer (toggle on/off)
+- Add to search and comparison
 
 ### Phase 4: ECE facility data
 - State licensing data for early care and education centers
+- ECE markers as a new map layer
 
 ### Phase 5: 990/philanthropy data
 - IRS 990 data for nonprofit facility operators and funders
@@ -99,7 +103,7 @@ Build in this order. Each phase should produce a working, usable version of the 
 - Authentication and user permissions
 - Migrate to PostgreSQL
 - Performance optimization for concurrent users
-- Documentation
+- Train real survival model from historical closure data
 
 ## Key Features (All Phases)
 
@@ -128,9 +132,23 @@ These features apply across all data sources once built:
 # Run the app locally
 streamlit run app.py
 
-# Run ETL for a specific data source
-python etl/load_charter_schools.py
-python etl/load_census.py
+# Fetch school data (all public schools, all states)
+python etl/fetch_nces_schools.py
+python etl/fetch_nces_schools.py --states CA TX NY    # specific states
+python etl/fetch_nces_schools.py --charter-only       # charters only
+python etl/fetch_nces_schools.py --demographics       # include race data
+
+# Assign census tracts to schools (batch geocoding)
+python etl/assign_census_tracts.py
+python etl/assign_census_tracts.py --states CA --limit 500
+
+# Load census tract demographics
+python etl/load_census_tracts.py --states CA TX NY
+python etl/load_census_tracts.py --all
+
+# Load NMTC project + CDE data from CDFI Fund Excel
+python etl/load_nmtc_data.py --file data/raw/nmtc_public_data_2024.xlsx
+python etl/load_nmtc_data.py --file data/raw/nmtc_public_data_2024.xlsx --sheet-names
 
 # Run tests (when they exist)
 pytest tests/

@@ -119,6 +119,46 @@ def geocode_address(address: str) -> dict:
         return {}
 
 
+def reverse_geocode_tract(lat: float, lon: float) -> str | None:
+    """
+    Look up the census tract for a lat/lon coordinate using the Census Bureau API.
+    Returns an 11-digit census tract FIPS string, or None if lookup fails.
+
+    This is simpler than geocode_address() because it doesn't need a street address —
+    just coordinates. Used for batch-assigning census tracts to schools.
+    """
+    url = "https://geocoding.geo.census.gov/geocoder/geographies/coordinates"
+    params = {
+        "x": lon,
+        "y": lat,
+        "benchmark": "Public_AR_Current",
+        "vintage": "Current_Current",
+        "layers": "Census Tracts",
+        "format": "json",
+    }
+
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+
+        geographies = data.get("result", {}).get("geographies", {})
+        tracts = geographies.get("Census Tracts", [])
+
+        if tracts:
+            tract = tracts[0]
+            state = tract.get("STATE", "")
+            county = tract.get("COUNTY", "")
+            tract_code = tract.get("TRACT", "")
+            if state and county and tract_code:
+                return f"{state}{county}{tract_code}"
+
+    except Exception:
+        pass
+
+    return None
+
+
 def format_census_tract(raw_id: str) -> str:
     """
     Format a raw census tract FIPS code for display.
