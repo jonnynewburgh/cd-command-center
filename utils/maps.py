@@ -93,7 +93,7 @@ def _school_popup_html(row) -> str:
     survival_score = row.get("survival_score")
     score_str = f"{survival_score:.2f}" if survival_score is not None else "—"
     enrollment = row.get("enrollment")
-    enrollment_str = f"{int(enrollment):,}" if enrollment else "—"
+    enrollment_str = f"{int(enrollment):,}" if enrollment and enrollment == enrollment else "—"
 
     return f"""
     <div style="font-family: sans-serif; font-size: 13px; min-width: 200px;">
