@@ -53,6 +53,7 @@ show_schools = st.sidebar.checkbox("Schools", value=True)
 show_nmtc_projects = st.sidebar.checkbox("NMTC Projects", value=True)
 show_cde = st.sidebar.checkbox("CDE Allocations", value=False)
 show_fqhc = st.sidebar.checkbox("Health Centers (FQHCs)", value=False)
+show_ece = st.sidebar.checkbox("ECE / Child Care Centers", value=False)
 
 st.sidebar.markdown("---")
 
@@ -61,7 +62,8 @@ st.sidebar.markdown("**Filters**")
 
 # State filter — combine states from all data sources
 all_states = sorted(set(
-    db.get_school_states() + db.get_census_tract_states() + db.get_fqhc_states()
+    db.get_school_states() + db.get_census_tract_states()
+    + db.get_fqhc_states() + db.get_ece_states()
 ))
 selected_states = st.sidebar.multiselect(
     "State(s)",
@@ -122,10 +124,22 @@ if show_nmtc_projects or show_cde:
 
     min_poverty = st.sidebar.slider("Min poverty rate (%)", 0, 100, 0, key="pov_slider")
 
-# --- FQHC filters (shown when FQHC layer is on) ---
+# --- FQHC filters ---
 if show_fqhc:
     st.sidebar.markdown("**FQHC Filters**")
     fqhc_active_only = st.sidebar.checkbox("Active sites only", value=True, key="fqhc_active")
+
+# --- ECE filters ---
+if show_ece:
+    st.sidebar.markdown("**ECE Filters**")
+    ece_active_only = st.sidebar.checkbox("Active licenses only", value=True, key="ece_active")
+    ece_subsidy_only = st.sidebar.checkbox(
+        "Accepts subsidies (CCDF)", value=False, key="ece_subsidy"
+    )
+    ece_min_capacity = st.sidebar.number_input(
+        "Min capacity", min_value=0, max_value=500, value=0, step=5, key="ece_capacity",
+        help="Show only centers licensed for at least this many children",
+    )
 
 # --- Radius search ---
 st.sidebar.markdown("---")
@@ -221,6 +235,19 @@ if show_fqhc:
             active_only=fqhc_active_only,
         )
 
+# --- ECE data ---
+ece_df = pd.DataFrame()
+if show_ece:
+    if search_active and search_results:
+        ece_df = search_results.get("ece", pd.DataFrame())
+    else:
+        ece_df = db.get_ece_centers(
+            states=state_filter,
+            active_only=ece_active_only,
+            accepts_subsidies=True if ece_subsidy_only else None,
+            min_capacity=ece_min_capacity if ece_min_capacity > 0 else None,
+        )
+
 # --- Census tract data (for metrics, not map markers) ---
 tracts_df = pd.DataFrame()
 if show_nmtc_projects or show_cde:
@@ -260,6 +287,10 @@ if radius_address and radius_address.strip():
             fqhc_df = filter_by_radius(
                 fqhc_df, geocoded["lat"], geocoded["lon"], radius_miles,
             )
+        if not ece_df.empty:
+            ece_df = filter_by_radius(
+                ece_df, geocoded["lat"], geocoded["lon"], radius_miles,
+            )
     else:
         st.sidebar.warning("Could not geocode that address.")
 
@@ -296,6 +327,8 @@ if not show_schools and not show_nmtc_projects:
         col1.metric("CDEs", f"{len(cde_df):,}")
     if show_fqhc:
         col2.metric("Health Centers", f"{len(fqhc_df):,}")
+    if show_ece:
+        col3.metric("ECE Centers", f"{len(ece_df):,}")
 
 # Tract metrics
 if not tracts_df.empty:
@@ -307,13 +340,14 @@ if show_fqhc and not fqhc_df.empty and show_schools or show_nmtc_projects:
     st.caption(f"Health centers: {len(fqhc_df):,}")
 
 # --- No data notice ---
-if schools_df.empty and projects_df.empty and cde_df.empty and fqhc_df.empty:
+if schools_df.empty and projects_df.empty and cde_df.empty and fqhc_df.empty and ece_df.empty:
     st.info(
         "No data loaded yet. Run these commands to load data:\n\n"
         "```\n"
         "python etl/fetch_nces_schools.py --states TX\n"
         "python etl/load_census_tracts.py --states TX\n"
         "python etl/fetch_fqhc.py --states TX\n"
+        "python etl/load_ece_data.py --file data/raw/tx_childcare.csv --state TX\n"
         "```"
     )
 
@@ -332,7 +366,8 @@ map_zoom = 10 if geocoded else (7 if selected_states and len(selected_states) ==
 has_map_data = (
     (not schools_df.empty and show_schools) or
     (not projects_df.empty and show_nmtc_projects) or
-    (not fqhc_df.empty and show_fqhc)
+    (not fqhc_df.empty and show_fqhc) or
+    (not ece_df.empty and show_ece)
 )
 
 if has_map_data:
@@ -340,6 +375,7 @@ if has_map_data:
         schools_df=schools_df if show_schools else None,
         projects_df=projects_df if show_nmtc_projects else None,
         fqhc_df=fqhc_df if show_fqhc else None,
+        ece_df=ece_df if show_ece else None,
         tracts_df=tracts_df,
         center_lat=map_lat,
         center_lon=map_lon,
@@ -395,6 +431,8 @@ if show_cde and not cde_df.empty:
     table_options.append("CDE Allocations")
 if show_fqhc and not fqhc_df.empty:
     table_options.append("Health Centers")
+if show_ece and not ece_df.empty:
+    table_options.append("ECE Centers")
 
 if table_options:
     # Table selector
@@ -581,6 +619,42 @@ if table_options:
             file_name="health_centers.csv", mime="text/csv",
         )
 
+    elif active_table == "ECE Centers":
+        display_df = ece_df.copy()
+        ece_cols = {
+            "provider_name": "Provider",
+            "operator_name": "Operator",
+            "state": "State",
+            "city": "City",
+            "facility_type": "Type",
+            "license_status": "Status",
+            "capacity": "Capacity",
+            "ages_served": "Ages",
+            "accepts_subsidies": "Subsidies",
+            "star_rating": "Quality Rating",
+            "census_tract_id": "Census Tract",
+            "data_source": "Source",
+        }
+        show_cols = [c for c in ece_cols if c in display_df.columns]
+        display_df = display_df[show_cols].rename(columns=ece_cols)
+
+        if "Subsidies" in display_df.columns:
+            display_df["Subsidies"] = display_df["Subsidies"].map({1: "Yes", 0: "No"})
+
+        if table_filter:
+            mask = display_df.apply(
+                lambda row: row.astype(str).str.contains(table_filter, case=False).any(), axis=1
+            )
+            display_df = display_df[mask]
+
+        st.dataframe(display_df, use_container_width=True, height=400)
+
+        csv_bytes = df_to_csv_bytes(display_df)
+        st.download_button(
+            "Download ECE Centers CSV", data=csv_bytes,
+            file_name="ece_centers.csv", mime="text/csv",
+        )
+
 # ---------------------------------------------------------------------------
 # Comparison panel
 # ---------------------------------------------------------------------------
@@ -666,6 +740,41 @@ if show_fqhc and not fqhc_df.empty:
             hc_display.columns = [f"Site {i+1}" for i in range(len(hc_display.columns))]
             st.dataframe(hc_display, use_container_width=True)
 
+# ECE center comparison
+if show_ece and not ece_df.empty:
+    st.markdown("---")
+    st.subheader("Compare ECE Centers")
+
+    ece_names = ece_df["provider_name"].dropna().tolist()
+    if ece_names:
+        selected_ece = st.multiselect(
+            "Select ECE centers to compare (up to 4)",
+            options=ece_names[:500],
+            max_selections=4,
+            key="ece_compare",
+        )
+
+        if len(selected_ece) >= 2:
+            ece_compare_df = ece_df[ece_df["provider_name"].isin(selected_ece)]
+
+            ece_metrics = {
+                "provider_name": "Provider",
+                "operator_name": "Operator",
+                "state": "State",
+                "city": "City",
+                "facility_type": "Type",
+                "license_status": "Status",
+                "capacity": "Capacity",
+                "ages_served": "Ages",
+                "accepts_subsidies": "Subsidies",
+                "star_rating": "Quality Rating",
+                "census_tract_id": "Census Tract",
+            }
+            ece_show = [c for c in ece_metrics if c in ece_compare_df.columns]
+            ece_display = ece_compare_df[ece_show].rename(columns=ece_metrics).T
+            ece_display.columns = [f"Center {i+1}" for i in range(len(ece_display.columns))]
+            st.dataframe(ece_display, use_container_width=True)
+
 # ---------------------------------------------------------------------------
 # Census tract summary (when NMTC layers active)
 # ---------------------------------------------------------------------------
@@ -697,7 +806,7 @@ st.markdown(
     - ✅ **Phase 2**: NMTC tracker + census demographics
     - ✅ **Phase 2.5**: Unified GIS layout + all public schools
     - ✅ **Phase 3**: FQHC / health centers
-    - ⬜ Phase 4: ECE facility data
+    - ✅ **Phase 4**: ECE / child care facility data
     - ⬜ Phase 5: 990 / philanthropy data
     - ⬜ Phase 6: Auth + PostgreSQL migration
     """
