@@ -50,7 +50,7 @@ import db
 
 HRSA_DOWNLOAD_URL = (
     "https://data.hrsa.gov/DataDownload/DD_Files/"
-    "Health_Center_Service_Delivery_and_LookAlikeStates_Sites.zip"
+    "Health_Center_Service_Delivery_and_LookAlike_Sites.csv"
 )
 
 # How long to wait for the download (the file is ~5 MB)
@@ -121,8 +121,11 @@ COLUMN_MAP = {
 ACTIVE_STATUSES = {"active", "open", "operating", "funded", "grantee"}
 
 
-def download_hrsa_zip() -> bytes:
-    """Download the HRSA health center ZIP file and return its raw bytes."""
+def download_hrsa_zip() -> pd.DataFrame:
+    """
+    Download the HRSA health center CSV file directly.
+    (HRSA changed from a ZIP to a direct CSV download in 2025.)
+    """
     print(f"  Downloading HRSA data from:\n    {HRSA_DOWNLOAD_URL}")
     resp = requests.get(HRSA_DOWNLOAD_URL, timeout=DOWNLOAD_TIMEOUT, stream=True)
     resp.raise_for_status()
@@ -134,22 +137,21 @@ def download_hrsa_zip() -> bytes:
         total += len(chunk)
         print(f"\r  Downloaded {total / 1024:.0f} KB...", end="", flush=True)
     print()
-    return b"".join(chunks)
+
+    raw_bytes = b"".join(chunks)
+    try:
+        df = pd.read_csv(io.BytesIO(raw_bytes), dtype=str, low_memory=False)
+    except UnicodeDecodeError:
+        df = pd.read_csv(io.BytesIO(raw_bytes), dtype=str, encoding="latin-1", low_memory=False)
+    return df
 
 
-def extract_csv_from_zip(zip_bytes: bytes) -> pd.DataFrame:
+def extract_csv_from_zip(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Open the ZIP bytes in memory and return the first CSV as a DataFrame.
-    HRSA ships one CSV inside the ZIP.
+    No-op passthrough — previously extracted CSV from a ZIP.
+    HRSA now serves a direct CSV so download_hrsa_zip() returns a DataFrame.
+    Kept to avoid changing the call site.
     """
-    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-        csv_names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
-        if not csv_names:
-            raise ValueError(f"No CSV found in ZIP. Contents: {zf.namelist()}")
-        print(f"  Reading '{csv_names[0]}' from ZIP...")
-        with zf.open(csv_names[0]) as f:
-            # HRSA files are often latin-1 encoded
-            df = pd.read_csv(f, dtype=str, encoding="latin-1", low_memory=False)
     return df
 
 
