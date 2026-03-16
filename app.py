@@ -325,6 +325,53 @@ def _fmt_pct(value, decimals=1):
         return str(value)
 
 
+def _render_990_section(rec: dict):
+    """
+    Render a 990 financial health panel for a nonprofit facility.
+    Pass the dict returned by db.get_990_for_school() or db.get_990_for_fqhc().
+    Does nothing if the dict is empty (no 990 data found yet).
+    """
+    if not rec:
+        st.caption(
+            "No 990 data linked yet. Run `python etl/fetch_990_data.py` to fetch from ProPublica."
+        )
+        return
+
+    revenue  = rec.get("total_revenue")
+    expenses = rec.get("total_expenses")
+    assets   = rec.get("total_assets")
+    net      = rec.get("net_income")
+    prog_exp = rec.get("program_service_expenses")
+    tax_year = rec.get("tax_year")
+
+    # Program expense ratio = program spending / total expenses
+    # A healthy nonprofit typically spends 75%+ on programs
+    prog_ratio = None
+    if prog_exp and expenses and float(expenses) > 0:
+        prog_ratio = float(prog_exp) / float(expenses)
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Total Revenue",   _fmt_dollar(revenue))
+    m2.metric("Total Expenses",  _fmt_dollar(expenses))
+    m3.metric("Net Income",      _fmt_dollar(net))
+    m4.metric("Total Assets",    _fmt_dollar(assets))
+
+    col_l, col_r = st.columns(2)
+    with col_l:
+        st.markdown(f"**Program Expense Ratio:** {_fmt_pct(prog_ratio * 100) if prog_ratio is not None else '—'}")
+        st.caption("Share of spending on mission programs (higher = better)")
+    with col_r:
+        st.markdown(f"**Officer Compensation:** {_fmt_dollar(rec.get('officer_compensation'))}")
+        st.caption(f"**NTEE Code:** {rec.get('ntee_code') or '—'} · **Tax Year:** {tax_year or '—'}")
+
+    if rec.get("filing_pdf_url"):
+        st.markdown(f"[View 990 PDF on ProPublica ↗]({rec['filing_pdf_url']})")
+    elif rec.get("ein"):
+        st.markdown(
+            f"[View on ProPublica ↗](https://projects.propublica.org/nonprofits/organizations/{rec['ein']})"
+        )
+
+
 def _render_census_context(census_tract_id):
     """Show census tract demographics and NMTC eligibility for a given tract ID."""
     if not census_tract_id:
@@ -435,6 +482,15 @@ def _render_school_detail(school_id):
         else:
             st.caption("No LEA ID available.")
 
+    if is_charter:
+        st.markdown("---")
+        st.markdown("**990 / Financial Health**")
+        nces_id = school.get("nces_id")
+        if nces_id:
+            _render_990_section(db.get_990_for_school(nces_id))
+        else:
+            st.caption("No NCES ID — cannot look up 990.")
+
     st.markdown("---")
     st.markdown("**Census Tract Context**")
     _render_census_context(school.get("census_tract_id"))
@@ -471,6 +527,10 @@ def _render_fqhc_detail(bhcmis_id):
     m1.metric("Site Type", site.get("site_type", "—"))
     m2.metric("Total Patients", f"{int(site['total_patients']):,}" if site.get("total_patients") else "—")
     m3.metric("Patients ≤200% FPL", f"{int(site['patients_below_200pct_poverty']):,}" if site.get("patients_below_200pct_poverty") else "—")
+
+    st.markdown("---")
+    st.markdown("**990 / Financial Health**")
+    _render_990_section(db.get_990_for_fqhc(bhcmis_id))
 
     st.markdown("---")
     st.markdown("**Census Tract Context**")
@@ -1148,7 +1208,7 @@ Traditional public schools do not receive survival scores.
         - ✅ **Phase 2.5**: Unified GIS layout + all public schools
         - ✅ **Phase 3**: FQHC / health centers
         - ✅ **Phase 4**: ECE / child care facility data
-        - ⬜ Phase 5: 990 / philanthropy data
+        - 🔄 **Phase 5**: 990 / philanthropy data (in progress)
         - ⬜ Phase 6: Auth + PostgreSQL migration
         """
     )

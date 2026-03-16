@@ -307,6 +307,44 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ece_status         ON ece_centers(license_status)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ece_capacity       ON ece_centers(capacity)")
 
+    # irs_990 — IRS Form 990 data for nonprofit facility operators and funders
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS irs_990 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ein TEXT UNIQUE NOT NULL,          -- 9-digit EIN (no dashes)
+            org_name TEXT,
+            city TEXT,
+            state TEXT,
+            ntee_code TEXT,                    -- e.g. 'B29' = charter school, 'E32' = community health
+            subsection_code INTEGER,           -- 3 = 501(c)(3), 4 = 501(c)(4), etc.
+            -- Financial data from most recent 990 filing
+            total_revenue REAL,
+            total_expenses REAL,
+            total_assets REAL,
+            net_income REAL,                   -- total_revenue - total_expenses
+            program_service_revenue REAL,      -- revenue from mission-related programs
+            program_service_expenses REAL,     -- spending on mission-related programs
+            officer_compensation REAL,         -- top officer/executive compensation
+            tax_year INTEGER,                  -- fiscal year the financials cover
+            filing_pdf_url TEXT,               -- link to the actual 990 PDF on ProPublica
+            -- Metadata
+            data_source TEXT DEFAULT 'ProPublica',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_990_state ON irs_990(state)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_990_ntee  ON irs_990(ntee_code)")
+
+    # Add ein column to schools and fqhc tables if it doesn't exist yet.
+    # ALTER TABLE only runs on existing DBs — new DBs get the column from init.
+    # We use try/except because SQLite has no "ADD COLUMN IF NOT EXISTS".
+    for table, col in [("schools", "ein"), ("fqhc", "ein")]:
+        try:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
+        except Exception:
+            pass  # column already exists
+
     conn.commit()
     conn.close()
 
@@ -1366,3 +1404,108 @@ def update_school_census_tract(nces_id: str, census_tract_id: str):
         except Exception:
             continue
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# IRS 990 queries
+# ---------------------------------------------------------------------------
+
+def upsert_990(record: dict):
+    """Insert or update a 990 record (keyed on ein)."""
+    conn = get_connection()
+    cur = conn.cursor()
+    columns = list(record.keys())
+    values = list(record.values())
+    placeholders = ",".join("?" * len(values))
+    update_clause = ",".join(
+        f"{col}=excluded.{col}" for col in columns if col != "ein"
+    )
+    cur.execute(
+        f"INSERT INTO irs_990 ({','.join(columns)}) VALUES ({placeholders}) "
+        f"ON CONFLICT(ein) DO UPDATE SET {update_clause}, updated_at=CURRENT_TIMESTAMP",
+        values,
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_990_by_ein(ein: str) -> dict:
+    """Look up a single 990 record by EIN. Returns a dict or empty dict."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM irs_990 WHERE ein = ?", (ein,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return {}
+    cols = [d[0] for d in cur.description]
+    return dict(zip(cols, row))
+
+
+def get_990_for_school(nces_id: str) -> dict:
+    """
+    Return the 990 record linked to a school via its ein column.
+    Returns empty dict if the school has no EIN or no 990 record.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT ein FROM schools WHERE nces_id = ?", (nces_id,))
+    row = cur.fetchone()
+    conn.close()
+    if not row or not row[0]:
+        return {}
+    return get_990_by_ein(row[0])
+
+
+def get_990_for_fqhc(bhcmis_id: str) -> dict:
+    """
+    Return the 990 record linked to a FQHC site via its ein column.
+    Returns empty dict if the site has no EIN or no 990 record.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT ein FROM fqhc WHERE bhcmis_id = ?", (bhcmis_id,))
+    row = cur.fetchone()
+    conn.close()
+    if not row or not row[0]:
+        return {}
+    return get_990_by_ein(row[0])
+
+
+def link_ein_to_school(nces_id: str, ein: str):
+    """Store an EIN on a school record so it can be joined to irs_990."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE schools SET ein = ?, updated_at = CURRENT_TIMESTAMP WHERE nces_id = ?",
+        (ein, nces_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def link_ein_to_fqhc(bhcmis_id: str, ein: str):
+    """Store an EIN on a FQHC record so it can be joined to irs_990."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("UPDATE fqhc SET ein = ? WHERE bhcmis_id = ?", (ein, bhcmis_id))
+    conn.commit()
+    conn.close()
+
+
+def get_990_summary() -> dict:
+    """Return aggregate counts for the admin/about panel."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM irs_990")
+    total = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM schools WHERE ein IS NOT NULL AND is_charter = 1")
+    linked_schools = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM fqhc WHERE ein IS NOT NULL")
+    linked_fqhc = cur.fetchone()[0]
+    conn.close()
+    return {
+        "total_990_records": total,
+        "linked_charter_schools": linked_schools,
+        "linked_fqhc_sites": linked_fqhc,
+    }
