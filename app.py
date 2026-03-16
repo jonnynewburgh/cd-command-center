@@ -49,13 +49,13 @@ search_query = st.sidebar.text_input(
 
 st.sidebar.markdown("---")
 
-# --- Layer toggles ---
+# --- Layer toggles — alphabetical order, all on by default ---
 st.sidebar.markdown("**Data Layers**")
-show_schools = st.sidebar.checkbox("Schools", value=True)
+show_ece = st.sidebar.checkbox("ECE / Child Care Centers", value=True)
+show_fqhc = st.sidebar.checkbox("Health Centers (FQHCs)", value=True)
 show_nmtc_projects = st.sidebar.checkbox("NMTC Projects", value=True)
-show_cde = st.sidebar.checkbox("CDE Allocations", value=False)
-show_fqhc = st.sidebar.checkbox("Health Centers (FQHCs)", value=False)
-show_ece = st.sidebar.checkbox("ECE / Child Care Centers", value=False)
+show_cde = st.sidebar.checkbox("CDE Allocations", value=True)
+show_schools = st.sidebar.checkbox("Schools", value=True)
 
 st.sidebar.markdown("---")
 
@@ -74,54 +74,82 @@ selected_states = st.sidebar.multiselect(
     help="Leave empty to show all states",
 )
 
-# --- School filters (shown when Schools layer is on) ---
+# NMTC-eligible tracts filter — applies across all asset classes
+nmtc_eligible_filter = st.sidebar.checkbox(
+    "NMTC-eligible tracts only",
+    value=False,
+    key="nmtc_elig_filter",
+    help="Show only facilities whose census tract qualifies as LIC, Severely Distressed, or Deep Distress",
+)
+
+# --- School filters (collapsed by default so they don't dominate the sidebar) ---
 if show_schools:
-    st.sidebar.markdown("**School Filters**")
+    school_expander = st.sidebar.expander("School filters", expanded=False)
+    with school_expander:
+        # Charter vs all
+        school_type_filter = st.radio(
+            "School type",
+            ["All public schools", "Charter schools only", "Traditional public only"],
+            index=0,
+        )
 
-    # Charter vs all
-    school_type_filter = st.sidebar.radio(
-        "School type",
-        ["All public schools", "Charter schools only", "Traditional public only"],
-        index=0,
-    )
+        selected_status = st.multiselect(
+            "Status",
+            ["Open", "Closed", "Pending"],
+            default=["Open"],
+        )
 
-    selected_status = st.sidebar.multiselect(
-        "Status",
-        ["Open", "Closed", "Pending"],
-        default=["Open"],
-    )
+        # Enrollment slider — 2,000 on the right means "no upper limit"
+        enroll_range = st.slider(
+            "Enrollment",
+            min_value=0,
+            max_value=2000,
+            value=(0, 2000),
+            step=50,
+            help="Drag handles to filter by enrollment. Right edge (2,000) includes all larger schools.",
+        )
 
-    # Enrollment slider — 2,000 on the right means "no upper limit"
-    enroll_range = st.sidebar.slider(
-        "Enrollment",
-        min_value=0,
-        max_value=2000,
-        value=(0, 2000),
-        step=50,
-        help="Drag handles to filter by enrollment. Right edge (2,000) includes all larger schools.",
-    )
+        # Risk tier (charter schools only)
+        if school_type_filter != "Traditional public only":
+            st.markdown("**Survival Risk**")
+            risk_low = st.checkbox("Low risk", value=True, key="risk_low")
+            risk_med = st.checkbox("Medium risk", value=True, key="risk_med")
+            risk_high = st.checkbox("High risk", value=True, key="risk_high")
+            risk_unknown = st.checkbox("Unknown", value=True, key="risk_unk")
 
-    # Risk tier (charter schools only)
-    if school_type_filter != "Traditional public only":
-        st.sidebar.markdown("**Survival Risk**")
-        risk_low = st.sidebar.checkbox("Low risk", value=True, key="risk_low")
-        risk_med = st.sidebar.checkbox("Medium risk", value=True, key="risk_med")
-        risk_high = st.sidebar.checkbox("High risk", value=True, key="risk_high")
-        risk_unknown = st.sidebar.checkbox("Unknown", value=True, key="risk_unk")
+        # FRL filter
+        frl_threshold = st.slider(
+            "Min % Free/Reduced Lunch", 0, 100, 0,
+            help="Show only schools with at least this % FRL",
+        )
 
-    # FRL filter
-    frl_threshold = st.sidebar.slider(
-        "Min % Free/Reduced Lunch", 0, 100, 0,
-        help="Show only schools with at least this % FRL",
-    )
+        # Survival Score explainer — tucked away here since it's charter-specific
+        with st.expander("How is the Survival Score calculated?"):
+            st.markdown("""
+The survival score estimates the probability (0–100%) that a charter school
+remains open over the next few years. It is **only calculated for charter schools**.
 
-    # NMTC-eligible tracts filter — key for deal origination
-    nmtc_eligible_filter = st.sidebar.checkbox(
-        "NMTC-eligible tracts only",
-        value=False,
-        key="nmtc_elig_schools",
-        help="Show only schools whose census tract qualifies as LIC, Severely Distressed, or Deep Distress",
-    )
+**Current method: Rule-based heuristic** (no trained model yet)
+
+| Factor | Effect on Score |
+|--------|----------------|
+| Enrollment > 500 | +8% |
+| Enrollment > 200 | +4% |
+| Enrollment < 100 | -5% |
+| Open < 3 years | -10% (young schools fail more) |
+| Open > 10 years | +6% |
+| FRL > 80% | -5% |
+| LEA score > 80 | +4% |
+| LEA score < 50 | -5% |
+
+**Risk tiers:**
+- **Low** (score >= 65%): School appears stable
+- **Medium** (40–65%): Some risk factors present
+- **High** (< 40%): Multiple risk factors or already closed
+
+Scores will improve when a trained model is built from historical closure data.
+Traditional public schools do not receive survival scores.
+            """)
 
 # --- NMTC filters (shown when NMTC layer is on) ---
 if show_nmtc_projects or show_cde:
@@ -711,46 +739,13 @@ with tab_dashboard:
     if search_active:
         st.info(f"Showing search results for: **{search_query}**")
 
-    # --- Summary metrics ---
-    col1, col2, col3, col4 = st.columns(4)
-
-    if show_schools:
-        col1.metric("Schools", f"{len(schools_df):,}")
-        if not schools_df.empty:
-            open_count = (schools_df["school_status"] == "Open").sum() if "school_status" in schools_df.columns else 0
-            col2.metric("Open", f"{open_count:,}")
-            if "nmtc_eligibility_tier" in schools_df.columns:
-                nmtc_count = (schools_df["nmtc_eligibility_tier"].isin(
-                    ["LIC", "Severely Distressed", "Deep Distress"]
-                )).sum()
-                col3.metric("In NMTC-eligible tracts", f"{nmtc_count:,}")
-            if "has_990" in schools_df.columns:
-                has_990_count = (schools_df["has_990"] == 1).sum()
-                col4.metric("With 990 data", f"{has_990_count:,}")
-        else:
-            col2.metric("Open", "0")
-
-    if show_nmtc_projects:
-        if not projects_df.empty:
-            col3.metric("NMTC Projects", f"{len(projects_df):,}")
-            if "qlici_amount" in projects_df.columns:
-                total_qlici = projects_df["qlici_amount"].sum()
-                col4.metric("Total QLICI", f"${total_qlici/1e6:.0f}M" if total_qlici and total_qlici > 0 else "$0")
-        else:
-            with col3:
-                st.info(
-                    "**No NMTC project data loaded.**\n\n"
-                    "Download the CDFI Fund public data release and run:\n"
-                    "`python etl/load_nmtc_data.py --file data/raw/nmtc_public_data_2024.xlsx`",
-                )
-
-    if not show_schools and not show_nmtc_projects:
-        if show_cde:
-            col1.metric("CDEs", f"{len(cde_df):,}")
-        if show_fqhc:
-            col2.metric("Health Centers", f"{len(fqhc_df):,}")
-        if show_ece:
-            col3.metric("ECE Centers", f"{len(ece_df):,}")
+    # --- Summary metrics — one count per asset class, equal weight ---
+    m_ece, m_fqhc, m_nmtc, m_cde, m_schools = st.columns(5)
+    m_ece.metric("ECE Centers", f"{len(ece_df):,}")
+    m_fqhc.metric("Health Centers", f"{len(fqhc_df):,}")
+    m_nmtc.metric("NMTC Projects", f"{len(projects_df):,}")
+    m_cde.metric("CDE Allocations", f"{len(cde_df):,}")
+    m_schools.metric("Schools", f"{len(schools_df):,}")
 
     # Tract metrics
     if not tracts_df.empty:
@@ -809,346 +804,158 @@ with tab_dashboard:
         )
         st_folium(unified_map, width="100%", height=500, returned_objects=[])
 
-    # -----------------------------------------------------------------------
-    # Survival Model Explanation (for charter school users)
-    # -----------------------------------------------------------------------
-
-    if show_schools:
-        with st.expander("How is the Survival Score calculated?"):
-            st.markdown("""
-The survival score estimates the probability (0–100%) that a charter school
-remains open over the next few years. It is **only calculated for charter schools**.
-
-**Current method: Rule-based heuristic** (no trained model yet)
-
-| Factor | Effect on Score |
-|--------|----------------|
-| Enrollment > 500 | +8% |
-| Enrollment > 200 | +4% |
-| Enrollment < 100 | -5% |
-| Open < 3 years | -10% (young schools fail more) |
-| Open > 10 years | +6% |
-| FRL > 80% | -5% |
-| LEA score > 80 | +4% |
-| LEA score < 50 | -5% |
-
-**Risk tiers:**
-- **Low** (score >= 65%): School appears stable
-- **Medium** (40–65%): Some risk factors present
-- **High** (< 40%): Multiple risk factors or already closed
-
-Scores will improve when a trained model is built from historical closure data.
-Traditional public schools do not receive survival scores.
-            """)
 
     # -----------------------------------------------------------------------
-    # Data table — switchable between Schools / Projects / CDEs
+    # Data table — unified view across all active asset classes
     # -----------------------------------------------------------------------
 
     st.markdown("---")
 
-    table_options = []
-    if show_schools and not schools_df.empty:
-        table_options.append("Schools")
-    if show_nmtc_projects and not projects_df.empty:
-        table_options.append("NMTC Projects")
-    if show_cde and not cde_df.empty:
-        table_options.append("CDE Allocations")
-    if show_fqhc and not fqhc_df.empty:
-        table_options.append("Health Centers")
-    if show_ece and not ece_df.empty:
-        table_options.append("ECE Centers")
+    # Build a unified table from all active datasets.
+    # Each asset class contributes: Asset Type, Name, State, City, Key Metric.
+    # Listed in this order so no single class dominates: ECE → FQHCs → NMTC → CDE → Schools.
+    unified_frames = []
 
-    if table_options:
-        active_table = st.radio(
-            "Showing",
-            table_options,
-            horizontal=True,
+    if show_ece and not ece_df.empty:
+        ece_names = ece_df.get("provider_name", pd.Series([""] * len(ece_df), index=ece_df.index))
+        ece_cap = ece_df.get("capacity", pd.Series([None] * len(ece_df), index=ece_df.index))
+        unified_frames.append(pd.DataFrame({
+            "Asset Type": "ECE Center",
+            "Name": ece_names,
+            "State": ece_df.get("state", pd.Series([""] * len(ece_df), index=ece_df.index)),
+            "City": ece_df.get("city", pd.Series([""] * len(ece_df), index=ece_df.index)),
+            "Key Metric": ece_cap.apply(lambda x: f"{int(x):,} capacity" if pd.notna(x) and x else "—"),
+            "NMTC Tier": ece_df.get("nmtc_eligibility_tier", pd.Series([""] * len(ece_df), index=ece_df.index)),
+            "_id_type": "ece",
+            "_id_val": ece_df.get("license_id", pd.Series([""] * len(ece_df), index=ece_df.index)).astype(str),
+        }))
+
+    if show_fqhc and not fqhc_df.empty:
+        # Prefer site_name, fall back to health_center_name
+        if "site_name" in fqhc_df.columns and "health_center_name" in fqhc_df.columns:
+            fqhc_names = fqhc_df["site_name"].where(fqhc_df["site_name"].notna() & (fqhc_df["site_name"] != ""), fqhc_df["health_center_name"])
+        else:
+            fqhc_names = fqhc_df.get("site_name", fqhc_df.get("health_center_name", pd.Series([""] * len(fqhc_df), index=fqhc_df.index)))
+        fqhc_patients = fqhc_df.get("total_patients", pd.Series([None] * len(fqhc_df), index=fqhc_df.index))
+        unified_frames.append(pd.DataFrame({
+            "Asset Type": "Health Center",
+            "Name": fqhc_names,
+            "State": fqhc_df.get("state", pd.Series([""] * len(fqhc_df), index=fqhc_df.index)),
+            "City": fqhc_df.get("city", pd.Series([""] * len(fqhc_df), index=fqhc_df.index)),
+            "Key Metric": fqhc_patients.apply(lambda x: f"{int(x):,} patients" if pd.notna(x) and x else "—"),
+            "NMTC Tier": fqhc_df.get("nmtc_eligibility_tier", pd.Series([""] * len(fqhc_df), index=fqhc_df.index)),
+            "_id_type": "fqhc",
+            "_id_val": fqhc_df.get("bhcmis_id", pd.Series([""] * len(fqhc_df), index=fqhc_df.index)).astype(str),
+        }))
+
+    if show_nmtc_projects and not projects_df.empty:
+        proj_qlici = projects_df.get("qlici_amount", pd.Series([None] * len(projects_df), index=projects_df.index))
+        unified_frames.append(pd.DataFrame({
+            "Asset Type": "NMTC Project",
+            "Name": projects_df.get("project_name", pd.Series([""] * len(projects_df), index=projects_df.index)),
+            "State": projects_df.get("state", pd.Series([""] * len(projects_df), index=projects_df.index)),
+            "City": projects_df.get("city", pd.Series([""] * len(projects_df), index=projects_df.index)),
+            "Key Metric": proj_qlici.apply(lambda x: f"${x/1e6:.1f}M QLICI" if pd.notna(x) and x else "—"),
+            "NMTC Tier": projects_df.get("nmtc_eligibility_tier", pd.Series([""] * len(projects_df), index=projects_df.index)),
+            "_id_type": "nmtc",
+            "_id_val": projects_df.get("cdfi_project_id", pd.Series([""] * len(projects_df), index=projects_df.index)).astype(str),
+        }))
+
+    if show_cde and not cde_df.empty:
+        cde_alloc = cde_df.get("allocation_amount", pd.Series([None] * len(cde_df), index=cde_df.index))
+        unified_frames.append(pd.DataFrame({
+            "Asset Type": "CDE Allocation",
+            "Name": cde_df.get("cde_name", pd.Series([""] * len(cde_df), index=cde_df.index)),
+            "State": cde_df.get("state", pd.Series([""] * len(cde_df), index=cde_df.index)),
+            "City": cde_df.get("city", pd.Series([""] * len(cde_df), index=cde_df.index)),
+            "Key Metric": cde_alloc.apply(lambda x: f"${x/1e6:.1f}M allocation" if pd.notna(x) and x else "—"),
+            "NMTC Tier": "",
+            "_id_type": "cde",
+            "_id_val": cde_df.get("id", pd.Series([""] * len(cde_df), index=cde_df.index)).astype(str),
+        }))
+
+    if show_schools and not schools_df.empty:
+        sch_enroll = schools_df.get("enrollment", pd.Series([None] * len(schools_df), index=schools_df.index))
+        unified_frames.append(pd.DataFrame({
+            "Asset Type": "School",
+            "Name": schools_df.get("school_name", pd.Series([""] * len(schools_df), index=schools_df.index)),
+            "State": schools_df.get("state", pd.Series([""] * len(schools_df), index=schools_df.index)),
+            "City": schools_df.get("city", pd.Series([""] * len(schools_df), index=schools_df.index)),
+            "Key Metric": sch_enroll.apply(lambda x: f"{int(x):,} students" if pd.notna(x) and x else "—"),
+            "NMTC Tier": schools_df.get("nmtc_eligibility_tier", pd.Series([""] * len(schools_df), index=schools_df.index)),
+            "_id_type": "school",
+            "_id_val": schools_df.get("id", pd.Series([None] * len(schools_df), index=schools_df.index)).apply(
+                lambda x: str(int(x)) if pd.notna(x) else ""
+            ),
+        }))
+
+    if unified_frames:
+        unified_df = pd.concat(unified_frames, ignore_index=True)
+
+        # NMTC Eligible column — checkmark if the census tract qualifies
+        unified_df["NMTC Eligible"] = unified_df["NMTC Tier"].isin(
+            ["LIC", "Severely Distressed", "Deep Distress"]
+        ).map({True: "✓", False: ""})
+
+        # Asset type filter
+        active_types = sorted(unified_df["Asset Type"].unique().tolist())
+        selected_asset_types = st.multiselect(
+            "Asset types shown",
+            options=active_types,
+            default=active_types,
+            key="unified_type_filter",
             label_visibility="collapsed",
         )
+        if selected_asset_types:
+            unified_df = unified_df[unified_df["Asset Type"].isin(selected_asset_types)]
 
+        # Text filter
         table_filter = st.text_input(
             "Filter table",
             placeholder="Type to filter rows...",
             label_visibility="collapsed",
         )
-
-        if active_table == "Schools":
-            display_df = schools_df.copy()
-            display_cols = {
-                "school_name": "School",
-                "state": "State",
-                "city": "City",
-                "enrollment": "Enrollment",
-                "is_charter": "Charter",
-                "school_status": "Status",
-                "survival_score": "Survival Score",
-                "survival_risk_tier": "Risk",
-                "pct_free_reduced_lunch": "% FRL",
-                "pct_black": "% Black",
-                "pct_hispanic": "% Hispanic",
-                "nmtc_eligibility_tier": "NMTC Tier",
-                "has_990": "990",
-                "accountability_score": "LEA Score",
-                "lea_name": "LEA",
-                "census_tract_id": "Census Tract",
-            }
-            show_cols = [c for c in display_cols if c in display_df.columns]
-            display_df = display_df[show_cols].rename(columns=display_cols)
-
-            if "Charter" in display_df.columns:
-                display_df["Charter"] = display_df["Charter"].map({1: "Yes", 0: "No", None: "—"})
-            if "990" in display_df.columns:
-                display_df["990"] = display_df["990"].map({1: "✓", 0: "", None: ""})
-
-            if table_filter:
-                mask = display_df.apply(
-                    lambda row: row.astype(str).str.contains(table_filter, case=False).any(), axis=1
-                )
-                display_df = display_df[mask]
-
-            st.dataframe(display_df, use_container_width=True, height=400)
-
-            csv_bytes = df_to_csv_bytes(display_df)
-            st.download_button(
-                "Download Schools CSV", data=csv_bytes,
-                file_name="schools_filtered.csv", mime="text/csv",
+        if table_filter:
+            search_cols = unified_df[["Asset Type", "Name", "State", "City", "Key Metric"]]
+            mask = search_cols.apply(
+                lambda row: row.astype(str).str.contains(table_filter, case=False).any(), axis=1
             )
+            unified_df = unified_df[mask]
 
-            # --- View in Site Detail: pick a school to load in the detail tab ---
-            if not schools_df.empty and "school_name" in schools_df.columns:
-                school_name_opts = schools_df["school_name"].dropna().tolist()[:500]
-                detail_school = st.selectbox(
-                    "Select a school to view in detail →",
-                    ["—"] + school_name_opts,
-                    key="school_detail_select",
-                    label_visibility="collapsed",
-                )
-                if detail_school != "—":
-                    match = schools_df[schools_df["school_name"] == detail_school]
-                    if not match.empty:
-                        school_id_val = match.iloc[0].get("id")
-                        if school_id_val is not None:
-                            st.session_state["detail_site"] = {"type": "school", "id": int(school_id_val)}
-                            st.info("✓ School selected. Switch to the **Site Detail** tab above to view full details.")
+        # Display the unified table
+        display_cols = [c for c in ["Asset Type", "Name", "State", "City", "Key Metric", "NMTC Eligible"] if c in unified_df.columns]
+        st.dataframe(unified_df[display_cols], use_container_width=True, height=400)
 
-            # Enrollment distribution chart
-            if "enrollment" in schools_df.columns:
-                enroll_vals = schools_df["enrollment"].dropna()
-                if not enroll_vals.empty:
-                    st.markdown("**Enrollment distribution**")
-                    chart_df = pd.DataFrame({
-                        "enrollment": enroll_vals.clip(upper=2000).astype(int)
-                    })
-                    fig = px.histogram(
-                        chart_df,
-                        x="enrollment",
-                        nbins=40,
-                        labels={"enrollment": "Enrollment", "count": "Schools"},
-                        color_discrete_sequence=["#1f77b4"],
-                    )
-                    fig.update_layout(
-                        height=200,
-                        margin=dict(l=0, r=0, t=10, b=0),
-                        xaxis=dict(
-                            range=[0, 2100],
-                            tickvals=[0, 500, 1000, 1500, 2000],
-                            ticktext=["0", "500", "1,000", "1,500", "2,000+"],
-                        ),
-                        yaxis_title="Schools",
-                        bargap=0.05,
-                        showlegend=False,
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-                    above_2k = (enroll_vals > 2000).sum()
-                    if above_2k:
-                        st.caption(f"{above_2k:,} school{'s' if above_2k != 1 else ''} with enrollment above 2,000 shown in the last bar.")
+        # CSV download
+        csv_bytes = df_to_csv_bytes(unified_df[display_cols])
+        st.download_button(
+            "Download CSV", data=csv_bytes,
+            file_name="cd_command_center_data.csv", mime="text/csv",
+        )
 
-        elif active_table == "NMTC Projects":
-            display_df = projects_df.copy()
-            proj_cols = {
-                "project_name": "Project",
-                "state": "State",
-                "city": "City",
-                "project_type": "Type",
-                "qlici_amount": "QLICI Amount",
-                "total_investment": "Total Investment",
-                "fiscal_year": "Year",
-                "cde_name": "CDE",
-                "census_tract_id": "Census Tract",
-                "jobs_created": "Jobs Created",
-            }
-            show_cols = [c for c in proj_cols if c in display_df.columns]
-            display_df = display_df[show_cols].rename(columns=proj_cols)
+        # View in Site Detail — pick any row from the filtered table
+        if not unified_df.empty and "_id_type" in unified_df.columns:
+            detail_labels = unified_df.apply(
+                lambda r: f"{r['Asset Type']}: {r['Name']} ({r.get('City', '')}, {r.get('State', '')})",
+                axis=1,
+            ).tolist()[:300]
+            id_types = unified_df["_id_type"].tolist()[:300]
+            id_vals = unified_df["_id_val"].tolist()[:300]
+            # Build a label → (type, id) map (last occurrence wins for duplicate names)
+            detail_map = {label: (t, v) for label, t, v in zip(detail_labels, id_types, id_vals)}
 
-            if table_filter:
-                mask = display_df.apply(
-                    lambda row: row.astype(str).str.contains(table_filter, case=False).any(), axis=1
-                )
-                display_df = display_df[mask]
-
-            st.dataframe(display_df, use_container_width=True, height=400)
-
-            csv_bytes = df_to_csv_bytes(display_df)
-            st.download_button(
-                "Download Projects CSV", data=csv_bytes,
-                file_name="nmtc_projects.csv", mime="text/csv",
+            chosen_label = st.selectbox(
+                "Select a row to view in Site Detail →",
+                ["—"] + detail_labels,
+                key="unified_detail_select",
+                label_visibility="collapsed",
             )
-
-            # --- View in Site Detail ---
-            if not projects_df.empty and "project_name" in projects_df.columns:
-                proj_name_opts = projects_df["project_name"].dropna().tolist()[:500]
-                detail_proj = st.selectbox(
-                    "Select a project to view in detail →",
-                    ["—"] + proj_name_opts,
-                    key="nmtc_detail_select",
-                    label_visibility="collapsed",
-                )
-                if detail_proj != "—":
-                    match = projects_df[projects_df["project_name"] == detail_proj]
-                    if not match.empty:
-                        proj_id_val = match.iloc[0].get("cdfi_project_id")
-                        if proj_id_val is not None:
-                            st.session_state["detail_site"] = {"type": "nmtc", "id": str(proj_id_val)}
-                            st.info("✓ Project selected. Switch to the **Site Detail** tab above to view full details.")
-
-        elif active_table == "CDE Allocations":
-            display_df = cde_df.copy()
-            cde_cols = {
-                "cde_name": "CDE Name",
-                "state": "State",
-                "city": "City",
-                "allocation_amount": "Allocation Amount",
-                "allocation_year": "Year",
-                "round_number": "Round",
-                "service_areas": "Service Areas",
-            }
-            show_cols = [c for c in cde_cols if c in display_df.columns]
-            display_df = display_df[show_cols].rename(columns=cde_cols)
-
-            if table_filter:
-                mask = display_df.apply(
-                    lambda row: row.astype(str).str.contains(table_filter, case=False).any(), axis=1
-                )
-                display_df = display_df[mask]
-
-            st.dataframe(display_df, use_container_width=True, height=400)
-
-            csv_bytes = df_to_csv_bytes(display_df)
-            st.download_button(
-                "Download CDE CSV", data=csv_bytes,
-                file_name="cde_allocations.csv", mime="text/csv",
-            )
-
-        elif active_table == "Health Centers":
-            display_df = fqhc_df.copy()
-            hc_cols = {
-                "health_center_name": "Health Center",
-                "site_name": "Site Name",
-                "state": "State",
-                "city": "City",
-                "site_type": "Site Type",
-                "health_center_type": "HC Type",
-                "total_patients": "Total Patients",
-                "census_tract_id": "Census Tract",
-                "is_active": "Active",
-            }
-            show_cols = [c for c in hc_cols if c in display_df.columns]
-            display_df = display_df[show_cols].rename(columns=hc_cols)
-
-            if "Active" in display_df.columns:
-                display_df["Active"] = display_df["Active"].map({1: "Yes", 0: "No"})
-
-            if table_filter:
-                mask = display_df.apply(
-                    lambda row: row.astype(str).str.contains(table_filter, case=False).any(), axis=1
-                )
-                display_df = display_df[mask]
-
-            st.dataframe(display_df, use_container_width=True, height=400)
-
-            csv_bytes = df_to_csv_bytes(display_df)
-            st.download_button(
-                "Download Health Centers CSV", data=csv_bytes,
-                file_name="health_centers.csv", mime="text/csv",
-            )
-
-            # --- View in Site Detail ---
-            if not fqhc_df.empty and "bhcmis_id" in fqhc_df.columns:
-                hc_display_names = fqhc_df.apply(
-                    lambda r: r.get("site_name") or r.get("health_center_name") or str(r.get("bhcmis_id", "")), axis=1
-                ).tolist()[:500]
-                detail_hc = st.selectbox(
-                    "Select a health center to view in detail →",
-                    ["—"] + hc_display_names,
-                    key="fqhc_detail_select",
-                    label_visibility="collapsed",
-                )
-                if detail_hc != "—":
-                    mask = (
-                        (fqhc_df.get("site_name", pd.Series()) == detail_hc) |
-                        (fqhc_df.get("health_center_name", pd.Series()) == detail_hc)
-                    )
-                    match = fqhc_df[mask]
-                    if not match.empty:
-                        bhcmis_id_val = match.iloc[0].get("bhcmis_id")
-                        if bhcmis_id_val is not None:
-                            st.session_state["detail_site"] = {"type": "fqhc", "id": str(bhcmis_id_val)}
-                            st.info("✓ Health center selected. Switch to the **Site Detail** tab above to view full details.")
-
-        elif active_table == "ECE Centers":
-            display_df = ece_df.copy()
-            ece_cols = {
-                "provider_name": "Provider",
-                "operator_name": "Operator",
-                "state": "State",
-                "city": "City",
-                "facility_type": "Type",
-                "license_status": "Status",
-                "capacity": "Capacity",
-                "ages_served": "Ages",
-                "accepts_subsidies": "Subsidies",
-                "star_rating": "Quality Rating",
-                "census_tract_id": "Census Tract",
-                "data_source": "Source",
-            }
-            show_cols = [c for c in ece_cols if c in display_df.columns]
-            display_df = display_df[show_cols].rename(columns=ece_cols)
-
-            if "Subsidies" in display_df.columns:
-                display_df["Subsidies"] = display_df["Subsidies"].map({1: "Yes", 0: "No"})
-
-            if table_filter:
-                mask = display_df.apply(
-                    lambda row: row.astype(str).str.contains(table_filter, case=False).any(), axis=1
-                )
-                display_df = display_df[mask]
-
-            st.dataframe(display_df, use_container_width=True, height=400)
-
-            csv_bytes = df_to_csv_bytes(display_df)
-            st.download_button(
-                "Download ECE Centers CSV", data=csv_bytes,
-                file_name="ece_centers.csv", mime="text/csv",
-            )
-
-            # --- View in Site Detail ---
-            if not ece_df.empty and "license_id" in ece_df.columns:
-                ece_display_names = ece_df["provider_name"].fillna(ece_df["license_id"].astype(str)).tolist()[:500]
-                detail_ece = st.selectbox(
-                    "Select an ECE center to view in detail →",
-                    ["—"] + ece_display_names,
-                    key="ece_detail_select",
-                    label_visibility="collapsed",
-                )
-                if detail_ece != "—":
-                    mask = (ece_df["provider_name"] == detail_ece)
-                    match = ece_df[mask]
-                    if not match.empty:
-                        lic_id_val = match.iloc[0].get("license_id")
-                        if lic_id_val is not None:
-                            st.session_state["detail_site"] = {"type": "ece", "id": str(lic_id_val)}
-                            st.info("✓ ECE center selected. Switch to the **Site Detail** tab above to view full details.")
+            if chosen_label != "—" and chosen_label in detail_map:
+                id_type, id_val = detail_map[chosen_label]
+                if id_type and id_val:
+                    id_final = int(id_val) if id_type == "school" else str(id_val)
+                    st.session_state["detail_site"] = {"type": id_type, "id": id_final}
+                    st.info("✓ Selected. Switch to the **Site Detail** tab to view full details.")
 
     # -----------------------------------------------------------------------
     # Comparison panel
@@ -1156,40 +963,39 @@ Traditional public schools do not receive survival scores.
 
     compare_items = st.session_state.get("compare_items", [])
 
-    if show_schools and not schools_df.empty:
+    # Comparison panels — ECE, Health Centers, Schools (same order as layer toggles)
+    if show_ece and not ece_df.empty:
         st.markdown("---")
-        st.subheader("Compare")
+        st.subheader("Compare ECE Centers")
 
-        school_names = schools_df["school_name"].dropna().tolist()
-        if school_names:
-            selected_for_compare = st.multiselect(
-                "Select schools to compare (up to 4)",
-                options=school_names[:500],
+        ece_names = ece_df["provider_name"].dropna().tolist()
+        if ece_names:
+            selected_ece = st.multiselect(
+                "Select ECE centers to compare (up to 4)",
+                options=ece_names[:500],
                 max_selections=4,
-                help="Pick 2–4 schools to see them side by side",
+                key="ece_compare",
             )
 
-            if len(selected_for_compare) >= 2:
-                compare_df = schools_df[schools_df["school_name"].isin(selected_for_compare)]
-                compare_metrics = {
-                    "school_name": "School",
+            if len(selected_ece) >= 2:
+                ece_compare_df = ece_df[ece_df["provider_name"].isin(selected_ece)]
+                ece_metrics = {
+                    "provider_name": "Provider",
+                    "operator_name": "Operator",
                     "state": "State",
                     "city": "City",
-                    "enrollment": "Enrollment",
-                    "is_charter": "Charter",
-                    "school_status": "Status",
-                    "survival_score": "Survival Score",
-                    "survival_risk_tier": "Risk Tier",
-                    "pct_free_reduced_lunch": "% FRL",
-                    "pct_black": "% Black",
-                    "pct_hispanic": "% Hispanic",
+                    "facility_type": "Type",
+                    "license_status": "Status",
+                    "capacity": "Capacity",
+                    "ages_served": "Ages",
+                    "accepts_subsidies": "Subsidies",
+                    "star_rating": "Quality Rating",
                     "census_tract_id": "Census Tract",
-                    "lea_name": "LEA",
                 }
-                show_metrics = [c for c in compare_metrics if c in compare_df.columns]
-                compare_display = compare_df[show_metrics].rename(columns=compare_metrics).T
-                compare_display.columns = [f"School {i+1}" for i in range(len(compare_display.columns))]
-                st.dataframe(compare_display, use_container_width=True)
+                ece_show = [c for c in ece_metrics if c in ece_compare_df.columns]
+                ece_display = ece_compare_df[ece_show].rename(columns=ece_metrics).T
+                ece_display.columns = [f"Center {i+1}" for i in range(len(ece_display.columns))]
+                st.dataframe(ece_display, use_container_width=True)
 
     if show_fqhc and not fqhc_df.empty:
         st.markdown("---")
@@ -1228,38 +1034,40 @@ Traditional public schools do not receive survival scores.
                 hc_display.columns = [f"Site {i+1}" for i in range(len(hc_display.columns))]
                 st.dataframe(hc_display, use_container_width=True)
 
-    if show_ece and not ece_df.empty:
+    if show_schools and not schools_df.empty:
         st.markdown("---")
-        st.subheader("Compare ECE Centers")
+        st.subheader("Compare Schools")
 
-        ece_names = ece_df["provider_name"].dropna().tolist()
-        if ece_names:
-            selected_ece = st.multiselect(
-                "Select ECE centers to compare (up to 4)",
-                options=ece_names[:500],
+        school_names = schools_df["school_name"].dropna().tolist()
+        if school_names:
+            selected_for_compare = st.multiselect(
+                "Select schools to compare (up to 4)",
+                options=school_names[:500],
                 max_selections=4,
-                key="ece_compare",
+                help="Pick 2–4 schools to see them side by side",
             )
 
-            if len(selected_ece) >= 2:
-                ece_compare_df = ece_df[ece_df["provider_name"].isin(selected_ece)]
-                ece_metrics = {
-                    "provider_name": "Provider",
-                    "operator_name": "Operator",
+            if len(selected_for_compare) >= 2:
+                compare_df = schools_df[schools_df["school_name"].isin(selected_for_compare)]
+                compare_metrics = {
+                    "school_name": "School",
                     "state": "State",
                     "city": "City",
-                    "facility_type": "Type",
-                    "license_status": "Status",
-                    "capacity": "Capacity",
-                    "ages_served": "Ages",
-                    "accepts_subsidies": "Subsidies",
-                    "star_rating": "Quality Rating",
+                    "enrollment": "Enrollment",
+                    "is_charter": "Charter",
+                    "school_status": "Status",
+                    "survival_score": "Survival Score",
+                    "survival_risk_tier": "Risk Tier",
+                    "pct_free_reduced_lunch": "% FRL",
+                    "pct_black": "% Black",
+                    "pct_hispanic": "% Hispanic",
                     "census_tract_id": "Census Tract",
+                    "lea_name": "LEA",
                 }
-                ece_show = [c for c in ece_metrics if c in ece_compare_df.columns]
-                ece_display = ece_compare_df[ece_show].rename(columns=ece_metrics).T
-                ece_display.columns = [f"Center {i+1}" for i in range(len(ece_display.columns))]
-                st.dataframe(ece_display, use_container_width=True)
+                show_metrics = [c for c in compare_metrics if c in compare_df.columns]
+                compare_display = compare_df[show_metrics].rename(columns=compare_metrics).T
+                compare_display.columns = [f"School {i+1}" for i in range(len(compare_display.columns))]
+                st.dataframe(compare_display, use_container_width=True)
 
     # -----------------------------------------------------------------------
     # Census tract summary (when NMTC layers active)
