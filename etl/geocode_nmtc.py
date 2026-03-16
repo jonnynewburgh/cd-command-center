@@ -2,13 +2,16 @@
 etl/geocode_nmtc.py — Geocode NMTC projects that are missing lat/lon.
 
 NMTC projects are loaded from the CDFI Fund Excel file, which does not include
-coordinates. This script geocodes them using the Census Bureau's free geocoding
-API (city + state + zip), then writes lat/lon and census_tract_id back to the
+coordinates. This script looks up lat/lon using the ZIP code via the free
+zippopotam.us API (no API key needed), then writes coordinates back to the
 database.
 
-The Census API is free but rate-limited. This script sleeps 0.5s between calls.
-With ~8,000 projects it takes roughly 90 minutes to run fully. Use --limit to
-test on a small batch first.
+ZIP-level geocoding places each project at the center of its ZIP code, which
+is good enough for map display. Projects in the same ZIP will overlap on the
+map but can be distinguished in the data table.
+
+Because many projects share a ZIP code, we cache results so each ZIP is only
+looked up once. This makes the full run much faster (~5 minutes vs 90 minutes).
 
 Usage:
     python etl/geocode_nmtc.py                    # geocode all missing
@@ -22,13 +25,45 @@ import sys
 import os
 import time
 
+import requests
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import db
-from utils.geo import geocode_address
 
-# Seconds to sleep between Census API calls to avoid rate-limiting
-API_SLEEP = 0.5
+# Seconds to sleep between API calls (only fires on cache misses)
+API_SLEEP = 0.2
+
+
+def geocode_zip(zip_code: str, cache: dict) -> dict:
+    """
+    Look up lat/lon for a ZIP code using zippopotam.us.
+    Results are cached in the provided dict so each ZIP is only fetched once.
+    Returns dict with 'lat' and 'lon', or empty dict on failure.
+    """
+    zip5 = str(zip_code).strip().split("-")[0].zfill(5)  # normalize to 5-digit ZIP
+
+    if zip5 in cache:
+        return cache[zip5]
+
+    try:
+        resp = requests.get(f"https://api.zippopotam.us/us/{zip5}", timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            places = data.get("places", [])
+            if places:
+                result = {
+                    "lat": float(places[0]["latitude"]),
+                    "lon": float(places[0]["longitude"]),
+                }
+                cache[zip5] = result
+                time.sleep(API_SLEEP)
+                return result
+    except Exception:
+        pass
+
+    cache[zip5] = {}  # cache the failure so we don't retry the same bad ZIP
+    return {}
 
 
 def get_projects_to_geocode(states=None, limit=None, overwrite=False) -> list[dict]:
@@ -55,8 +90,8 @@ def get_projects_to_geocode(states=None, limit=None, overwrite=False) -> list[di
     limit_clause = f"LIMIT {limit}" if limit else ""
 
     cur.execute(
-        f"SELECT id, cdfi_project_id, city, state, zip_code, address "
-        f"FROM nmtc_projects {where} ORDER BY state, id {limit_clause}",
+        f"SELECT id, cdfi_project_id, city, state, zip_code "
+        f"FROM nmtc_projects {where} ORDER BY zip_code, id {limit_clause}",
         params,
     )
     rows = cur.fetchall()
@@ -69,43 +104,22 @@ def get_projects_to_geocode(states=None, limit=None, overwrite=False) -> list[di
             "city": r[2],
             "state": r[3],
             "zip_code": r[4],
-            "address": r[5],
         }
         for r in rows
     ]
 
 
-def build_address_string(project: dict) -> str:
-    """
-    Build the best address string we can from available fields.
-    Falls back from full address → city+state+zip → city+state.
-    """
-    parts = []
-    if project.get("address"):
-        parts.append(project["address"])
-    if project.get("city"):
-        parts.append(project["city"])
-    if project.get("state"):
-        parts.append(project["state"])
-    if project.get("zip_code"):
-        parts.append(project["zip_code"])
-    return ", ".join(parts)
-
-
-def update_project_coords(cdfi_project_id: str, lat: float, lon: float, census_tract_id: str):
+def update_project_coords(cdfi_project_id: str, lat: float, lon: float):
     """Write geocoded coordinates back to the database."""
-    record = {
+    db.upsert_nmtc_project({
         "cdfi_project_id": cdfi_project_id,
         "latitude": lat,
         "longitude": lon,
-    }
-    if census_tract_id:
-        record["census_tract_id"] = census_tract_id
-    db.upsert_nmtc_project(record)
+    })
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Geocode NMTC projects (add lat/lon)")
+    parser = argparse.ArgumentParser(description="Geocode NMTC projects (add lat/lon from ZIP code)")
     parser.add_argument("--limit", type=int, help="Max number of projects to process")
     parser.add_argument("--states", nargs="+", metavar="ST", help="Filter to specific state codes (e.g. CA TX)")
     parser.add_argument("--overwrite", action="store_true", help="Re-geocode projects that already have coordinates")
@@ -122,39 +136,39 @@ def main():
         print("No projects need geocoding. Use --overwrite to redo existing coordinates.")
         return
 
-    print(f"Geocoding {total:,} NMTC projects...")
+    print(f"Geocoding {total:,} NMTC projects by ZIP code...")
     if args.limit:
         print(f"  (limited to {args.limit})")
     if args.states:
         print(f"  States: {args.states}")
     print()
 
+    zip_cache = {}  # ZIP → {lat, lon} — avoids re-fetching the same ZIP
     success = 0
     failed = 0
 
     for i, project in enumerate(projects, 1):
-        addr = build_address_string(project)
-        result = geocode_address(addr)
+        zip_code = project.get("zip_code")
+        if not zip_code:
+            failed += 1
+            continue
+
+        result = geocode_zip(zip_code, zip_cache)
 
         if result.get("lat") and result.get("lon"):
-            update_project_coords(
-                project["cdfi_project_id"],
-                result["lat"],
-                result["lon"],
-                result.get("census_tract_id", ""),
-            )
+            update_project_coords(project["cdfi_project_id"], result["lat"], result["lon"])
             success += 1
-            if i % 100 == 0 or i == total:
-                print(f"  [{i}/{total}] {success} geocoded, {failed} failed...")
         else:
             failed += 1
-            if failed <= 10 or i % 500 == 0:
-                print(f"  [{i}/{total}] FAILED: {addr}")
+            if failed <= 5:
+                print(f"  FAILED ZIP: {zip_code} ({project.get('city')}, {project.get('state')})")
 
-        time.sleep(API_SLEEP)
+        if i % 500 == 0 or i == total:
+            unique_zips = len(zip_cache)
+            print(f"  [{i:,}/{total:,}] {success:,} geocoded, {failed} failed ({unique_zips} unique ZIPs looked up)")
 
     print()
-    print(f"Done. {success:,} geocoded, {failed:,} failed out of {total:,} total.")
+    print(f"Done. {success:,} geocoded, {failed} failed out of {total:,} total.")
     print()
 
     # Summary
