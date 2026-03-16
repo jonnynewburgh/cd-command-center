@@ -281,6 +281,16 @@ def main():
         action="store_true",
         help="Print the sheet names in the Excel file and exit (useful for debugging)",
     )
+    parser.add_argument(
+        "--project-sheet",
+        metavar="SHEET",
+        help="Override auto-detection: exact name of the QLICI/project sheet",
+    )
+    parser.add_argument(
+        "--cde-sheet",
+        metavar="SHEET",
+        help="Override auto-detection: exact name of the CDE allocation sheet",
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.file):
@@ -305,30 +315,52 @@ def main():
 
     db.init_db()
 
-    # Auto-detect the QLICI/project sheet and CDE sheet
+    # Use manual overrides if provided, otherwise auto-detect
     project_keywords = ["QLICI", "Project", "Investment", "QALICB"]
     cde_keywords = ["CDE", "Allocation", "Allocatee"]
 
-    project_sheet = detect_sheet(xl, project_keywords)
-    cde_sheet = detect_sheet(xl, cde_keywords)
-
-    if project_sheet:
-        print(f"  Auto-detected project sheet: '{project_sheet}'")
+    if args.project_sheet:
+        if args.project_sheet not in xl.sheet_names:
+            print(f"ERROR: --project-sheet '{args.project_sheet}' not found in file.")
+            print(f"  Available sheets: {xl.sheet_names}")
+            sys.exit(1)
+        project_sheet = args.project_sheet
+        print(f"  Using specified project sheet: '{project_sheet}'")
     else:
-        print(f"WARNING: Could not auto-detect project/QLICI sheet.")
-        print(f"  Looked for keywords: {project_keywords}")
-        print(f"  Available sheets: {xl.sheet_names}")
-        print(f"  Try re-running with --sheet-names to inspect, or check if")
-        print(f"  the CDFI Fund changed their sheet naming in a newer release.")
-        print()
+        project_sheet = detect_sheet(xl, project_keywords)
+        if project_sheet:
+            print(f"  Auto-detected project sheet: '{project_sheet}'")
+        else:
+            print(f"WARNING: Could not auto-detect project/QLICI sheet.")
+            print(f"  Looked for keywords: {project_keywords}")
+            print(f"  Available sheets: {xl.sheet_names}")
+            print(f"  Use --project-sheet SHEETNAME to specify it manually.")
+            print()
 
-    if cde_sheet:
-        print(f"  Auto-detected CDE sheet: '{cde_sheet}'")
+    if args.cde_sheet:
+        if args.cde_sheet not in xl.sheet_names:
+            print(f"ERROR: --cde-sheet '{args.cde_sheet}' not found in file.")
+            print(f"  Available sheets: {xl.sheet_names}")
+            sys.exit(1)
+        cde_sheet = args.cde_sheet
+        print(f"  Using specified CDE sheet: '{cde_sheet}'")
     else:
-        print(f"WARNING: Could not auto-detect CDE allocation sheet.")
-        print(f"  Looked for keywords: {cde_keywords}")
-        print(f"  Available sheets: {xl.sheet_names}")
-        print()
+        cde_sheet = detect_sheet(xl, cde_keywords)
+        if cde_sheet:
+            print(f"  Auto-detected CDE sheet: '{cde_sheet}'")
+        else:
+            print(f"WARNING: Could not auto-detect CDE allocation sheet.")
+            print(f"  Looked for keywords: {cde_keywords}")
+            print(f"  Available sheets: {xl.sheet_names}")
+            print(f"  Use --cde-sheet SHEETNAME to specify it manually.")
+            print()
+
+    # Exit early if neither sheet was found — nothing to load
+    if not project_sheet and not cde_sheet:
+        print("ERROR: Could not find either sheet. Nothing was loaded.")
+        print("  Run with --sheet-names to see what sheets are in the file.")
+        print("  Then re-run with --project-sheet and/or --cde-sheet to specify them.")
+        sys.exit(1)
 
     total = 0
     if project_sheet:
@@ -336,6 +368,14 @@ def main():
 
     if cde_sheet and cde_sheet != project_sheet:
         total += load_cdes(xl, cde_sheet)
+
+    if total == 0:
+        print()
+        print("WARNING: 0 records were loaded.")
+        print("  The sheet was found but no rows matched the expected column names.")
+        print("  Check that the column names in your Excel file match the mappings")
+        print("  at the top of this script (QLICI_COLUMN_MAP / CDE_COLUMN_MAP).")
+        print("  The CDFI Fund sometimes changes column names between annual releases.")
 
     print()
     summary = db.get_nmtc_project_summary()
