@@ -166,9 +166,9 @@ class CharterSurvivalModel:
         scores = []
 
         for _, row in df.iterrows():
-            # Schools already marked closed get a low score
+            # Schools already marked closed get a low fixed score
             if str(row.get("school_status", "")).strip() == "Closed":
-                scores.append(round(np.random.uniform(0.1, 0.35), 3))
+                scores.append(0.15)
                 continue
 
             score = 0.60  # base
@@ -200,9 +200,6 @@ class CharterSurvivalModel:
                 score += 0.04
             elif lea_score < 50:
                 score -= 0.05
-
-            # Add a small amount of noise so scores aren't identical
-            score += np.random.normal(0, 0.03)
 
             # Clamp to [0.05, 0.95]
             score = round(float(np.clip(score, 0.05, 0.95)), 3)

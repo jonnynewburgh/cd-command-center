@@ -115,6 +115,14 @@ if show_schools:
         help="Show only schools with at least this % FRL",
     )
 
+    # NMTC-eligible tracts filter — key for deal origination
+    nmtc_eligible_filter = st.sidebar.checkbox(
+        "NMTC-eligible tracts only",
+        value=False,
+        key="nmtc_elig_schools",
+        help="Show only schools whose census tract qualifies as LIC, Severely Distressed, or Deep Distress",
+    )
+
 # --- NMTC filters (shown when NMTC layer is on) ---
 if show_nmtc_projects or show_cde:
     st.sidebar.markdown("**NMTC Filters**")
@@ -200,6 +208,7 @@ if show_schools:
             risk_tiers=risk_tiers if risk_tiers else None,
             school_status=selected_status if selected_status else None,
             charter_only=charter_only,
+            nmtc_eligible_only=nmtc_eligible_filter,
         )
 
         # Filter traditional-only
@@ -423,6 +432,54 @@ def _render_nearby_facilities(nearby: dict):
             st.dataframe(nmtc_near[cols].rename(columns={"project_name": "Project", "cde_name": "CDE", "qlici_amount": "QLICI", "distance_miles": "Miles"}), use_container_width=True)
 
 
+def _render_deal_signals(school: dict):
+    """
+    Render a compact row of deal-relevant flags at the top of a school detail view.
+
+    This is the first thing a deal originator sees — designed to answer in 3 seconds:
+    'Is there a deal here?' before reading the full detail.
+
+    Signals shown:
+    - NMTC eligibility of the census tract (biggest filter for CD finance)
+    - Whether 990 financial data is linked (can we underwrite this operator?)
+    - Charter survival risk tier (is this school stable?)
+    - Whether the school is open (closed schools are usually not deals)
+    """
+    signals = []
+
+    # NMTC tract eligibility — show from either the join column or a census_tract lookup
+    nmtc_tier = school.get("nmtc_eligibility_tier")
+    if not nmtc_tier and school.get("census_tract_id"):
+        tract = db.get_census_tract(school["census_tract_id"])
+        nmtc_tier = tract.get("nmtc_eligibility_tier") if tract else None
+
+    if nmtc_tier and nmtc_tier != "Not Eligible":
+        tier_icons = {"Deep Distress": "🔴", "Severely Distressed": "🟠", "LIC": "🟡"}
+        signals.append(f"{tier_icons.get(nmtc_tier, '🟡')} **{nmtc_tier}** tract")
+    elif nmtc_tier == "Not Eligible":
+        signals.append("⚪ Not NMTC-eligible tract")
+    else:
+        signals.append("⚪ Tract eligibility unknown")
+
+    # 990 data availability
+    has_990 = school.get("has_990") == 1 or (school.get("ein") is not None and school.get("ein") != "")
+    if has_990:
+        signals.append("📄 990 data linked")
+    elif school.get("is_charter") == 1:
+        signals.append("📄 No 990 linked")
+
+    # Survival risk (charters only)
+    if school.get("is_charter") == 1:
+        tier = school.get("survival_risk_tier", "Unknown")
+        risk_icons = {"Low": "🟢", "Medium": "🟡", "High": "🔴", "Unknown": "⚫"}
+        score = school.get("survival_score")
+        score_str = f" ({score*100:.0f}%)" if score is not None and not (isinstance(score, float) and pd.isna(score)) else ""
+        signals.append(f"{risk_icons.get(tier, '⚫')} {tier} survival risk{score_str}")
+
+    if signals:
+        st.markdown(" &nbsp;·&nbsp; ".join(signals))
+
+
 def _render_school_detail(school_id):
     """Render a full detail view for a school given its integer primary key id."""
     school = db.get_school_by_id(school_id)
@@ -439,6 +496,10 @@ def _render_school_detail(school_id):
     st.markdown(f"🏫 {school_type_label} · {school.get('city', '—')}, {school.get('state', '—')} · {status_icon} {status}")
     if school.get("address"):
         st.caption(f"📍 {school['address']}, {school.get('city', '')}, {school.get('state', '')} {school.get('zip_code', '')}")
+
+    # --- Deal Signals banner ---
+    # Quick at-a-glance flags for deal origination: is this worth digging into?
+    _render_deal_signals(school)
 
     st.markdown("---")
 
@@ -658,16 +719,30 @@ with tab_dashboard:
         if not schools_df.empty:
             open_count = (schools_df["school_status"] == "Open").sum() if "school_status" in schools_df.columns else 0
             col2.metric("Open", f"{open_count:,}")
+            if "nmtc_eligibility_tier" in schools_df.columns:
+                nmtc_count = (schools_df["nmtc_eligibility_tier"].isin(
+                    ["LIC", "Severely Distressed", "Deep Distress"]
+                )).sum()
+                col3.metric("In NMTC-eligible tracts", f"{nmtc_count:,}")
+            if "has_990" in schools_df.columns:
+                has_990_count = (schools_df["has_990"] == 1).sum()
+                col4.metric("With 990 data", f"{has_990_count:,}")
         else:
             col2.metric("Open", "0")
 
     if show_nmtc_projects:
-        col3.metric("NMTC Projects", f"{len(projects_df):,}")
-        if not projects_df.empty and "qlici_amount" in projects_df.columns:
-            total_qlici = projects_df["qlici_amount"].sum()
-            col4.metric("Total QLICI", f"${total_qlici/1e6:.0f}M" if total_qlici and total_qlici > 0 else "$0")
+        if not projects_df.empty:
+            col3.metric("NMTC Projects", f"{len(projects_df):,}")
+            if "qlici_amount" in projects_df.columns:
+                total_qlici = projects_df["qlici_amount"].sum()
+                col4.metric("Total QLICI", f"${total_qlici/1e6:.0f}M" if total_qlici and total_qlici > 0 else "$0")
         else:
-            col4.metric("Total QLICI", "$0")
+            with col3:
+                st.info(
+                    "**No NMTC project data loaded.**\n\n"
+                    "Download the CDFI Fund public data release and run:\n"
+                    "`python etl/load_nmtc_data.py --file data/raw/nmtc_public_data_2024.xlsx`",
+                )
 
     if not show_schools and not show_nmtc_projects:
         if show_cde:
@@ -682,19 +757,25 @@ with tab_dashboard:
         eligible = tracts_df[tracts_df.get("nmtc_eligibility_tier", pd.Series()) != "Not Eligible"].shape[0] if "nmtc_eligibility_tier" in tracts_df.columns else 0
         st.caption(f"Census tracts loaded: {len(tracts_df):,} | NMTC eligible: {eligible:,}")
 
-    # FQHC summary metric (shown whenever FQHC layer is on)
-    if show_fqhc and not fqhc_df.empty and show_schools or show_nmtc_projects:
-        st.caption(f"Health centers: {len(fqhc_df):,}")
+    # Per-layer empty state notices (only when that layer is explicitly toggled on but has no data)
+    notices = []
+    if show_fqhc and fqhc_df.empty:
+        notices.append("**Health Centers:** No data loaded — run `python etl/fetch_fqhc.py --states CA` to fetch HRSA data.")
+    if show_ece and ece_df.empty:
+        notices.append("**ECE Centers:** No data loaded — download your state's licensing file and run `python etl/load_ece_data.py --file ... --state CA`.")
+    if show_cde and cde_df.empty:
+        notices.append("**CDE Allocations:** No data loaded — run `python etl/load_nmtc_data.py --file data/raw/nmtc_public_data_2024.xlsx`.")
+    if notices:
+        st.warning("\n\n".join(notices))
 
-    # --- No data notice ---
+    # --- No data notice (all layers empty) ---
     if schools_df.empty and projects_df.empty and cde_df.empty and fqhc_df.empty and ece_df.empty:
         st.info(
-            "No data loaded yet. Run these commands to load data:\n\n"
+            "No data loaded yet. Run these commands to get started:\n\n"
             "```\n"
-            "python etl/fetch_nces_schools.py --states TX\n"
-            "python etl/load_census_tracts.py --states TX\n"
-            "python etl/fetch_fqhc.py --states TX\n"
-            "python etl/load_ece_data.py --file data/raw/tx_childcare.csv --state TX\n"
+            "python etl/fetch_nces_schools.py --states CA\n"
+            "python etl/load_census_tracts.py --states CA\n"
+            "python etl/fetch_fqhc.py --states CA\n"
             "```"
         )
 
@@ -806,6 +887,8 @@ Traditional public schools do not receive survival scores.
                 "pct_free_reduced_lunch": "% FRL",
                 "pct_black": "% Black",
                 "pct_hispanic": "% Hispanic",
+                "nmtc_eligibility_tier": "NMTC Tier",
+                "has_990": "990",
                 "accountability_score": "LEA Score",
                 "lea_name": "LEA",
                 "census_tract_id": "Census Tract",
@@ -815,6 +898,8 @@ Traditional public schools do not receive survival scores.
 
             if "Charter" in display_df.columns:
                 display_df["Charter"] = display_df["Charter"].map({1: "Yes", 0: "No", None: "—"})
+            if "990" in display_df.columns:
+                display_df["990"] = display_df["990"].map({1: "✓", 0: "", None: ""})
 
             if table_filter:
                 mask = display_df.apply(
