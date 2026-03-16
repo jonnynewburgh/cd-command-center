@@ -1240,6 +1240,116 @@ def upsert_fqhc(record: dict):
     conn.close()
 
 
+def get_fqhc_by_id(bhcmis_id: str) -> dict:
+    """Return a single FQHC site by its bhcmis_id. Returns empty dict if not found."""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT * FROM fqhc WHERE bhcmis_id = ?", (bhcmis_id,))
+        row = cur.fetchone()
+        conn.close()
+        return dict(row) if row else {}
+    except Exception:
+        conn.close()
+        return {}
+
+
+def get_ece_by_id(license_id: str) -> dict:
+    """Return a single ECE center by its license_id. Returns empty dict if not found."""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT * FROM ece_centers WHERE license_id = ?", (license_id,))
+        row = cur.fetchone()
+        conn.close()
+        return dict(row) if row else {}
+    except Exception:
+        conn.close()
+        return {}
+
+
+def get_nmtc_project_by_id(cdfi_project_id: str) -> dict:
+    """Return a single NMTC project by its cdfi_project_id. Returns empty dict if not found."""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT * FROM nmtc_projects WHERE cdfi_project_id = ?", (cdfi_project_id,))
+        row = cur.fetchone()
+        conn.close()
+        return dict(row) if row else {}
+    except Exception:
+        conn.close()
+        return {}
+
+
+def get_nmtc_projects_by_cde(cde_name: str) -> pd.DataFrame:
+    """Return all NMTC projects for a given CDE, most recent first."""
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(
+            "SELECT * FROM nmtc_projects WHERE cde_name = ? ORDER BY fiscal_year DESC",
+            conn, params=[cde_name],
+        )
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+def get_nearby_facilities(lat: float, lon: float, radius_miles: float = 1.0) -> dict:
+    """
+    Return all facility types within radius_miles of the given coordinates.
+
+    Uses filter_by_radius() from utils/geo.py which calculates haversine distance.
+    Pulls all states (no geographic filter) since we want everything nearby regardless of state.
+
+    Returns a dict with keys: 'schools', 'fqhc', 'ece', 'nmtc'
+    Each value is a DataFrame with a 'distance_miles' column added.
+    Returns empty DataFrames if any table is missing or has no data.
+    """
+    # Import here to avoid circular imports (geo.py doesn't import db.py, so this is safe)
+    from utils.geo import filter_by_radius
+
+    results = {"schools": pd.DataFrame(), "fqhc": pd.DataFrame(), "ece": pd.DataFrame(), "nmtc": pd.DataFrame()}
+
+    if lat is None or lon is None:
+        return results
+
+    # Schools — pull all, then filter by radius
+    try:
+        schools = get_schools(active_only=False)
+        if not schools.empty:
+            results["schools"] = filter_by_radius(schools, lat, lon, radius_miles)
+    except Exception:
+        pass
+
+    # FQHCs
+    try:
+        fqhc = get_fqhc(active_only=False)
+        if not fqhc.empty:
+            results["fqhc"] = filter_by_radius(fqhc, lat, lon, radius_miles)
+    except Exception:
+        pass
+
+    # ECE centers
+    try:
+        ece = get_ece_centers(active_only=False)
+        if not ece.empty:
+            results["ece"] = filter_by_radius(ece, lat, lon, radius_miles)
+    except Exception:
+        pass
+
+    # NMTC projects
+    try:
+        nmtc = get_nmtc_projects()
+        if not nmtc.empty:
+            results["nmtc"] = filter_by_radius(nmtc, lat, lon, radius_miles)
+    except Exception:
+        pass
+
+    return results
+
+
 def update_school_census_tract(nces_id: str, census_tract_id: str):
     """Update the census_tract_id for a single school by nces_id."""
     conn = get_connection()
