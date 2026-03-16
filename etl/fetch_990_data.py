@@ -159,18 +159,32 @@ def best_match(query_name: str, results: list[dict]) -> dict | None:
     Pick the best matching organization from ProPublica search results.
     Returns the result dict or None if no result meets the threshold.
 
-    Guards against false positives when the query reduces to a single
-    generic word (e.g. "ABLE") — require at least 2 meaningful words.
+    Two false-positive guards:
+    1. Require at least 2 meaningful words — single-word queries like 'ABLE'
+       are too ambiguous (they match any org containing that word).
+    2. The first word of the query (usually the network/brand identifier, e.g.
+       'ACE', 'KIPP') must appear verbatim in the result name — prevents
+       matches like 'ACE Empower' → 'We Empower Aces' where only a generic
+       word ('empower') matches and the brand identifier is absent.
     """
     meaningful = _words(query_name) - _STOP_WORDS
     if len(meaningful) < 2:
         # Single-word queries like 'ABLE' are too ambiguous to trust
         return None
 
+    # First non-stop word treated as the network/brand identifier
+    query_words_ordered = [w for w in re.findall(r"[a-z]+", query_name.lower())
+                           if w not in _STOP_WORDS]
+    first_word = query_words_ordered[0] if query_words_ordered else None
+
     best = None
     best_score = 0.0
     for r in results:
-        score = _match_score(query_name, r.get("name", ""))
+        result_name = r.get("name", "")
+        # Brand identifier must appear verbatim in the result
+        if first_word and first_word not in _words(result_name):
+            continue
+        score = _match_score(query_name, result_name)
         if score > best_score:
             best_score = score
             best = r
