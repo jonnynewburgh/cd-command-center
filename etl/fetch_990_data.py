@@ -158,7 +158,15 @@ def best_match(query_name: str, results: list[dict]) -> dict | None:
     """
     Pick the best matching organization from ProPublica search results.
     Returns the result dict or None if no result meets the threshold.
+
+    Guards against false positives when the query reduces to a single
+    generic word (e.g. "ABLE") — require at least 2 meaningful words.
     """
+    meaningful = _words(query_name) - _STOP_WORDS
+    if len(meaningful) < 2:
+        # Single-word queries like 'ABLE' are too ambiguous to trust
+        return None
+
     best = None
     best_score = 0.0
     for r in results:
@@ -295,7 +303,9 @@ def fetch_990_for_charter_schools(states=None, limit=None, overwrite=False, verb
         clean_name = _clean_org_name(raw_name)
         school_name = org.get("school_name", "")
 
-        # Try cleaned lea_name first; fall back to school_name if 0 results
+        # Try cleaned lea_name first; fall back to school_name if 0 results;
+        # then fall back to the network prefix (first word of the name) so
+        # that e.g. "ACE Empower Academy" → tries "ACE" network search.
         results = search_propublica(clean_name, org["state"])
         time.sleep(API_SLEEP)
         search_used = clean_name
@@ -304,6 +314,15 @@ def fetch_990_for_charter_schools(states=None, limit=None, overwrite=False, verb
             results = search_propublica(school_name, org["state"])
             time.sleep(API_SLEEP)
             search_used = school_name
+
+        if not results:
+            # Last resort: try the first two words as a network/brand name
+            words = clean_name.split()
+            if len(words) >= 2:
+                prefix = " ".join(words[:2])
+                results = search_propublica(prefix, org["state"])
+                time.sleep(API_SLEEP)
+                search_used = prefix
 
         if verbose:
             print(f"\n  [{i}] Search: '{search_used}' (raw: '{raw_name}') ({org['state']})")
