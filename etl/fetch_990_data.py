@@ -71,9 +71,10 @@ def _words(text: str) -> set:
     """Lowercase alphabetic words in a string — used for name matching."""
     return set(re.findall(r"[a-z]+", text.lower()))
 
-# Common filler words that don't help distinguish organizations
+# Common filler words that don't help distinguish organizations.
+# NOTE: keep "academy" OUT of here — it's the primary word in many charter names.
 _STOP_WORDS = {"the", "a", "an", "of", "for", "and", "in", "at", "to", "inc",
-               "llc", "corp", "school", "schools", "academy", "charter"}
+               "llc", "corp", "school", "schools", "charter"}
 
 def _match_score(query: str, result: str) -> float:
     """
@@ -201,7 +202,7 @@ def _safe_float(val) -> float | None:
 # Per-facility-type fetch functions
 # ---------------------------------------------------------------------------
 
-def fetch_990_for_charter_schools(states=None, limit=None, overwrite=False):
+def fetch_990_for_charter_schools(states=None, limit=None, overwrite=False, verbose=False):
     """
     For each charter school, search ProPublica using the LEA name (the
     operator/district entity that files the 990), link the EIN, and store
@@ -221,20 +222,20 @@ def fetch_990_for_charter_schools(states=None, limit=None, overwrite=False):
         params.extend(states)
 
     where = "WHERE " + " AND ".join(conditions)
-    limit_clause = f"LIMIT {limit}" if limit else ""
 
-    # Use lea_name (the district/operator) as the search term — it's the legal
-    # entity that files the 990, not the individual school site name.
-    # Fall back to school_name if lea_name is missing.
+    # Fetch all rows and deduplicate BEFORE applying the limit so we don't
+    # accidentally process the same LEA operator multiple times.
     cur.execute(
         f"SELECT DISTINCT lea_id, lea_name, school_name, state "
-        f"FROM schools {where} ORDER BY state, lea_name {limit_clause}",
+        f"FROM schools {where} ORDER BY state, lea_name",
         params,
     )
     rows = cur.fetchall()
     conn.close()
 
-    # Deduplicate by lea_id so we don't search for the same operator twice
+    # Deduplicate by lea_id so we don't search for the same operator twice.
+    # For charter schools each school often has its own LEA — in that case
+    # lea_id is unique per school and we use lea_name as-is.
     seen_lea = set()
     orgs = []
     for lea_id, lea_name, school_name, state in rows:
@@ -244,6 +245,10 @@ def fetch_990_for_charter_schools(states=None, limit=None, overwrite=False):
         search_name = lea_name or school_name
         if search_name:
             orgs.append({"lea_id": lea_id, "name": search_name, "state": state})
+
+    # Apply limit after dedup
+    if limit:
+        orgs = orgs[:limit]
 
     total = len(orgs)
     print(f"  Searching 990s for {total:,} charter school operators...")
@@ -255,8 +260,17 @@ def fetch_990_for_charter_schools(states=None, limit=None, overwrite=False):
         results = search_propublica(org["name"], org["state"])
         time.sleep(API_SLEEP)
 
+        if verbose:
+            print(f"\n  [{i}] Search: '{org['name']}' ({org['state']})")
+            print(f"       API returned {len(results)} results")
+            for r in results[:3]:
+                score = _match_score(org["name"], r.get("name", ""))
+                print(f"       • {r.get('name')} — score={score:.2f}")
+
         match = best_match(org["name"], results)
         if not match:
+            if verbose:
+                print(f"       → NO MATCH (threshold={MIN_MATCH_SCORE})")
             failed += 1
             continue
 
@@ -303,7 +317,7 @@ def fetch_990_for_charter_schools(states=None, limit=None, overwrite=False):
     return linked
 
 
-def fetch_990_for_fqhc(states=None, limit=None, overwrite=False):
+def fetch_990_for_fqhc(states=None, limit=None, overwrite=False, verbose=False):
     """
     For each FQHC parent organization, search ProPublica using health_center_name,
     link the EIN, and store the financial data.
@@ -322,16 +336,18 @@ def fetch_990_for_fqhc(states=None, limit=None, overwrite=False):
         params.extend(states)
 
     where = "WHERE " + " AND ".join(conditions)
-    limit_clause = f"LIMIT {limit}" if limit else ""
 
-    # Deduplicate by health_center_name — each parent org has multiple sites
+    # Fetch all then apply limit after dedup (same pattern as charter schools)
     cur.execute(
         f"SELECT DISTINCT health_center_name, state "
-        f"FROM fqhc {where} ORDER BY state, health_center_name {limit_clause}",
+        f"FROM fqhc {where} ORDER BY state, health_center_name",
         params,
     )
     rows = cur.fetchall()
     conn.close()
+
+    if limit:
+        rows = rows[:limit]
 
     total = len(rows)
     print(f"  Searching 990s for {total:,} FQHC parent organizations...")
@@ -347,8 +363,17 @@ def fetch_990_for_fqhc(states=None, limit=None, overwrite=False):
         results = search_propublica(hc_name, state)
         time.sleep(API_SLEEP)
 
+        if verbose:
+            print(f"\n  [{i}] Search: '{hc_name}' ({state})")
+            print(f"       API returned {len(results)} results")
+            for r in results[:3]:
+                score = _match_score(hc_name, r.get("name", ""))
+                print(f"       • {r.get('name')} — score={score:.2f}")
+
         match = best_match(hc_name, results)
         if not match:
+            if verbose:
+                print(f"       → NO MATCH (threshold={MIN_MATCH_SCORE})")
             failed += 1
             continue
 
@@ -399,6 +424,7 @@ def main():
     parser.add_argument("--states",    nargs="+", metavar="ST", help="Limit to specific states (e.g. CA TX)")
     parser.add_argument("--limit",     type=int, help="Max organizations to process per facility type")
     parser.add_argument("--overwrite", action="store_true", help="Re-fetch even already-linked facilities")
+    parser.add_argument("--verbose",   action="store_true", help="Print search query and top API results for each org")
     args = parser.parse_args()
 
     # Ensure all tables and columns exist (adds ein column to schools/fqhc if missing)
@@ -423,6 +449,7 @@ def main():
             states=args.states,
             limit=args.limit,
             overwrite=args.overwrite,
+            verbose=args.verbose,
         )
         print()
 
@@ -432,6 +459,7 @@ def main():
             states=args.states,
             limit=args.limit,
             overwrite=args.overwrite,
+            verbose=args.verbose,
         )
         print()
 
