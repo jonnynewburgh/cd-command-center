@@ -154,14 +154,26 @@ def load_projects(xl: pd.ExcelFile, sheet_name: str) -> int:
     """
     print(f"  Reading project sheet: '{sheet_name}'...")
     df = xl.parse(sheet_name, dtype=str)
+    print(f"  Raw columns in sheet ({len(df.columns)}):")
+    for c in df.columns:
+        print(f"    - '{c}'")
     df = normalize_columns(df)
+
+    # Show which columns matched our mapping
+    matched = [col for col in df.columns if col in QLICI_COLUMN_MAP]
+    unmatched = [col for col in df.columns if col not in QLICI_COLUMN_MAP]
+    print(f"  Mapped columns ({len(matched)}): {matched}")
+    if unmatched:
+        print(f"  Unmapped columns ({len(unmatched)}): {unmatched}")
+
     df = apply_column_map(df, QLICI_COLUMN_MAP)
 
     if df.empty:
-        print("  No data found in project sheet.")
+        print("  No data found in project sheet after column mapping.")
+        print("  This likely means no column names matched QLICI_COLUMN_MAP.")
         return 0
 
-    print(f"  Found {len(df):,} project rows")
+    print(f"  Found {len(df):,} project rows with columns: {list(df.columns)}")
 
     # Numeric columns
     df = clean_numeric(df, [
@@ -207,14 +219,24 @@ def load_cdes(xl: pd.ExcelFile, sheet_name: str) -> int:
     """
     print(f"  Reading CDE sheet: '{sheet_name}'...")
     df = xl.parse(sheet_name, dtype=str)
+    print(f"  Raw columns in sheet ({len(df.columns)}):")
+    for c in df.columns:
+        print(f"    - '{c}'")
     df = normalize_columns(df)
+
+    matched = [col for col in df.columns if col in CDE_COLUMN_MAP]
+    unmatched = [col for col in df.columns if col not in CDE_COLUMN_MAP]
+    print(f"  Mapped columns ({len(matched)}): {matched}")
+    if unmatched:
+        print(f"  Unmapped columns ({len(unmatched)}): {unmatched}")
+
     df = apply_column_map(df, CDE_COLUMN_MAP)
 
     if df.empty:
-        print("  No data found in CDE sheet.")
+        print("  No data found in CDE sheet after column mapping.")
         return 0
 
-    print(f"  Found {len(df):,} CDE rows")
+    print(f"  Found {len(df):,} CDE rows with columns: {list(df.columns)}")
 
     df = clean_numeric(df, ["allocation_amount", "allocation_year", "round_number"])
 
@@ -276,21 +298,37 @@ def main():
             print(f"  - {s}")
         return
 
-    print(f"Sheets found: {xl.sheet_names}")
+    print(f"Sheets found ({len(xl.sheet_names)}):")
+    for s in xl.sheet_names:
+        print(f"  - '{s}'")
+    print()
 
     db.init_db()
 
     # Auto-detect the QLICI/project sheet and CDE sheet
-    project_sheet = detect_sheet(xl, ["QLICI", "Project", "Investment", "QALICB"])
-    cde_sheet = detect_sheet(xl, ["CDE", "Allocation", "Allocatee"])
+    project_keywords = ["QLICI", "Project", "Investment", "QALICB"]
+    cde_keywords = ["CDE", "Allocation", "Allocatee"]
 
-    if not project_sheet:
-        print("Warning: Could not auto-detect project/QLICI sheet.")
-        print(f"Available sheets: {xl.sheet_names}")
-        print("Re-run with --sheet-names to see all sheets, then check QLICI_COLUMN_MAP.")
+    project_sheet = detect_sheet(xl, project_keywords)
+    cde_sheet = detect_sheet(xl, cde_keywords)
 
-    if not cde_sheet:
-        print("Warning: Could not auto-detect CDE allocation sheet.")
+    if project_sheet:
+        print(f"  Auto-detected project sheet: '{project_sheet}'")
+    else:
+        print(f"WARNING: Could not auto-detect project/QLICI sheet.")
+        print(f"  Looked for keywords: {project_keywords}")
+        print(f"  Available sheets: {xl.sheet_names}")
+        print(f"  Try re-running with --sheet-names to inspect, or check if")
+        print(f"  the CDFI Fund changed their sheet naming in a newer release.")
+        print()
+
+    if cde_sheet:
+        print(f"  Auto-detected CDE sheet: '{cde_sheet}'")
+    else:
+        print(f"WARNING: Could not auto-detect CDE allocation sheet.")
+        print(f"  Looked for keywords: {cde_keywords}")
+        print(f"  Available sheets: {xl.sheet_names}")
+        print()
 
     total = 0
     if project_sheet:
