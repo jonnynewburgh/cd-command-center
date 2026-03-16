@@ -7,6 +7,7 @@ Run with: streamlit run app.py
 
 import streamlit as st
 import pandas as pd
+import plotly.express as px
 from streamlit_folium import st_folium
 
 import db
@@ -51,6 +52,7 @@ st.sidebar.markdown("**Data Layers**")
 show_schools = st.sidebar.checkbox("Schools", value=True)
 show_nmtc_projects = st.sidebar.checkbox("NMTC Projects", value=True)
 show_cde = st.sidebar.checkbox("CDE Allocations", value=False)
+show_fqhc = st.sidebar.checkbox("Health Centers (FQHCs)", value=False)
 
 st.sidebar.markdown("---")
 
@@ -58,7 +60,9 @@ st.sidebar.markdown("---")
 st.sidebar.markdown("**Filters**")
 
 # State filter — combine states from all data sources
-all_states = sorted(set(db.get_school_states() + db.get_census_tract_states()))
+all_states = sorted(set(
+    db.get_school_states() + db.get_census_tract_states() + db.get_fqhc_states()
+))
 selected_states = st.sidebar.multiselect(
     "State(s)",
     options=all_states,
@@ -83,12 +87,14 @@ if show_schools:
         default=["Open"],
     )
 
-    # Enrollment — with 2,000+ endpoint
-    enrollment_range = st.sidebar.radio(
+    # Enrollment slider — 2,000 on the right means "no upper limit"
+    enroll_range = st.sidebar.slider(
         "Enrollment",
-        ["All", "Under 500", "500 – 2,000", "2,000+"],
-        index=0,
-        horizontal=True,
+        min_value=0,
+        max_value=2000,
+        value=(0, 2000),
+        step=50,
+        help="Drag handles to filter by enrollment. Right edge (2,000) includes all larger schools.",
     )
 
     # Risk tier (charter schools only)
@@ -115,6 +121,11 @@ if show_nmtc_projects or show_cde:
     tier_lic = st.sidebar.checkbox("LIC", value=True, key="t_lic")
 
     min_poverty = st.sidebar.slider("Min poverty rate (%)", 0, 100, 0, key="pov_slider")
+
+# --- FQHC filters (shown when FQHC layer is on) ---
+if show_fqhc:
+    st.sidebar.markdown("**FQHC Filters**")
+    fqhc_active_only = st.sidebar.checkbox("Active sites only", value=True, key="fqhc_active")
 
 # --- Radius search ---
 st.sidebar.markdown("---")
@@ -149,16 +160,9 @@ if show_schools:
         if school_type_filter == "Charter schools only":
             charter_only = True
 
-        # Enrollment range
-        min_enroll = None
-        max_enroll = None
-        if enrollment_range == "Under 500":
-            max_enroll = 499
-        elif enrollment_range == "500 – 2,000":
-            min_enroll = 500
-            max_enroll = 2000
-        elif enrollment_range == "2,000+":
-            min_enroll = 2000
+        # Enrollment range — slider value of 0 means no lower bound; 2000 means no upper bound
+        min_enroll = enroll_range[0] if enroll_range[0] > 0 else None
+        max_enroll = enroll_range[1] if enroll_range[1] < 2000 else None
 
         # Risk tiers
         risk_tiers = None
@@ -206,6 +210,17 @@ if show_cde:
     else:
         cde_df = db.get_cde_allocations(states=state_filter)
 
+# --- FQHC data ---
+fqhc_df = pd.DataFrame()
+if show_fqhc:
+    if search_active and search_results:
+        fqhc_df = search_results.get("fqhc", pd.DataFrame())
+    else:
+        fqhc_df = db.get_fqhc(
+            states=state_filter,
+            active_only=fqhc_active_only,
+        )
+
 # --- Census tract data (for metrics, not map markers) ---
 tracts_df = pd.DataFrame()
 if show_nmtc_projects or show_cde:
@@ -241,6 +256,10 @@ if radius_address and radius_address.strip():
             projects_df = filter_by_radius(
                 projects_df, geocoded["lat"], geocoded["lon"], radius_miles,
             )
+        if not fqhc_df.empty:
+            fqhc_df = filter_by_radius(
+                fqhc_df, geocoded["lat"], geocoded["lon"], radius_miles,
+            )
     else:
         st.sidebar.warning("Could not geocode that address.")
 
@@ -275,19 +294,26 @@ if show_nmtc_projects:
 if not show_schools and not show_nmtc_projects:
     if show_cde:
         col1.metric("CDEs", f"{len(cde_df):,}")
+    if show_fqhc:
+        col2.metric("Health Centers", f"{len(fqhc_df):,}")
 
 # Tract metrics
 if not tracts_df.empty:
     eligible = tracts_df[tracts_df.get("nmtc_eligibility_tier", pd.Series()) != "Not Eligible"].shape[0] if "nmtc_eligibility_tier" in tracts_df.columns else 0
     st.caption(f"Census tracts loaded: {len(tracts_df):,} | NMTC eligible: {eligible:,}")
 
+# FQHC summary metric (shown whenever FQHC layer is on)
+if show_fqhc and not fqhc_df.empty and show_schools or show_nmtc_projects:
+    st.caption(f"Health centers: {len(fqhc_df):,}")
+
 # --- No data notice ---
-if schools_df.empty and projects_df.empty and cde_df.empty:
+if schools_df.empty and projects_df.empty and cde_df.empty and fqhc_df.empty:
     st.info(
         "No data loaded yet. Run these commands to load data:\n\n"
         "```\n"
         "python etl/fetch_nces_schools.py --states TX\n"
         "python etl/load_census_tracts.py --states TX\n"
+        "python etl/fetch_fqhc.py --states TX\n"
         "```"
     )
 
@@ -305,13 +331,15 @@ map_zoom = 10 if geocoded else (7 if selected_states and len(selected_states) ==
 # Only build map if there's data to show
 has_map_data = (
     (not schools_df.empty and show_schools) or
-    (not projects_df.empty and show_nmtc_projects)
+    (not projects_df.empty and show_nmtc_projects) or
+    (not fqhc_df.empty and show_fqhc)
 )
 
 if has_map_data:
     unified_map = make_unified_map(
         schools_df=schools_df if show_schools else None,
         projects_df=projects_df if show_nmtc_projects else None,
+        fqhc_df=fqhc_df if show_fqhc else None,
         tracts_df=tracts_df,
         center_lat=map_lat,
         center_lon=map_lon,
@@ -365,6 +393,8 @@ if show_nmtc_projects and not projects_df.empty:
     table_options.append("NMTC Projects")
 if show_cde and not cde_df.empty:
     table_options.append("CDE Allocations")
+if show_fqhc and not fqhc_df.empty:
+    table_options.append("Health Centers")
 
 if table_options:
     # Table selector
@@ -425,6 +455,40 @@ if table_options:
             file_name="schools_filtered.csv", mime="text/csv",
         )
 
+        # Enrollment distribution chart — shown below the table when enrollment data exists
+        if "enrollment" in schools_df.columns:
+            enroll_vals = schools_df["enrollment"].dropna()
+            if not enroll_vals.empty:
+                st.markdown("**Enrollment distribution**")
+                # Cap display at 2,000 so the x-axis doesn't stretch to outliers.
+                # Schools above 2,000 stack into the rightmost bin (labeled "2,000+").
+                chart_df = pd.DataFrame({
+                    "enrollment": enroll_vals.clip(upper=2000).astype(int)
+                })
+                fig = px.histogram(
+                    chart_df,
+                    x="enrollment",
+                    nbins=40,
+                    labels={"enrollment": "Enrollment", "count": "Schools"},
+                    color_discrete_sequence=["#1f77b4"],
+                )
+                fig.update_layout(
+                    height=200,
+                    margin=dict(l=0, r=0, t=10, b=0),
+                    xaxis=dict(
+                        range=[0, 2100],
+                        tickvals=[0, 500, 1000, 1500, 2000],
+                        ticktext=["0", "500", "1,000", "1,500", "2,000+"],
+                    ),
+                    yaxis_title="Schools",
+                    bargap=0.05,
+                    showlegend=False,
+                )
+                st.plotly_chart(fig, use_container_width=True)
+                above_2k = (enroll_vals > 2000).sum()
+                if above_2k:
+                    st.caption(f"{above_2k:,} school{'s' if above_2k != 1 else ''} with enrollment above 2,000 shown in the last bar.")
+
     elif active_table == "NMTC Projects":
         display_df = projects_df.copy()
         proj_cols = {
@@ -484,6 +548,39 @@ if table_options:
             file_name="cde_allocations.csv", mime="text/csv",
         )
 
+    elif active_table == "Health Centers":
+        display_df = fqhc_df.copy()
+        hc_cols = {
+            "health_center_name": "Health Center",
+            "site_name": "Site Name",
+            "state": "State",
+            "city": "City",
+            "site_type": "Site Type",
+            "health_center_type": "HC Type",
+            "total_patients": "Total Patients",
+            "census_tract_id": "Census Tract",
+            "is_active": "Active",
+        }
+        show_cols = [c for c in hc_cols if c in display_df.columns]
+        display_df = display_df[show_cols].rename(columns=hc_cols)
+
+        if "Active" in display_df.columns:
+            display_df["Active"] = display_df["Active"].map({1: "Yes", 0: "No"})
+
+        if table_filter:
+            mask = display_df.apply(
+                lambda row: row.astype(str).str.contains(table_filter, case=False).any(), axis=1
+            )
+            display_df = display_df[mask]
+
+        st.dataframe(display_df, use_container_width=True, height=400)
+
+        csv_bytes = df_to_csv_bytes(display_df)
+        st.download_button(
+            "Download Health Centers CSV", data=csv_bytes,
+            file_name="health_centers.csv", mime="text/csv",
+        )
+
 # ---------------------------------------------------------------------------
 # Comparison panel
 # ---------------------------------------------------------------------------
@@ -529,6 +626,46 @@ if show_schools and not schools_df.empty:
 
             st.dataframe(compare_display, use_container_width=True)
 
+# Health center comparison (shown when FQHC layer is on)
+if show_fqhc and not fqhc_df.empty:
+    st.markdown("---")
+    st.subheader("Compare Health Centers")
+
+    hc_names = fqhc_df.apply(
+        lambda r: r.get("site_name") or r.get("health_center_name", ""), axis=1
+    ).dropna().tolist()
+
+    if hc_names:
+        selected_hc = st.multiselect(
+            "Select health centers to compare (up to 4)",
+            options=hc_names[:500],
+            max_selections=4,
+            key="hc_compare",
+        )
+
+        if len(selected_hc) >= 2:
+            # Match by site_name first, fall back to health_center_name
+            mask = (
+                fqhc_df.get("site_name", pd.Series()).isin(selected_hc) |
+                fqhc_df.get("health_center_name", pd.Series()).isin(selected_hc)
+            )
+            hc_compare_df = fqhc_df[mask]
+
+            hc_metrics = {
+                "health_center_name": "Health Center",
+                "site_name": "Site",
+                "state": "State",
+                "city": "City",
+                "site_type": "Site Type",
+                "health_center_type": "HC Type",
+                "total_patients": "Total Patients",
+                "census_tract_id": "Census Tract",
+            }
+            hc_show = [c for c in hc_metrics if c in hc_compare_df.columns]
+            hc_display = hc_compare_df[hc_show].rename(columns=hc_metrics).T
+            hc_display.columns = [f"Site {i+1}" for i in range(len(hc_display.columns))]
+            st.dataframe(hc_display, use_container_width=True)
+
 # ---------------------------------------------------------------------------
 # Census tract summary (when NMTC layers active)
 # ---------------------------------------------------------------------------
@@ -559,7 +696,7 @@ st.markdown(
     - ✅ **Phase 1**: Schools + LEA accountability data
     - ✅ **Phase 2**: NMTC tracker + census demographics
     - ✅ **Phase 2.5**: Unified GIS layout + all public schools
-    - ⬜ Phase 3: FQHC / health centers
+    - ✅ **Phase 3**: FQHC / health centers
     - ⬜ Phase 4: ECE facility data
     - ⬜ Phase 5: 990 / philanthropy data
     - ⬜ Phase 6: Auth + PostgreSQL migration
