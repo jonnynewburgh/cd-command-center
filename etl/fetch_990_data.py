@@ -401,6 +401,9 @@ def main():
     parser.add_argument("--overwrite", action="store_true", help="Re-fetch even already-linked facilities")
     args = parser.parse_args()
 
+    # Ensure all tables and columns exist (adds ein column to schools/fqhc if missing)
+    db.init_db()
+
     # If neither flag is set, do both
     do_schools = args.schools or (not args.schools and not args.fqhc)
     do_fqhc    = args.fqhc    or (not args.schools and not args.fqhc)
