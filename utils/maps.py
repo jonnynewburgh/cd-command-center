@@ -35,6 +35,7 @@ def make_unified_map(
     tracts_df: pd.DataFrame = None,
     projects_df: pd.DataFrame = None,
     fqhc_df: pd.DataFrame = None,
+    ece_df: pd.DataFrame = None,
     center_lat: float = None,
     center_lon: float = None,
     zoom: int = 5,
@@ -46,8 +47,9 @@ def make_unified_map(
       1. Schools — circle markers colored by survival risk tier (charters)
          or blue (traditional public)
       2. NMTC Projects — blue dollar-icon markers for past investments
-      3. FQHCs — green cross markers for health center sites
-      4. Census Tracts — (future: polygon overlay; for now, not rendered as
+      3. FQHCs — green circle markers for health center sites
+      4. ECE Centers — orange circle markers for child care facilities
+      5. Census Tracts — (future: polygon overlay; for now, not rendered as
          tracts don't have centroid coordinates in the DB)
 
     Args:
@@ -55,6 +57,7 @@ def make_unified_map(
         tracts_df: DataFrame from db.get_census_tracts() (used for data, not drawn)
         projects_df: DataFrame from db.get_nmtc_projects()
         fqhc_df: DataFrame from db.get_fqhc()
+        ece_df: DataFrame from db.get_ece_centers()
         center_lat, center_lon: map center (defaults to centroid of data or US center)
         zoom: initial zoom level
 
@@ -177,6 +180,43 @@ def make_unified_map(
 
         fqhc_layer.add_to(m)
 
+    # --- Layer: ECE Centers ---
+    if ece_df is not None and not ece_df.empty:
+        ece_layer = FeatureGroup(name="ECE Centers", show=True)
+        ece_with_coords = ece_df.dropna(subset=["latitude", "longitude"])
+
+        for _, row in ece_with_coords.iterrows():
+            capacity = row.get("capacity")
+            capacity_str = f"{int(capacity):,}" if capacity and capacity == capacity else "—"
+            rating = row.get("star_rating")
+            rating_str = f"{rating:.1f} ★" if rating and rating == rating else "—"
+            popup_html = f"""
+            <div style="font-family: sans-serif; font-size: 13px; min-width: 200px;">
+                <b>{row.get('provider_name', 'ECE Center')}</b><br>
+                <span style="color:#555;">{row.get('city', '—')}, {row.get('state', '')}</span>
+                <hr style="margin: 4px 0;">
+                <b>Type:</b> {row.get('facility_type', '—')}<br>
+                <b>Status:</b> {row.get('license_status', '—')}<br>
+                <b>Capacity:</b> {capacity_str}<br>
+                <b>Ages:</b> {row.get('ages_served', '—')}<br>
+                <b>Quality Rating:</b> {rating_str}<br>
+                <b>Accepts Subsidies:</b> {'Yes' if row.get('accepts_subsidies') == 1 else '—'}<br>
+                <b>Census Tract:</b> {row.get('census_tract_id', '—') or '—'}<br>
+            </div>
+            """
+            folium.CircleMarker(
+                location=[row["latitude"], row["longitude"]],
+                radius=5,
+                color="#ff7f0e",      # orange — distinct from schools (blue/red) and FQHCs (green)
+                fill=True,
+                fill_color="#ff7f0e",
+                fill_opacity=0.7,
+                popup=folium.Popup(popup_html, max_width=280),
+                tooltip=f"ECE: {row.get('provider_name', 'Child Care Center')}",
+            ).add_to(ece_layer)
+
+        ece_layer.add_to(m)
+
     # Add Folium's built-in layer toggle control
     folium.LayerControl(collapsed=False).add_to(m)
 
@@ -185,6 +225,7 @@ def make_unified_map(
         show_schools=schools_df is not None and not schools_df.empty,
         show_projects=projects_df is not None and not projects_df.empty,
         show_fqhc=fqhc_df is not None and not fqhc_df.empty,
+        show_ece=ece_df is not None and not ece_df.empty,
         has_charters=_has_charters(schools_df),
     )
     m.get_root().html.add_child(folium.Element(legend_html))
@@ -255,6 +296,7 @@ def _unified_legend_html(
     show_schools: bool = False,
     show_projects: bool = False,
     show_fqhc: bool = False,
+    show_ece: bool = False,
     has_charters: bool = False,
 ) -> str:
     """Legend overlay for the unified map."""
@@ -291,6 +333,14 @@ def _unified_legend_html(
             '<span style="background:#2ca02c; display:inline-block; '
             'width:10px; height:10px; border-radius:50%; margin-right:6px;"></span>'
             'Health center (FQHC)</div>'
+        )
+
+    if show_ece:
+        items += (
+            '<div style="margin-top:4px;">'
+            '<span style="background:#ff7f0e; display:inline-block; '
+            'width:10px; height:10px; border-radius:50%; margin-right:6px;"></span>'
+            'ECE / child care center</div>'
         )
 
     if not items:

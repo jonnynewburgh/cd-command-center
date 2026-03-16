@@ -186,6 +186,19 @@ SITE_TYPES = [
     "Public Housing Primary Care", "Migrant Health Center",
 ]
 
+ECE_FACILITY_TYPES = [
+    "Center", "Family Child Care Home", "Group Family Day Care Home",
+    "School-Age Child Care", "Head Start Center",
+]
+ECE_PROVIDER_PREFIXES = [
+    "Sunshine", "Bright", "Little", "Happy", "Rainbow", "Star", "ABC",
+    "Growing", "Tiny Tots", "Kids First",
+]
+ECE_PROVIDER_SUFFIXES = [
+    "Learning Center", "Child Care Center", "Day Care", "Preschool",
+    "Early Learning", "Academy", "Childcare",
+]
+
 HC_NAMES = [
     "Community Health Center", "Urban Health Clinic", "Family Health Services",
     "Neighborhood Health Center", "Community Care Network", "Riverside Health",
@@ -225,6 +238,46 @@ def generate_fqhc(n=60):
     return sites
 
 
+def generate_ece_centers(n=150):
+    """Generate sample ECE center records spread across states."""
+    centers = []
+    for i in range(n):
+        state = random.choice(STATES)
+        lat, lon = random_lat_lon(state)
+        is_active = random.random() > 0.08   # 92% active
+        capacity = int(np.random.lognormal(3.8, 0.6))   # realistic: ~45 median
+        capacity = max(6, min(capacity, 300))
+        has_rating = random.random() > 0.4   # 60% have a QRIS star rating
+        star_rating = round(random.uniform(1, 5), 1) if has_rating else None
+
+        centers.append({
+            "license_id": f"LIC{state}{i+1:05d}",
+            "provider_name": f"{random.choice(ECE_PROVIDER_PREFIXES)} {random.choice(ECE_PROVIDER_SUFFIXES)}",
+            "operator_name": f"{state} Care Organization {random.randint(1, 30)}",
+            "facility_type": random.choice(ECE_FACILITY_TYPES),
+            "license_type": "Licensed" if random.random() > 0.1 else "Registered",
+            "license_status": "Active" if is_active else "Inactive",
+            "capacity": capacity,
+            "ages_served": random.choice([
+                "Infant/Toddler", "Preschool (3-5)", "All Ages (0-12)",
+                "Infant/Toddler/Preschool", "School Age (5-12)",
+            ]),
+            "accepts_subsidies": 1 if random.random() > 0.35 else 0,
+            "star_rating": star_rating,
+            "address": f"{random.randint(100, 9999)} Child Care Ln",
+            "city": f"City{random.randint(1, 30)}",
+            "state": state,
+            "zip_code": f"{random.randint(10000, 99999)}",
+            "county": f"{state} County {random.randint(1, 20)}",
+            "census_tract_id": fake_census_tract(state),
+            "latitude": lat,
+            "longitude": lon,
+            "data_year": 2023,
+            "data_source": f"{state} Sample",
+        })
+    return centers
+
+
 def main():
     print("Initializing database schema...")
     db.init_db()
@@ -240,6 +293,9 @@ def main():
 
     print("Generating sample FQHC health center records...")
     fqhc_records = generate_fqhc(60)
+
+    print("Generating sample ECE center records...")
+    ece_records = generate_ece_centers(150)
 
     print(f"Loading {len(schools)} schools...")
     for s in schools:
@@ -257,11 +313,16 @@ def main():
     for r in fqhc_records:
         db.upsert_fqhc(r)
 
+    print(f"Loading {len(ece_records)} ECE records...")
+    for r in ece_records:
+        db.upsert_ece(r)
+
     print("Sample data load complete.")
     print(f"  Schools: {len(schools)}")
     print(f"  Census tracts: {len(tracts)}")
     print(f"  LEA records: {len(lea_records)}")
     print(f"  FQHC sites: {len(fqhc_records)}")
+    print(f"  ECE centers: {len(ece_records)}")
 
 
 if __name__ == "__main__":

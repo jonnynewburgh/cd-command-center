@@ -243,6 +243,36 @@ def init_db():
         )
     """)
 
+    # ECE centers — state-licensed early care and education facilities
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ece_centers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            license_id TEXT UNIQUE,            -- state-assigned license/credential number
+            provider_name TEXT NOT NULL,       -- facility / operator name
+            facility_type TEXT,                -- 'Center', 'Family Child Care Home', 'Group Home', etc.
+            license_type TEXT,                 -- type of license (varies by state)
+            license_status TEXT,               -- 'Active', 'Inactive', 'Revoked', 'Provisional', etc.
+            capacity INTEGER,                  -- licensed capacity (max children at one time)
+            ages_served TEXT,                  -- free-text description of ages served
+            accepts_subsidies INTEGER,         -- 1 = accepts CCDF vouchers / subsidized care
+            star_rating REAL,                  -- QRIS quality star rating (if state uses one)
+            operator_name TEXT,                -- operating organization (if different from provider_name)
+            -- Location
+            address TEXT,
+            city TEXT,
+            state TEXT,
+            zip_code TEXT,
+            county TEXT,
+            census_tract_id TEXT,              -- 11-digit FIPS (joins to census_tracts)
+            latitude REAL,
+            longitude REAL,
+            -- Source / vintage
+            data_year INTEGER,
+            data_source TEXT,                  -- e.g. 'CA CCLD', 'TX HHSC', 'NY OCFS'
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -768,14 +798,110 @@ def get_fqhc_summary() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Global search — across schools, NMTC projects, CDEs, FQHCs
+# ECE center queries
+# ---------------------------------------------------------------------------
+
+@_cached(ttl=300)
+def get_ece_centers(
+    states=None,
+    active_only=True,
+    facility_types=None,
+    accepts_subsidies=None,
+    min_capacity=None,
+) -> pd.DataFrame:
+    """
+    Return ECE centers matching the given filters.
+
+    Args:
+        states: list of state abbreviations, e.g. ['CA', 'TX']
+        active_only: if True (default), only return active licensed facilities
+        facility_types: list of facility type strings, e.g. ['Center']
+        accepts_subsidies: True = subsidized care only, None = all
+        min_capacity: minimum licensed capacity (integer)
+    """
+    conditions = []
+    params = []
+
+    if active_only:
+        conditions.append("(license_status = 'Active' OR license_status IS NULL)")
+
+    if states:
+        placeholders = ",".join("?" * len(states))
+        conditions.append(f"state IN ({placeholders})")
+        params.extend(states)
+
+    if facility_types:
+        placeholders = ",".join("?" * len(facility_types))
+        conditions.append(f"facility_type IN ({placeholders})")
+        params.extend(facility_types)
+
+    if accepts_subsidies is True:
+        conditions.append("accepts_subsidies = 1")
+
+    if min_capacity is not None:
+        conditions.append("capacity >= ?")
+        params.append(min_capacity)
+
+    where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+    query = f"SELECT * FROM ece_centers {where_clause} ORDER BY state, provider_name"
+
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(query, conn, params=params)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+@_cached(ttl=300)
+def get_ece_states() -> list:
+    """Return sorted list of states that have ECE center data."""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT DISTINCT state FROM ece_centers WHERE state IS NOT NULL ORDER BY state"
+        )
+        states = [row[0] for row in cur.fetchall()]
+    except Exception:
+        states = []
+    conn.close()
+    return states
+
+
+@_cached(ttl=300)
+def get_ece_summary() -> dict:
+    """Return high-level ECE counts."""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT
+                COUNT(*) as total_centers,
+                SUM(CASE WHEN license_status = 'Active' THEN 1 ELSE 0 END) as active_centers,
+                SUM(capacity) as total_capacity,
+                COUNT(DISTINCT state) as states_covered,
+                SUM(CASE WHEN accepts_subsidies = 1 THEN 1 ELSE 0 END) as subsidized_centers
+            FROM ece_centers
+        """)
+        row = cur.fetchone()
+        result = dict(row) if row else {}
+    except Exception:
+        result = {}
+    conn.close()
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Global search — across schools, NMTC projects, CDEs, FQHCs, ECE
 # ---------------------------------------------------------------------------
 
 @_cached(ttl=60)
 def search_all(query_text: str) -> dict:
     """
-    Search across schools, NMTC projects, CDEs, and FQHCs by name/city.
-    Returns a dict with keys 'schools', 'projects', 'cdes', 'fqhc' — each a DataFrame.
+    Search across schools, NMTC projects, CDEs, FQHCs, and ECE centers by name/city.
+    Returns a dict with keys 'schools', 'projects', 'cdes', 'fqhc', 'ece' — each a DataFrame.
     """
     if not query_text or not query_text.strip():
         return {
@@ -783,6 +909,7 @@ def search_all(query_text: str) -> dict:
             "projects": pd.DataFrame(),
             "cdes": pd.DataFrame(),
             "fqhc": pd.DataFrame(),
+            "ece": pd.DataFrame(),
         }
 
     like = f"%{query_text.strip()}%"
@@ -844,12 +971,25 @@ def search_all(query_text: str) -> dict:
     except Exception:
         fqhc_df = pd.DataFrame()
 
+    # Search ECE centers
+    try:
+        ece_df = pd.read_sql_query(
+            """SELECT * FROM ece_centers
+               WHERE provider_name LIKE ? OR operator_name LIKE ?
+                 OR city LIKE ? OR state LIKE ?
+               ORDER BY provider_name LIMIT 200""",
+            conn, params=[like, like, like, like],
+        )
+    except Exception:
+        ece_df = pd.DataFrame()
+
     conn.close()
     return {
         "schools": schools_df,
         "projects": projects_df,
         "cdes": cdes_df,
         "fqhc": fqhc_df,
+        "ece": ece_df,
     }
 
 
@@ -1006,6 +1146,28 @@ def upsert_census_tract(record: dict):
         INSERT INTO census_tracts ({",".join(columns)})
         VALUES ({placeholders})
         ON CONFLICT(census_tract_id) DO UPDATE SET {update_clause}
+    """
+    cur.execute(sql, values)
+    conn.commit()
+    conn.close()
+
+
+def upsert_ece(record: dict):
+    """Insert or update an ECE center record (keyed on license_id)."""
+    conn = get_connection()
+    cur = conn.cursor()
+
+    columns = list(record.keys())
+    values = list(record.values())
+    placeholders = ",".join("?" * len(values))
+    update_clause = ",".join(
+        f"{col}=excluded.{col}" for col in columns if col != "license_id"
+    )
+
+    sql = f"""
+        INSERT INTO ece_centers ({",".join(columns)})
+        VALUES ({placeholders})
+        ON CONFLICT(license_id) DO UPDATE SET {update_clause}
     """
     cur.execute(sql, values)
     conn.commit()

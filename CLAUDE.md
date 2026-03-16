@@ -91,7 +91,7 @@ Build in this order. Each phase should produce a working, usable version of the 
 - Health center markers as a new map layer (toggle on/off)
 - Add to search and comparison
 
-### Phase 4: ECE facility data
+### Phase 4: ECE facility data ✅
 - State licensing data for early care and education centers
 - ECE markers as a new map layer
 
@@ -156,6 +156,13 @@ python etl/fetch_fqhc.py
 python etl/fetch_fqhc.py --states CA TX NY    # specific states only
 python etl/fetch_fqhc.py --all-sites          # include inactive sites
 python etl/fetch_fqhc.py --file data/raw/hrsa_health_centers.csv  # use local file
+
+# Load ECE / child care data from a state licensing CSV or Excel file
+# (Download source varies by state — see docstring at top of the script)
+python etl/load_ece_data.py --file data/raw/ca_licensed_facilities.csv --state CA
+python etl/load_ece_data.py --file data/raw/tx_childcare.xlsx --state TX --source "TX HHSC"
+python etl/load_ece_data.py --file data/raw/ny_childcare.csv --state NY --all-facilities
+python etl/load_ece_data.py --file data/raw/ca_licensed_facilities.csv --columns-only  # inspect columns
 
 # Run tests (when they exist)
 pytest tests/
