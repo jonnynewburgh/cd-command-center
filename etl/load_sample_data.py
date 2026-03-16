@@ -181,6 +181,50 @@ def generate_lea_records(schools):
     return records
 
 
+SITE_TYPES = [
+    "Health Center", "School-Based Health Center", "Mobile Unit",
+    "Public Housing Primary Care", "Migrant Health Center",
+]
+
+HC_NAMES = [
+    "Community Health Center", "Urban Health Clinic", "Family Health Services",
+    "Neighborhood Health Center", "Community Care Network", "Riverside Health",
+    "Valley Health Center", "Eastside Medical", "Westside Community Health",
+    "Central Community Clinic",
+]
+
+
+def generate_fqhc(n=60):
+    """Generate sample FQHC health center site records."""
+    sites = []
+    for i in range(n):
+        state = random.choice(STATES)
+        lat, lon = random_lat_lon(state)
+        hc_name = random.choice(HC_NAMES) + f" of {state}"
+        site_name = hc_name + (f" - Site {random.randint(1, 5)}" if random.random() > 0.4 else "")
+
+        sites.append({
+            "bhcmis_id": f"HC{i+1:06d}",
+            "health_center_name": hc_name,
+            "site_name": site_name,
+            "site_address": f"{random.randint(100, 9999)} Health Ave",
+            "city": f"City{random.randint(1, 20)}",
+            "state": state,
+            "zip_code": f"{random.randint(10000, 99999)}",
+            "county": f"{state} County {random.randint(1, 20)}",
+            "census_tract_id": fake_census_tract(state),
+            "latitude": lat,
+            "longitude": lon,
+            "site_type": random.choice(SITE_TYPES),
+            "is_active": 1 if random.random() > 0.05 else 0,
+            "health_center_type": "FQHC",
+            "total_patients": random.randint(500, 25000),
+            "patients_below_200pct_poverty": random.randint(200, 20000),
+            "data_year": 2023,
+        })
+    return sites
+
+
 def main():
     print("Initializing database schema...")
     db.init_db()
@@ -194,6 +238,9 @@ def main():
     print("Generating sample LEA accountability records...")
     lea_records = generate_lea_records(schools)
 
+    print("Generating sample FQHC health center records...")
+    fqhc_records = generate_fqhc(60)
+
     print(f"Loading {len(schools)} schools...")
     for s in schools:
         db.upsert_charter_school(s)
@@ -206,10 +253,15 @@ def main():
     for r in lea_records:
         db.upsert_lea_accountability(r)
 
+    print(f"Loading {len(fqhc_records)} FQHC records...")
+    for r in fqhc_records:
+        db.upsert_fqhc(r)
+
     print("Sample data load complete.")
     print(f"  Schools: {len(schools)}")
     print(f"  Census tracts: {len(tracts)}")
     print(f"  LEA records: {len(lea_records)}")
+    print(f"  FQHC sites: {len(fqhc_records)}")
 
 
 if __name__ == "__main__":

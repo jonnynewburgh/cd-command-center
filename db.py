@@ -217,6 +217,32 @@ def init_db():
         )
     """)
 
+    # FQHC (Federally Qualified Health Centers) — HRSA Health Center Program site-level data
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS fqhc (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bhcmis_id TEXT UNIQUE,             -- HRSA unique site identifier
+            health_center_name TEXT,           -- parent health center organization
+            site_name TEXT,                    -- specific site name
+            site_address TEXT,
+            city TEXT,
+            state TEXT,
+            zip_code TEXT,
+            county TEXT,
+            census_tract_id TEXT,              -- 11-digit FIPS (joins to census_tracts)
+            latitude REAL,
+            longitude REAL,
+            site_type TEXT,                    -- 'Health Center', 'School-Based', 'Mobile', etc.
+            is_active INTEGER DEFAULT 1,       -- 1 = active, 0 = inactive/closed
+            health_center_type TEXT,           -- 'FQHC', 'Look-Alike', 'Health Center Program Grantee'
+            -- UDS patient data (from annual UDS report, if available)
+            total_patients INTEGER,
+            patients_below_200pct_poverty INTEGER,  -- patients at or below 200% federal poverty level
+            data_year INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -659,17 +685,105 @@ def get_cde_allocations(states=None) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Global search — across schools, NMTC projects, CDEs
+# FQHC queries
+# ---------------------------------------------------------------------------
+
+@_cached(ttl=300)
+def get_fqhc(
+    states=None,
+    active_only=True,
+    site_types=None,
+) -> pd.DataFrame:
+    """
+    Return FQHC health center sites matching the given filters.
+
+    Args:
+        states: list of state abbreviations, e.g. ['CA', 'TX']
+        active_only: if True (default), only return active sites (is_active=1)
+        site_types: list of site type strings to include (e.g. ['Health Center'])
+    """
+    conditions = []
+    params = []
+
+    if active_only:
+        conditions.append("is_active = 1")
+
+    if states:
+        placeholders = ",".join("?" * len(states))
+        conditions.append(f"state IN ({placeholders})")
+        params.extend(states)
+
+    if site_types:
+        placeholders = ",".join("?" * len(site_types))
+        conditions.append(f"site_type IN ({placeholders})")
+        params.extend(site_types)
+
+    where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+    query = f"SELECT * FROM fqhc {where_clause} ORDER BY state, health_center_name"
+
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(query, conn, params=params)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+@_cached(ttl=300)
+def get_fqhc_states() -> list:
+    """Return sorted list of states that have FQHC data."""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT DISTINCT state FROM fqhc WHERE state IS NOT NULL ORDER BY state")
+        states = [row[0] for row in cur.fetchall()]
+    except Exception:
+        states = []
+    conn.close()
+    return states
+
+
+@_cached(ttl=300)
+def get_fqhc_summary() -> dict:
+    """Return high-level FQHC counts."""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT
+                COUNT(*) as total_sites,
+                SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) as active_sites,
+                COUNT(DISTINCT health_center_name) as unique_health_centers,
+                COUNT(DISTINCT state) as states_served,
+                SUM(total_patients) as total_patients
+            FROM fqhc
+        """)
+        row = cur.fetchone()
+        result = dict(row) if row else {}
+    except Exception:
+        result = {}
+    conn.close()
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Global search — across schools, NMTC projects, CDEs, FQHCs
 # ---------------------------------------------------------------------------
 
 @_cached(ttl=60)
 def search_all(query_text: str) -> dict:
     """
-    Search across schools, NMTC projects, and CDEs by name/city.
-    Returns a dict with keys 'schools', 'projects', 'cdes' — each a DataFrame.
+    Search across schools, NMTC projects, CDEs, and FQHCs by name/city.
+    Returns a dict with keys 'schools', 'projects', 'cdes', 'fqhc' — each a DataFrame.
     """
     if not query_text or not query_text.strip():
-        return {"schools": pd.DataFrame(), "projects": pd.DataFrame(), "cdes": pd.DataFrame()}
+        return {
+            "schools": pd.DataFrame(),
+            "projects": pd.DataFrame(),
+            "cdes": pd.DataFrame(),
+            "fqhc": pd.DataFrame(),
+        }
 
     like = f"%{query_text.strip()}%"
     conn = get_connection()
@@ -718,8 +832,25 @@ def search_all(query_text: str) -> dict:
     except Exception:
         cdes_df = pd.DataFrame()
 
+    # Search FQHCs
+    try:
+        fqhc_df = pd.read_sql_query(
+            """SELECT * FROM fqhc
+               WHERE health_center_name LIKE ? OR site_name LIKE ?
+                 OR city LIKE ? OR state LIKE ?
+               ORDER BY health_center_name LIMIT 200""",
+            conn, params=[like, like, like, like],
+        )
+    except Exception:
+        fqhc_df = pd.DataFrame()
+
     conn.close()
-    return {"schools": schools_df, "projects": projects_df, "cdes": cdes_df}
+    return {
+        "schools": schools_df,
+        "projects": projects_df,
+        "cdes": cdes_df,
+        "fqhc": fqhc_df,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -875,6 +1006,28 @@ def upsert_census_tract(record: dict):
         INSERT INTO census_tracts ({",".join(columns)})
         VALUES ({placeholders})
         ON CONFLICT(census_tract_id) DO UPDATE SET {update_clause}
+    """
+    cur.execute(sql, values)
+    conn.commit()
+    conn.close()
+
+
+def upsert_fqhc(record: dict):
+    """Insert or update a FQHC site record (keyed on bhcmis_id)."""
+    conn = get_connection()
+    cur = conn.cursor()
+
+    columns = list(record.keys())
+    values = list(record.values())
+    placeholders = ",".join("?" * len(values))
+    update_clause = ",".join(
+        f"{col}=excluded.{col}" for col in columns if col != "bhcmis_id"
+    )
+
+    sql = f"""
+        INSERT INTO fqhc ({",".join(columns)})
+        VALUES ({placeholders})
+        ON CONFLICT(bhcmis_id) DO UPDATE SET {update_clause}
     """
     cur.execute(sql, values)
     conn.commit()

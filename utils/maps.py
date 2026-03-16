@@ -34,6 +34,7 @@ def make_unified_map(
     schools_df: pd.DataFrame = None,
     tracts_df: pd.DataFrame = None,
     projects_df: pd.DataFrame = None,
+    fqhc_df: pd.DataFrame = None,
     center_lat: float = None,
     center_lon: float = None,
     zoom: int = 5,
@@ -45,13 +46,15 @@ def make_unified_map(
       1. Schools — circle markers colored by survival risk tier (charters)
          or blue (traditional public)
       2. NMTC Projects — blue dollar-icon markers for past investments
-      3. Census Tracts — (future: polygon overlay; for now, not rendered as
+      3. FQHCs — green cross markers for health center sites
+      4. Census Tracts — (future: polygon overlay; for now, not rendered as
          tracts don't have centroid coordinates in the DB)
 
     Args:
         schools_df: DataFrame from db.get_schools()
         tracts_df: DataFrame from db.get_census_tracts() (used for data, not drawn)
         projects_df: DataFrame from db.get_nmtc_projects()
+        fqhc_df: DataFrame from db.get_fqhc()
         center_lat, center_lon: map center (defaults to centroid of data or US center)
         zoom: initial zoom level
 
@@ -142,6 +145,38 @@ def make_unified_map(
 
         project_layer.add_to(m)
 
+    # --- Layer: FQHCs ---
+    if fqhc_df is not None and not fqhc_df.empty:
+        fqhc_layer = FeatureGroup(name="Health Centers (FQHCs)", show=True)
+        fqhc_with_coords = fqhc_df.dropna(subset=["latitude", "longitude"])
+
+        for _, row in fqhc_with_coords.iterrows():
+            patients = row.get("total_patients")
+            patients_str = f"{int(patients):,}" if patients and patients == patients else "—"
+            popup_html = f"""
+            <div style="font-family: sans-serif; font-size: 13px; min-width: 200px;">
+                <b>{row.get('site_name') or row.get('health_center_name', 'Health Center')}</b><br>
+                <span style="color:#555;">{row.get('health_center_name', '')}</span>
+                <hr style="margin: 4px 0;">
+                <b>Type:</b> {row.get('site_type', '—')}<br>
+                <b>City:</b> {row.get('city', '—')}, {row.get('state', '')}<br>
+                <b>Total Patients:</b> {patients_str}<br>
+                <b>Census Tract:</b> {row.get('census_tract_id', '—') or '—'}<br>
+            </div>
+            """
+            folium.CircleMarker(
+                location=[row["latitude"], row["longitude"]],
+                radius=6,
+                color="#2ca02c",      # green
+                fill=True,
+                fill_color="#2ca02c",
+                fill_opacity=0.7,
+                popup=folium.Popup(popup_html, max_width=280),
+                tooltip=f"FQHC: {row.get('site_name') or row.get('health_center_name', 'Health Center')}",
+            ).add_to(fqhc_layer)
+
+        fqhc_layer.add_to(m)
+
     # Add Folium's built-in layer toggle control
     folium.LayerControl(collapsed=False).add_to(m)
 
@@ -149,6 +184,7 @@ def make_unified_map(
     legend_html = _unified_legend_html(
         show_schools=schools_df is not None and not schools_df.empty,
         show_projects=projects_df is not None and not projects_df.empty,
+        show_fqhc=fqhc_df is not None and not fqhc_df.empty,
         has_charters=_has_charters(schools_df),
     )
     m.get_root().html.add_child(folium.Element(legend_html))
@@ -218,6 +254,7 @@ def _fmt_pct(val) -> str:
 def _unified_legend_html(
     show_schools: bool = False,
     show_projects: bool = False,
+    show_fqhc: bool = False,
     has_charters: bool = False,
 ) -> str:
     """Legend overlay for the unified map."""
@@ -246,6 +283,14 @@ def _unified_legend_html(
             '<div style="margin-top:4px;">'
             '<span style="color:#1f77b4; margin-right:6px;">&#x1f4b5;</span>'
             'NMTC project</div>'
+        )
+
+    if show_fqhc:
+        items += (
+            '<div style="margin-top:4px;">'
+            '<span style="background:#2ca02c; display:inline-block; '
+            'width:10px; height:10px; border-radius:50%; margin-right:6px;"></span>'
+            'Health center (FQHC)</div>'
         )
 
     if not items:

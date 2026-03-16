@@ -149,6 +149,13 @@ python etl/load_census_tracts.py --all
 # Load NMTC project + CDE data from CDFI Fund Excel
 python etl/load_nmtc_data.py --file data/raw/nmtc_public_data_2024.xlsx
 python etl/load_nmtc_data.py --file data/raw/nmtc_public_data_2024.xlsx --sheet-names
+python etl/load_nmtc_data.py --file data/raw/nmtc_public_data_2024.xlsx --project-sheet "QLICI" --cde-sheet "CDE"
+
+# Load FQHC / health center data from HRSA (auto-downloads latest file)
+python etl/fetch_fqhc.py
+python etl/fetch_fqhc.py --states CA TX NY    # specific states only
+python etl/fetch_fqhc.py --all-sites          # include inactive sites
+python etl/fetch_fqhc.py --file data/raw/hrsa_health_centers.csv  # use local file
 
 # Run tests (when they exist)
 pytest tests/
