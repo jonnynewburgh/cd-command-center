@@ -9,8 +9,9 @@ from folium import FeatureGroup
 from folium.plugins import MarkerCluster
 import pandas as pd
 
-# Above this count, use clustered markers for schools to keep the map fast
-SCHOOL_CLUSTER_THRESHOLD = 500
+# Above this count, use clustered markers for schools to keep the map fast.
+# Lower = clusters kick in sooner = faster initial render with many schools.
+SCHOOL_CLUSTER_THRESHOLD = 200
 
 
 # Color scheme for charter school survival risk tiers
@@ -93,19 +94,21 @@ def make_unified_map(
         else:
             marker_target = school_layer
 
-        for _, row in schools_with_coords.iterrows():
-            is_charter = row.get("is_charter", 1)
+        # itertuples() is ~5-10x faster than iterrows() for 500+ rows because it
+        # returns namedtuples instead of full pandas Series objects.
+        for row in schools_with_coords.itertuples(index=False):
+            is_charter = getattr(row, "is_charter", 1)
             if is_charter:
-                color = RISK_COLORS.get(row.get("survival_risk_tier", "Unknown"), "#7f7f7f")
+                color = RISK_COLORS.get(getattr(row, "survival_risk_tier", "Unknown"), "#7f7f7f")
             else:
                 color = "#1f77b4"  # blue for traditional public schools
 
             popup_html = _school_popup_html(row)
-            label = row.get("school_name", "School")
+            label = getattr(row, "school_name", "School")
             prefix = "Charter" if is_charter else "Public"
 
             folium.CircleMarker(
-                location=[row["latitude"], row["longitude"]],
+                location=[row.latitude, row.longitude],
                 radius=5,
                 color=color,
                 fill=True,
@@ -125,25 +128,25 @@ def make_unified_map(
         project_layer = FeatureGroup(name="NMTC Projects", show=True)
         projects_with_coords = projects_df.dropna(subset=["latitude", "longitude"])
 
-        for _, row in projects_with_coords.iterrows():
-            qlici = row.get("qlici_amount")
+        for row in projects_with_coords.itertuples(index=False):
+            qlici = getattr(row, "qlici_amount", None)
             qlici_str = f"${qlici/1e6:.1f}M" if qlici and qlici == qlici else "—"
             popup_html = f"""
             <div style="font-family: sans-serif; font-size: 13px; min-width: 200px;">
-                <b>{row.get('project_name', 'NMTC Project')}</b><br>
-                <span style="color:#555;">{row.get('city', '')}, {row.get('state', '')}</span>
+                <b>{getattr(row, 'project_name', 'NMTC Project')}</b><br>
+                <span style="color:#555;">{getattr(row, 'city', '')}, {getattr(row, 'state', '')}</span>
                 <hr style="margin: 4px 0;">
-                <b>Type:</b> {row.get('project_type', '—')}<br>
+                <b>Type:</b> {getattr(row, 'project_type', '—')}<br>
                 <b>QLICI:</b> {qlici_str}<br>
-                <b>CDE:</b> {row.get('cde_name', '—')}<br>
-                <b>Year:</b> {row.get('fiscal_year', '—')}<br>
+                <b>CDE:</b> {getattr(row, 'cde_name', '—')}<br>
+                <b>Year:</b> {getattr(row, 'fiscal_year', '—')}<br>
             </div>
             """
             folium.Marker(
-                location=[row["latitude"], row["longitude"]],
+                location=[row.latitude, row.longitude],
                 icon=folium.Icon(color="blue", icon="dollar", prefix="fa"),
                 popup=folium.Popup(popup_html, max_width=280),
-                tooltip=f"NMTC: {row.get('project_name', 'Project')}",
+                tooltip=f"NMTC: {getattr(row, 'project_name', 'Project')}",
             ).add_to(project_layer)
 
         project_layer.add_to(m)
@@ -153,29 +156,30 @@ def make_unified_map(
         fqhc_layer = FeatureGroup(name="Health Centers (FQHCs)", show=True)
         fqhc_with_coords = fqhc_df.dropna(subset=["latitude", "longitude"])
 
-        for _, row in fqhc_with_coords.iterrows():
-            patients = row.get("total_patients")
+        for row in fqhc_with_coords.itertuples(index=False):
+            patients = getattr(row, "total_patients", None)
             patients_str = f"{int(patients):,}" if patients and patients == patients else "—"
+            site = getattr(row, "site_name", None) or getattr(row, "health_center_name", "Health Center")
             popup_html = f"""
             <div style="font-family: sans-serif; font-size: 13px; min-width: 200px;">
-                <b>{row.get('site_name') or row.get('health_center_name', 'Health Center')}</b><br>
-                <span style="color:#555;">{row.get('health_center_name', '')}</span>
+                <b>{site}</b><br>
+                <span style="color:#555;">{getattr(row, 'health_center_name', '')}</span>
                 <hr style="margin: 4px 0;">
-                <b>Type:</b> {row.get('site_type', '—')}<br>
-                <b>City:</b> {row.get('city', '—')}, {row.get('state', '')}<br>
+                <b>Type:</b> {getattr(row, 'site_type', '—')}<br>
+                <b>City:</b> {getattr(row, 'city', '—')}, {getattr(row, 'state', '')}<br>
                 <b>Total Patients:</b> {patients_str}<br>
-                <b>Census Tract:</b> {row.get('census_tract_id', '—') or '—'}<br>
+                <b>Census Tract:</b> {getattr(row, 'census_tract_id', '—') or '—'}<br>
             </div>
             """
             folium.CircleMarker(
-                location=[row["latitude"], row["longitude"]],
+                location=[row.latitude, row.longitude],
                 radius=6,
                 color="#2ca02c",      # green
                 fill=True,
                 fill_color="#2ca02c",
                 fill_opacity=0.7,
                 popup=folium.Popup(popup_html, max_width=280),
-                tooltip=f"FQHC: {row.get('site_name') or row.get('health_center_name', 'Health Center')}",
+                tooltip=f"FQHC: {site}",
             ).add_to(fqhc_layer)
 
         fqhc_layer.add_to(m)
@@ -185,34 +189,34 @@ def make_unified_map(
         ece_layer = FeatureGroup(name="ECE Centers", show=True)
         ece_with_coords = ece_df.dropna(subset=["latitude", "longitude"])
 
-        for _, row in ece_with_coords.iterrows():
-            capacity = row.get("capacity")
+        for row in ece_with_coords.itertuples(index=False):
+            capacity = getattr(row, "capacity", None)
             capacity_str = f"{int(capacity):,}" if capacity and capacity == capacity else "—"
-            rating = row.get("star_rating")
+            rating = getattr(row, "star_rating", None)
             rating_str = f"{rating:.1f} ★" if rating and rating == rating else "—"
             popup_html = f"""
             <div style="font-family: sans-serif; font-size: 13px; min-width: 200px;">
-                <b>{row.get('provider_name', 'ECE Center')}</b><br>
-                <span style="color:#555;">{row.get('city', '—')}, {row.get('state', '')}</span>
+                <b>{getattr(row, 'provider_name', 'ECE Center')}</b><br>
+                <span style="color:#555;">{getattr(row, 'city', '—')}, {getattr(row, 'state', '')}</span>
                 <hr style="margin: 4px 0;">
-                <b>Type:</b> {row.get('facility_type', '—')}<br>
-                <b>Status:</b> {row.get('license_status', '—')}<br>
+                <b>Type:</b> {getattr(row, 'facility_type', '—')}<br>
+                <b>Status:</b> {getattr(row, 'license_status', '—')}<br>
                 <b>Capacity:</b> {capacity_str}<br>
-                <b>Ages:</b> {row.get('ages_served', '—')}<br>
+                <b>Ages:</b> {getattr(row, 'ages_served', '—')}<br>
                 <b>Quality Rating:</b> {rating_str}<br>
-                <b>Accepts Subsidies:</b> {'Yes' if row.get('accepts_subsidies') == 1 else '—'}<br>
-                <b>Census Tract:</b> {row.get('census_tract_id', '—') or '—'}<br>
+                <b>Accepts Subsidies:</b> {'Yes' if getattr(row, 'accepts_subsidies', 0) == 1 else '—'}<br>
+                <b>Census Tract:</b> {getattr(row, 'census_tract_id', '—') or '—'}<br>
             </div>
             """
             folium.CircleMarker(
-                location=[row["latitude"], row["longitude"]],
+                location=[row.latitude, row.longitude],
                 radius=5,
                 color="#ff7f0e",      # orange — distinct from schools (blue/red) and FQHCs (green)
                 fill=True,
                 fill_color="#ff7f0e",
                 fill_opacity=0.7,
                 popup=folium.Popup(popup_html, max_width=280),
-                tooltip=f"ECE: {row.get('provider_name', 'Child Care Center')}",
+                tooltip=f"ECE: {getattr(row, 'provider_name', 'Child Care Center')}",
             ).add_to(ece_layer)
 
         ece_layer.add_to(m)
@@ -243,18 +247,25 @@ def _has_charters(df) -> bool:
 
 
 def _school_popup_html(row) -> str:
-    """Generate HTML for a school marker popup."""
-    survival_score = row.get("survival_score")
+    """
+    Generate HTML for a school marker popup.
+    Works with both pandas Series (from iterrows) and namedtuples (from itertuples).
+    Uses getattr() with a default so it's compatible with both.
+    """
+    def _get(key, default=None):
+        return getattr(row, key, default)
+
+    survival_score = _get("survival_score")
     score_str = f"{survival_score:.2f}" if survival_score is not None and survival_score == survival_score else "—"
-    enrollment = row.get("enrollment")
+    enrollment = _get("enrollment")
     enrollment_str = f"{int(enrollment):,}" if enrollment and enrollment == enrollment else "—"
-    is_charter = row.get("is_charter", 1)
+    is_charter = _get("is_charter", 1)
     school_type = "Charter" if is_charter else "Public"
 
     # Build survival info only for charter schools
     survival_html = ""
     if is_charter:
-        risk_tier = row.get("survival_risk_tier", "—")
+        risk_tier = _get("survival_risk_tier", "—")
         risk_color = RISK_COLORS.get(risk_tier, "#555")
         survival_html = f"""
         <b>Survival Score:</b> {score_str}
@@ -265,16 +276,16 @@ def _school_popup_html(row) -> str:
 
     return f"""
     <div style="font-family: sans-serif; font-size: 13px; min-width: 200px;">
-        <b>{row.get('school_name', 'Unknown School')}</b><br>
-        <span style="color: #555;">{row.get('city', '') or ''}, {row.get('state', '')}</span>
+        <b>{_get('school_name', 'Unknown School')}</b><br>
+        <span style="color: #555;">{_get('city', '') or ''}, {_get('state', '')}</span>
         <hr style="margin: 4px 0;">
         <b>Type:</b> {school_type}<br>
-        <b>Status:</b> {row.get('school_status', '—')}<br>
+        <b>Status:</b> {_get('school_status', '—')}<br>
         <b>Enrollment:</b> {enrollment_str}<br>
         {survival_html}
-        <b>LEA:</b> {row.get('lea_name', '—')}<br>
-        <b>Census Tract:</b> {row.get('census_tract_id', '—') or '—'}<br>
-        <b>FRL:</b> {_fmt_pct(row.get('pct_free_reduced_lunch'))}<br>
+        <b>LEA:</b> {_get('lea_name', '—')}<br>
+        <b>Census Tract:</b> {_get('census_tract_id', '—') or '—'}<br>
+        <b>FRL:</b> {_fmt_pct(_get('pct_free_reduced_lunch'))}<br>
     </div>
     """
 
