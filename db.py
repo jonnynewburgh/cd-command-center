@@ -273,6 +273,40 @@ def init_db():
         )
     """)
 
+    # ---------------------------------------------------------------------------
+    # Indexes — added after all tables so CREATE INDEX IF NOT EXISTS is safe to
+    # run on an existing DB. This means re-running init_db() on startup will
+    # add indexes to any DB that was created before this code was added.
+    # ---------------------------------------------------------------------------
+
+    # schools: all columns that appear in WHERE clauses or the LEA JOIN
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_schools_state      ON schools(state)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_schools_is_charter ON schools(is_charter)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_schools_status     ON schools(school_status)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_schools_risk_tier  ON schools(survival_risk_tier)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_schools_lea_id     ON schools(lea_id)")
+
+    # lea_accountability: JOIN key — without this, every LEA lookup is a full scan
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_lea_id ON lea_accountability(lea_id)")
+
+    # census_tracts: state + eligibility tier + poverty rate are the common filters
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_tracts_state       ON census_tracts(state)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_tracts_eligibility ON census_tracts(nmtc_eligibility_tier)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_tracts_poverty     ON census_tracts(poverty_rate)")
+
+    # nmtc_projects
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_nmtc_state         ON nmtc_projects(state)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_nmtc_tract         ON nmtc_projects(census_tract_id)")
+
+    # fqhc
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_fqhc_state         ON fqhc(state)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_fqhc_active        ON fqhc(is_active)")
+
+    # ece_centers
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ece_state          ON ece_centers(state)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ece_status         ON ece_centers(license_status)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ece_capacity       ON ece_centers(capacity)")
+
     conn.commit()
     conn.close()
 
@@ -370,24 +404,34 @@ def get_schools(
 
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
 
-    # Try to query from the 'schools' table; fall back to 'charter_schools' for old DBs
+    # Try to query from the 'schools' table; fall back to 'charter_schools' for old DBs.
+    #
+    # The LEA join uses a CTE (WITH latest_lea ...) instead of a correlated subquery.
+    # A correlated subquery runs once per school row; the CTE runs once and is reused,
+    # making it O(schools + districts) instead of O(schools * districts).
     for table_name in ["schools", "charter_schools"]:
         try:
+            t = table_name[0]   # alias: 's' for schools, 'c' for charter_schools
             query = f"""
+                WITH latest_lea AS (
+                    SELECT lea_id, MAX(data_year) AS max_year
+                    FROM lea_accountability
+                    GROUP BY lea_id
+                )
                 SELECT
-                    {table_name[0]}.*,
+                    {t}.*,
                     la.accountability_score,
                     la.accountability_rating,
                     la.proficiency_reading,
                     la.proficiency_math
-                FROM {table_name} {table_name[0]}
+                FROM {table_name} {t}
+                LEFT JOIN latest_lea ll
+                    ON {t}.lea_id = ll.lea_id
                 LEFT JOIN lea_accountability la
-                    ON {table_name[0]}.lea_id = la.lea_id
-                    AND la.data_year = (
-                        SELECT MAX(data_year) FROM lea_accountability WHERE lea_id = {table_name[0]}.lea_id
-                    )
+                    ON la.lea_id = ll.lea_id
+                    AND la.data_year = ll.max_year
                 {where_clause}
-                ORDER BY {table_name[0]}.school_name
+                ORDER BY {t}.school_name
             """
             conn = get_connection()
             df = pd.read_sql_query(query, conn, params=params)
@@ -429,7 +473,7 @@ def get_charter_school_by_id(school_id: int) -> dict:
     return get_school_by_id(school_id)
 
 
-@_cached(ttl=300)
+@_cached(ttl=3600)   # state lists change rarely — cache for 1 hour
 def get_school_states() -> list:
     """Return sorted list of states that have school data."""
     conn = get_connection()
@@ -594,7 +638,7 @@ def get_census_tract_summary() -> dict:
     return dict(row) if row else {}
 
 
-@_cached(ttl=300)
+@_cached(ttl=3600)   # state lists change rarely — cache for 1 hour
 def get_census_tract_states() -> list:
     """Return sorted list of states that have census tract data."""
     conn = get_connection()
@@ -760,7 +804,7 @@ def get_fqhc(
     return df
 
 
-@_cached(ttl=300)
+@_cached(ttl=3600)   # state lists change rarely — cache for 1 hour
 def get_fqhc_states() -> list:
     """Return sorted list of states that have FQHC data."""
     conn = get_connection()
@@ -854,7 +898,7 @@ def get_ece_centers(
     return df
 
 
-@_cached(ttl=300)
+@_cached(ttl=3600)   # state lists change rarely — cache for 1 hour
 def get_ece_states() -> list:
     """Return sorted list of states that have ECE center data."""
     conn = get_connection()

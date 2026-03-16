@@ -7,22 +7,51 @@ Unlike schools (NCES) or health centers (HRSA), there is no single national
 ECE database. Each state maintains its own licensing registry. Most states
 publish their licensed provider lists as downloadable CSV or Excel files.
 
-Where to get state ECE data:
-    CA: https://www.ccld.dss.ca.gov/transparencyportal/
-        → "Active Licensed Facilities" CSV download
-    TX: https://www.hhs.texas.gov/childcare/gettinginfo/listing.asp
-        → Licensed Child Care Operations (XLSX)
+States with confirmed open-data portal downloads (just download and run):
+
+    CA: https://data.chhs.ca.gov/dataset/ccl-facilities
+        → CSV, ~100k rows (CDSS Community Care Licensing)
+        → Also: https://data.ca.gov/dataset/community-care-licensing-facilities
+
+    CO: https://data.colorado.gov/d/a9rr-k8mu
+        → CSV, updated monthly. *** INCLUDES COLORADO SHINES QRIS STAR RATING ***
+        → The star_rating column in this tool maps to the "Quality Rating Level" column
+
+    DE: https://data.delaware.gov  (search "licensed child care providers")
+        → Multiple datasets including by age group and by county/capacity
+
     NY: https://data.ny.gov/Human-Services/Child-Care-Regulated-Programs/cb42-qumz
-        → Regulated Programs CSV from data.ny.gov
+        → Regulated Programs CSV. Note: NYC programs are NOT included (separate DOHMH system)
+
+    PA: https://data.pa.gov/Services-Near-You/Child-Care-Providers-including-Early-Learning-Prog/ajn5-kaxt
+        → Open certified child care facilities + early learning programs, updated monthly
+
+    TX: https://data.texas.gov  (search "HHSC CCL Daycare and Residential Operations")
+        → XLSX from Texas Health and Human Services Commission
+
+    WA: https://data.wa.gov/education/DCYF-Licensed-Childcare-Center-and-School-Age-Prog/was8-3ni8
+        → Licensed childcare centers and school-age programs (DCYF)
+
+States where bulk download requires FOIA or web scraping:
     FL: https://childcarefacilities.myflfamilies.com/
-        → Facility search (no bulk download; use web scraping or FOIA)
     IL: https://sunshine.dcfs.illinois.gov/content/licensing/providersearch.aspx
-        → Provider search; download via FOIA or "Licensed Facility Report"
     GA: https://www.decal.ga.gov/BCS/Search.aspx
-        → Provider lookup (download via FOIA)
+    OH: https://childcaresearch.ohio.gov/  (search only, no bulk download)
 
     For other states: search "[STATE] child care licensing data download" or
-    "[STATE] licensed child care providers list".
+    "[STATE] licensed child care providers list", or check catalog.data.gov
+    with the tag "child-care".
+
+About QRIS (Quality Rating and Improvement System):
+    26+ states run a QRIS program that rates child care quality on a star scale.
+    Star ratings are stored in the star_rating column of ece_centers.
+    Colorado is the only state that includes QRIS stars in the bulk download file.
+    Most other states publish ratings through separate portals, e.g.:
+        NC: Star Rated License (included in state licensing download)
+        TN: Star Quality Program (https://www.tn.gov/humanservices/for-families/child-care-payment-assistance-program/star-quality-child-care-program.html)
+        KY: STARS for KIDS NOW
+        OH: Step Up To Quality (https://jfs.ohio.gov/childcare/sutq/)
+    National QRIS aggregate info: https://qualitycompendium.org/view-state-profiles
 
 Column mapping:
     State CSV column names vary widely. This script maps common patterns to
