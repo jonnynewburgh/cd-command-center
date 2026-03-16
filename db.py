@@ -378,10 +378,15 @@ def get_schools(
     county=None,
     census_tract_id=None,
     charter_only=False,
+    nmtc_eligible_only=False,
 ) -> pd.DataFrame:
     """
     Return schools matching the given filters as a DataFrame.
     All parameters are optional — omitting them returns all schools.
+
+    Joins to census_tracts to include nmtc_eligibility_tier and
+    is_nmtc_eligible on every row — useful for deal origination filtering.
+    Also includes has_990 (1/0) based on whether an EIN is linked.
 
     Args:
         states: list of state abbreviations, e.g. ['CA', 'TX']
@@ -394,6 +399,7 @@ def get_schools(
         county: county name substring match
         census_tract_id: exact census tract FIPS code
         charter_only: if True, only return charter schools (is_charter=1)
+        nmtc_eligible_only: if True, only return schools in NMTC-eligible tracts
     """
     conditions = []
     params = []
@@ -440,6 +446,10 @@ def get_schools(
         conditions.append("s.census_tract_id = ?")
         params.append(census_tract_id)
 
+    if nmtc_eligible_only:
+        # Filter to schools in NMTC-eligible census tracts (LIC, Severely Distressed, Deep Distress)
+        conditions.append("ct.is_nmtc_eligible = 1")
+
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
 
     # Try to query from the 'schools' table; fall back to 'charter_schools' for old DBs.
@@ -447,6 +457,10 @@ def get_schools(
     # The LEA join uses a CTE (WITH latest_lea ...) instead of a correlated subquery.
     # A correlated subquery runs once per school row; the CTE runs once and is reused,
     # making it O(schools + districts) instead of O(schools * districts).
+    #
+    # We also LEFT JOIN census_tracts to expose NMTC eligibility tier on each row,
+    # and compute has_990 (1 if the school has an EIN linked, 0 otherwise) so the
+    # dashboard can quickly flag which schools have financial data available.
     for table_name in ["schools", "charter_schools"]:
         try:
             t = table_name[0]   # alias: 's' for schools, 'c' for charter_schools
@@ -461,13 +475,28 @@ def get_schools(
                     la.accountability_score,
                     la.accountability_rating,
                     la.proficiency_reading,
-                    la.proficiency_math
+                    la.proficiency_math,
+                    -- Use detailed tier when available, otherwise fall back to
+                    -- is_nmtc_eligible flag so schools in older/partial tract
+                    -- data still show as eligible/not-eligible
+                    CASE
+                        WHEN ct.nmtc_eligibility_tier IS NOT NULL THEN ct.nmtc_eligibility_tier
+                        WHEN ct.is_nmtc_eligible = 1 THEN 'Eligible'
+                        WHEN ct.is_nmtc_eligible = 0 THEN 'Not Eligible'
+                        ELSE NULL
+                    END AS nmtc_eligibility_tier,
+                    ct.is_nmtc_eligible,
+                    ct.poverty_rate       AS tract_poverty_rate,
+                    ct.median_household_income AS tract_median_income,
+                    CASE WHEN {t}.ein IS NOT NULL THEN 1 ELSE 0 END AS has_990
                 FROM {table_name} {t}
                 LEFT JOIN latest_lea ll
                     ON {t}.lea_id = ll.lea_id
                 LEFT JOIN lea_accountability la
                     ON la.lea_id = ll.lea_id
                     AND la.data_year = ll.max_year
+                LEFT JOIN census_tracts ct
+                    ON {t}.census_tract_id = ct.census_tract_id
                 {where_clause}
                 ORDER BY {t}.school_name
             """
