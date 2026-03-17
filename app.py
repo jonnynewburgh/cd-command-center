@@ -9,11 +9,17 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from streamlit_folium import st_folium
+import json
+import os
+import xml.etree.ElementTree as ET
+from urllib.request import urlopen, Request
+from urllib.error import URLError
 
 import db
 from utils.maps import make_unified_map
 from utils.export import df_to_csv_bytes
 from utils.geo import geocode_address, filter_by_radius
+from utils.pdf_extractor import extract_from_pdf, build_ratio_updates_from_audit, to_json, from_json
 
 # ---------------------------------------------------------------------------
 # Page config + init
@@ -33,12 +39,28 @@ if "compare_items" not in st.session_state:
     st.session_state["compare_items"] = []
 if "detail_site" not in st.session_state:
     st.session_state["detail_site"] = None
+if "bookmarks_refresh" not in st.session_state:
+    st.session_state["bookmarks_refresh"] = 0
 
 # ---------------------------------------------------------------------------
 # Sidebar: Global search + Layer toggles + Filters
 # ---------------------------------------------------------------------------
 
 st.sidebar.title("CD Command Center")
+
+# --- Bookmarks ---
+bookmarks = db.get_bookmarks()
+if bookmarks:
+    with st.sidebar.expander(f"⭐ Bookmarks ({len(bookmarks)})", expanded=False):
+        for bm in bookmarks[:20]:
+            label = bm.get("label", bm.get("entity_id", ""))
+            et = bm.get("entity_type", "")
+            eid = bm.get("entity_id", "")
+            # Clicking a bookmark opens the Site Detail tab for that entity
+            icon = {"school": "🏫", "fqhc": "🏥", "ece": "🧒", "nmtc": "💰"}.get(et, "📌")
+            if st.button(f"{icon} {label}", key=f"bm_{et}_{eid}", use_container_width=True):
+                id_val = int(eid) if et == "school" else str(eid)
+                st.session_state["detail_site"] = {"type": et, "id": id_val}
 
 # --- Global search ---
 search_query = st.sidebar.text_input(
@@ -575,9 +597,15 @@ def _render_school_detail(school_id):
     school_type_label = "Charter School" if is_charter else "Traditional Public School"
     status = school.get("school_status", "Unknown")
     status_icon = "✅" if status == "Open" else ("❌" if status == "Closed" else "⏳")
+    school_name = school.get("school_name", "Unknown School")
 
-    st.markdown(f"## {school.get('school_name', 'Unknown School')}")
-    st.markdown(f"🏫 {school_type_label} · {school.get('city', '—')}, {school.get('state', '—')} · {status_icon} {status}")
+    col_title, col_bm = st.columns([5, 1])
+    with col_title:
+        st.markdown(f"## {school_name}")
+        st.markdown(f"🏫 {school_type_label} · {school.get('city', '—')}, {school.get('state', '—')} · {status_icon} {status}")
+    with col_bm:
+        _render_bookmark_button("school", str(school_id), school_name)
+
     if school.get("address"):
         st.caption(f"📍 {school['address']}, {school.get('city', '')}, {school.get('state', '')} {school.get('zip_code', '')}")
 
@@ -627,20 +655,24 @@ def _render_school_detail(school_id):
         else:
             st.caption("No LEA ID available.")
 
+    nces_id = school.get("nces_id")
+    ein = school.get("ein")
+
     if is_charter:
         st.markdown("---")
         st.markdown("**990 / Financial Health**")
-        nces_id = school.get("nces_id")
-        ein = school.get("ein")
         if nces_id:
             _render_990_section(db.get_990_for_school(nces_id))
         else:
             st.caption("No NCES ID — cannot look up 990.")
 
-        # Operator profile — show all other schools run by same org if EIN is linked
+        # Financial ratios (acid, leverage, avg cash flow)
         if ein:
+            st.markdown("---")
+            _render_financial_ratios(ein)
+
+            # Operator profile — other schools run by same org
             other_schools = db.get_operator_schools(ein)
-            # Exclude the current school from the list
             if not other_schools.empty and "id" in other_schools.columns:
                 other_schools = other_schools[other_schools["id"] != school_id]
             if not other_schools.empty:
@@ -667,6 +699,19 @@ def _render_school_detail(school_id):
                     fig.update_layout(height=300, margin=dict(t=40, b=20))
                     st.plotly_chart(fig, use_container_width=True)
 
+    # Enrollment trend (all school types)
+    if nces_id:
+        enroll_hist = db.get_enrollment_history(nces_id)
+        if not enroll_hist.empty and len(enroll_hist) > 1 and "school_year" in enroll_hist.columns:
+            st.markdown("---")
+            st.markdown("**Enrollment Trend**")
+            fig_e = px.line(enroll_hist, x="school_year", y="enrollment",
+                            labels={"school_year": "School Year", "enrollment": "Enrollment"},
+                            markers=True)
+            fig_e.update_layout(height=250, margin=dict(t=20, b=20))
+            st.plotly_chart(fig_e, use_container_width=True)
+            st.caption("Source: NCES via Education Data API")
+
     st.markdown("---")
     st.markdown("**Census Tract Context**")
     _render_census_context(school.get("census_tract_id"))
@@ -676,12 +721,23 @@ def _render_school_detail(school_id):
     lat, lon = school.get("latitude"), school.get("longitude")
     if lat and lon:
         nearby = db.get_nearby_facilities(float(lat), float(lon), radius_miles=1.0)
-        # Exclude this school from the nearby schools list
         if not nearby["schools"].empty and "id" in nearby["schools"].columns:
             nearby["schools"] = nearby["schools"][nearby["schools"]["id"] != school_id]
         _render_nearby_facilities(nearby)
     else:
         st.caption("No coordinates available — cannot show nearby facilities.")
+
+    # News feed, notes, document upload
+    st.markdown("---")
+    org_name = school.get("lea_name") or school_name
+    _render_news_feed(org_name)
+
+    st.markdown("---")
+    _render_notes_widget("school", str(school_id))
+
+    if ein:
+        st.markdown("---")
+        _render_document_upload(ein, "school", str(school_id))
 
 
 def _render_fqhc_detail(bhcmis_id):
@@ -693,8 +749,15 @@ def _render_fqhc_detail(bhcmis_id):
 
     is_active = site.get("is_active") == 1
     status_label = "✅ Active" if is_active else "❌ Inactive"
-    st.markdown(f"## {site.get('site_name') or site.get('health_center_name', 'Unknown Site')}")
-    st.markdown(f"🏥 {site.get('health_center_type', 'Health Center')} · {site.get('city', '—')}, {site.get('state', '—')} · {status_label}")
+    site_name = site.get("site_name") or site.get("health_center_name", "Unknown Site")
+
+    col_title_f, col_bm_f = st.columns([5, 1])
+    with col_title_f:
+        st.markdown(f"## {site_name}")
+        st.markdown(f"🏥 {site.get('health_center_type', 'Health Center')} · {site.get('city', '—')}, {site.get('state', '—')} · {status_label}")
+    with col_bm_f:
+        _render_bookmark_button("fqhc", str(bhcmis_id), site_name)
+
     if site.get("site_address"):
         st.caption(f"📍 {site['site_address']}, {site.get('city', '')}, {site.get('state', '')} {site.get('zip_code', '')}")
 
@@ -704,13 +767,18 @@ def _render_fqhc_detail(bhcmis_id):
     m2.metric("Total Patients", f"{int(site['total_patients']):,}" if site.get("total_patients") else "—")
     m3.metric("Patients ≤200% FPL", f"{int(site['patients_below_200pct_poverty']):,}" if site.get("patients_below_200pct_poverty") else "—")
 
+    ein = site.get("ein")
+
     st.markdown("---")
     st.markdown("**990 / Financial Health**")
     _render_990_section(db.get_990_for_fqhc(bhcmis_id))
 
-    ein = site.get("ein")
     if ein:
-        # Other sites run by the same health center organization
+        # Financial ratios
+        st.markdown("---")
+        _render_financial_ratios(ein)
+
+        # Other sites run by same health center org
         other_sites = db.get_operator_fqhc(ein)
         if not other_sites.empty and "bhcmis_id" in other_sites.columns:
             other_sites = other_sites[other_sites["bhcmis_id"] != bhcmis_id]
@@ -752,6 +820,17 @@ def _render_fqhc_detail(bhcmis_id):
         _render_nearby_facilities(nearby)
     else:
         st.caption("No coordinates available.")
+
+    # News, notes, documents
+    st.markdown("---")
+    _render_news_feed(site.get("health_center_name") or site_name)
+
+    st.markdown("---")
+    _render_notes_widget("fqhc", str(bhcmis_id))
+
+    if ein:
+        st.markdown("---")
+        _render_document_upload(ein, "fqhc", str(bhcmis_id))
 
 
 def _render_ece_detail(license_id):
@@ -868,12 +947,322 @@ def _render_nmtc_detail(cdfi_project_id):
 
 
 # ---------------------------------------------------------------------------
+# New helper functions: news, notes, bookmarks, financial ratios, doc upload
+# ---------------------------------------------------------------------------
+
+def _fetch_news(org_name: str, max_items: int = 5) -> list:
+    """
+    Fetch recent news for an organization from Google News RSS.
+    Returns a list of {title, link, published} dicts.
+    """
+    if not org_name:
+        return []
+    try:
+        query = org_name.replace(" ", "+")
+        url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+        req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urlopen(req, timeout=5) as resp:
+            xml_data = resp.read()
+        root = ET.fromstring(xml_data)
+        items = []
+        for item in root.iter("item"):
+            title = item.findtext("title") or ""
+            link  = item.findtext("link") or ""
+            pub   = item.findtext("pubDate") or ""
+            if title:
+                items.append({"title": title, "link": link, "published": pub})
+            if len(items) >= max_items:
+                break
+        return items
+    except Exception:
+        return []
+
+
+def _render_news_feed(org_name: str):
+    """Show a Google News feed for the given organization name."""
+    if not org_name:
+        return
+    with st.expander("📰 Recent News", expanded=False):
+        with st.spinner("Fetching news..."):
+            news = _fetch_news(org_name)
+        if news:
+            for item in news:
+                st.markdown(f"- [{item['title']}]({item['link']})  \n  <small>{item['published']}</small>", unsafe_allow_html=True)
+        else:
+            st.caption("No recent news found, or news feed unavailable.")
+
+
+def _render_notes_widget(entity_type: str, entity_id: str):
+    """Show existing notes and an add-note form for any entity."""
+    st.markdown("**Notes**")
+    notes = db.get_user_notes(entity_type, str(entity_id))
+
+    for note in notes:
+        nid = note["id"]
+        st.text_area(
+            f"Note ({note.get('updated_at', '')[:10]})",
+            value=note["note_text"],
+            key=f"note_text_{nid}",
+            height=80,
+        )
+        col_save, col_del = st.columns([2, 1])
+        with col_save:
+            if st.button("Save", key=f"note_save_{nid}"):
+                db.update_user_note(nid, st.session_state[f"note_text_{nid}"])
+                st.success("Saved.")
+                st.rerun()
+        with col_del:
+            if st.button("Delete", key=f"note_del_{nid}"):
+                db.delete_user_note(nid)
+                st.rerun()
+
+    new_note = st.text_area(
+        "Add a note...",
+        key=f"new_note_{entity_type}_{entity_id}",
+        height=80,
+        placeholder="Deal notes, follow-ups, risk flags...",
+    )
+    if st.button("Add Note", key=f"add_note_{entity_type}_{entity_id}"):
+        if new_note.strip():
+            db.save_user_note(entity_type, str(entity_id), new_note.strip())
+            st.success("Note added.")
+            st.rerun()
+
+
+def _render_bookmark_button(entity_type: str, entity_id: str, label: str):
+    """Render a bookmark toggle button for any entity."""
+    is_bm = db.is_bookmarked(entity_type, str(entity_id))
+    btn_label = "⭐ Bookmarked" if is_bm else "☆ Bookmark"
+    if st.button(btn_label, key=f"bm_toggle_{entity_type}_{entity_id}"):
+        if is_bm:
+            db.delete_bookmark(entity_type, str(entity_id))
+        else:
+            db.save_bookmark(entity_type, str(entity_id), label)
+        st.session_state["bookmarks_refresh"] += 1
+        st.rerun()
+
+
+def _render_financial_ratios(ein: str):
+    """
+    Show financial ratios for an organization.
+    Computes from 990 history if not yet calculated, then displays with source flags.
+    """
+    if not ein:
+        return
+
+    # Compute/refresh ratios from 990 history
+    db.compute_and_store_ratios(ein)
+    ratios_df = db.get_financial_ratios(ein)
+
+    if ratios_df.empty:
+        st.caption("No financial data available for ratio calculation. Run 990 fetch with --years 3.")
+        return
+
+    st.markdown("**Financial Ratios**")
+
+    # Show most recent year's ratios prominently, then a trend table for prior years
+    latest = ratios_df.iloc[0].to_dict()
+    year = int(latest.get("fiscal_year", 0)) if latest.get("fiscal_year") else "—"
+
+    acid_990   = latest.get("acid_ratio_990")
+    acid_audit = latest.get("acid_ratio_audit")
+    leverage   = latest.get("leverage_ratio")
+    avg_cf     = latest.get("avg_operating_cash_flow")
+    has_audit  = latest.get("has_audit_data", 0)
+
+    r1, r2, r3 = st.columns(3)
+
+    # Acid ratio — show both 990-approximate and audit-quality
+    acid_display = "—"
+    acid_help = "cash / (accounts payable + accrued expenses) from 990"
+    if acid_audit is not None:
+        acid_display = f"{acid_audit:.2f} ✓"
+        acid_help = "cash / current liabilities from audit (precise)"
+    elif acid_990 is not None:
+        acid_display = f"{acid_990:.2f} ~"
+        acid_help = "cash / (AP + accrued exp) from 990 (approximate)"
+    r1.metric(
+        "Acid Ratio",
+        acid_display,
+        help=acid_help,
+    )
+
+    r2.metric(
+        "Leverage Ratio",
+        f"{leverage:.2f}" if leverage is not None else "—",
+        help="Unrestricted net assets / total liabilities",
+    )
+
+    r3.metric(
+        "Avg Op. Cash Flow (3yr)",
+        _fmt_dollar(avg_cf) if avg_cf is not None else "—",
+        help="3-year average net income from 990 (proxy for operating cash flow)",
+    )
+
+    # Flag source and caveats
+    if acid_audit is not None and acid_990 is not None:
+        st.caption(
+            f"FY{year} · Audit: acid={acid_audit:.2f} · 990 approx: acid={acid_990:.2f} · "
+            f"✓ = audit quality  ~ = 990 approximate"
+        )
+    elif has_audit:
+        st.caption(f"FY{year} · Source: Audit document")
+    else:
+        st.caption(f"FY{year} · Source: 990 (approximate — upload audit for precise current-liabilities split)")
+
+    # Show multi-year trend if available
+    if len(ratios_df) > 1:
+        with st.expander("Ratio history"):
+            show_cols = [c for c in ["fiscal_year", "acid_ratio_990", "acid_ratio_audit",
+                                      "leverage_ratio", "avg_operating_cash_flow"] if c in ratios_df.columns]
+            st.dataframe(
+                ratios_df[show_cols].rename(columns={
+                    "fiscal_year": "FY", "acid_ratio_990": "Acid (990~)",
+                    "acid_ratio_audit": "Acid (Audit✓)", "leverage_ratio": "Leverage",
+                    "avg_operating_cash_flow": "Avg Op CF",
+                }),
+                use_container_width=True,
+            )
+
+
+def _render_document_upload(ein: str, entity_type: str, entity_id: str):
+    """
+    Upload, extract, and manage financial documents (audits, 990s) for an org.
+    Uploaded files are saved to data/uploads/{ein}/ and metadata in the documents table.
+    Extracted financial data is shown with editable fields for manual override,
+    then saved back to financial_ratios when the user confirms.
+    """
+    st.markdown("**Documents**")
+
+    # --- Show existing documents ---
+    existing = db.get_documents(ein=ein, entity_type=entity_type, entity_id=str(entity_id))
+    if not existing.empty:
+        for _, doc_row in existing.iterrows():
+            doc_id = int(doc_row["id"])
+            fname = doc_row.get("filename", "Unknown")
+            doc_type = doc_row.get("doc_type", "")
+            fy = doc_row.get("fiscal_year", "")
+            verified = doc_row.get("verified", 0)
+            verified_badge = " ✓" if verified else ""
+
+            with st.expander(f"{doc_type or 'Document'}: {fname} (FY{fy}){verified_badge}"):
+                # Show extracted data for manual override
+                extracted = from_json(doc_row.get("extracted_data") or "")
+                if extracted:
+                    st.caption("Extracted values (edit to correct):")
+                    override = {}
+                    fields_to_show = [
+                        ("cash_and_equivalents",   "Cash & Equivalents"),
+                        ("current_liabilities",    "Current Liabilities"),
+                        ("total_liabilities",      "Total Liabilities"),
+                        ("unrestricted_net_assets","Unrestricted Net Assets"),
+                        ("operating_cash_flow",    "Operating Cash Flow"),
+                        ("total_revenue",          "Total Revenue"),
+                        ("total_expenses",         "Total Expenses"),
+                    ]
+                    for field, label in fields_to_show:
+                        raw = extracted.get(field)
+                        override[field] = st.number_input(
+                            label,
+                            value=float(raw) if raw is not None else 0.0,
+                            key=f"doc_{doc_id}_{field}",
+                            format="%.0f",
+                        )
+
+                    fy_override = st.number_input(
+                        "Fiscal Year",
+                        value=int(fy) if fy else 2023,
+                        key=f"doc_{doc_id}_fy",
+                    )
+
+                    col_confirm, col_delete = st.columns([2, 1])
+                    with col_confirm:
+                        if st.button("Confirm & Save to Ratios", key=f"doc_confirm_{doc_id}"):
+                            # Save overridden values back to document
+                            db.update_document_data(doc_id, to_json(override), verified=True)
+                            # Compute and store audit-quality ratio record
+                            ratio_updates = build_ratio_updates_from_audit(ein, int(fy_override), override)
+                            db.upsert_financial_ratios(ratio_updates)
+                            st.success("Saved. Financial ratios updated with audit data.")
+                            st.rerun()
+                    with col_delete:
+                        if st.button("Delete", key=f"doc_delete_{doc_id}"):
+                            filepath = db.delete_document(doc_id)
+                            if filepath and os.path.exists(filepath):
+                                os.remove(filepath)
+                            st.rerun()
+                else:
+                    st.caption("No extracted data available.")
+                    if st.button("Delete", key=f"doc_del2_{doc_id}"):
+                        filepath = db.delete_document(doc_id)
+                        if filepath and os.path.exists(filepath):
+                            os.remove(filepath)
+                        st.rerun()
+
+    # --- Upload new document ---
+    st.markdown("**Upload a document** (PDF — audit, financial statements, 990)")
+    col_up1, col_up2 = st.columns(2)
+    with col_up1:
+        doc_type_choice = st.selectbox(
+            "Document type",
+            ["Audit", "Financial Statements", "990", "Other"],
+            key=f"upload_type_{entity_type}_{entity_id}",
+        )
+    with col_up2:
+        fiscal_year_choice = st.number_input(
+            "Fiscal year this covers",
+            min_value=2000, max_value=2030, value=2023,
+            key=f"upload_fy_{entity_type}_{entity_id}",
+        )
+
+    uploaded_file = st.file_uploader(
+        "Choose PDF",
+        type=["pdf"],
+        key=f"upload_file_{entity_type}_{entity_id}",
+    )
+
+    if uploaded_file is not None:
+        if st.button("Upload & Extract", key=f"do_upload_{entity_type}_{entity_id}"):
+            # Save file to disk
+            upload_dir = os.path.join("data", "uploads", ein or "general")
+            os.makedirs(upload_dir, exist_ok=True)
+            filepath = os.path.join(upload_dir, uploaded_file.name)
+            with open(filepath, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+
+            # Extract financial data from PDF
+            with st.spinner("Extracting data from PDF..."):
+                extracted = extract_from_pdf(filepath)
+
+            note = extracted.pop("extraction_note", "")
+            extracted_json = to_json(extracted)
+
+            # Save document record
+            db.save_document({
+                "ein":         ein,
+                "entity_type": entity_type,
+                "entity_id":   str(entity_id),
+                "filename":    uploaded_file.name,
+                "filepath":    filepath,
+                "doc_type":    doc_type_choice,
+                "fiscal_year": int(fiscal_year_choice),
+                "extracted_data": extracted_json,
+                "verified":    0,
+            })
+
+            st.success(f"Uploaded. {note}")
+            st.rerun()
+
+
+# ---------------------------------------------------------------------------
 # Main area — two tabs: Dashboard and Site Detail
 # ---------------------------------------------------------------------------
 
 st.title("CD Command Center")
 
-tab_dashboard, tab_detail, tab_tools = st.tabs(["📊 Dashboard", "🔍 Site Detail", "🧮 Tools"])
+tab_dashboard, tab_detail, tab_org, tab_tools = st.tabs([
+    "📊 Dashboard", "🔍 Site Detail", "🏢 Org Lookup", "🧮 Tools"
+])
 
 with tab_dashboard:
     if search_active:
@@ -1333,6 +1722,124 @@ with tab_detail:
         st.info("Use the search box above, or select a site from the data tables in the Dashboard tab.")
 
 # ---------------------------------------------------------------------------
+# Org Lookup tab — search by organization name or EIN
+# ---------------------------------------------------------------------------
+
+with tab_org:
+    st.markdown("### Organization Lookup")
+    st.caption(
+        "Search by operator name or EIN to see all their sites, 990 trend, financial ratios, "
+        "and accountability data in one view. This is the entry point when you already know who you're looking at."
+    )
+
+    org_query = st.text_input(
+        "Search by org name or EIN",
+        placeholder="e.g. 'KIPP' or '123456789' or 'Federally Qualified'...",
+        key="org_lookup_query",
+    )
+
+    if org_query and org_query.strip():
+        orgs_df = db.search_org(org_query.strip())
+
+        if orgs_df.empty:
+            st.info("No matching organizations found in 990 data. Run `python etl/fetch_990_data.py` to load 990 records.")
+        else:
+            st.markdown(f"**{len(orgs_df)} match(es)** — select one to explore:")
+
+            org_options = orgs_df.apply(
+                lambda r: f"{r.get('org_name', '—')} — {r.get('city', '—')}, {r.get('state', '—')} (EIN {r.get('ein', '—')})",
+                axis=1,
+            ).tolist()
+            selected_org_label = st.selectbox("Select organization", org_options, key="org_lookup_select")
+
+            if selected_org_label:
+                idx = org_options.index(selected_org_label)
+                org_row = orgs_df.iloc[idx]
+                ein = org_row.get("ein", "")
+                org_name = org_row.get("org_name", "")
+
+                st.markdown("---")
+                col_org_hdr, col_org_bm = st.columns([5, 1])
+                with col_org_hdr:
+                    st.markdown(f"## {org_name}")
+                    st.markdown(f"EIN: **{ein}** · {org_row.get('city', '—')}, {org_row.get('state', '—')} · NTEE: {org_row.get('ntee_code', '—')}")
+                with col_org_bm:
+                    _render_bookmark_button("org_990", ein, org_name)
+
+                # 990 financials
+                st.markdown("---")
+                _render_990_section(org_row.to_dict())
+
+                # Financial ratios
+                st.markdown("---")
+                _render_financial_ratios(ein)
+
+                # 990 multi-year trend
+                history_df = db.get_990_history(ein)
+                if not history_df.empty and len(history_df) > 1:
+                    st.markdown("---")
+                    st.markdown("**Financial Trend (990 History)**")
+                    trend_cols = [c for c in ["total_revenue", "total_expenses", "net_income"] if c in history_df.columns]
+                    if trend_cols:
+                        trend_df = history_df[["tax_year"] + trend_cols].sort_values("tax_year")
+                        trend_melted = trend_df.melt(id_vars="tax_year", value_vars=trend_cols, var_name="Metric", value_name="Amount")
+                        fig = px.line(trend_melted, x="tax_year", y="Amount", color="Metric",
+                                      labels={"tax_year": "Tax Year", "Amount": "$ Amount"},
+                                      title="Revenue / Expense Trend")
+                        fig.update_layout(height=300, margin=dict(t=40, b=20))
+                        st.plotly_chart(fig, use_container_width=True)
+
+                # All schools by this operator
+                org_schools = db.get_operator_schools(ein)
+                if not org_schools.empty:
+                    st.markdown("---")
+                    st.markdown(f"**Schools ({len(org_schools)})**")
+                    sch_cols = [c for c in ["school_name", "city", "state", "school_status", "enrollment", "survival_risk_tier", "nces_id"] if c in org_schools.columns]
+                    st.dataframe(
+                        org_schools[sch_cols].rename(columns={"school_name": "School", "school_status": "Status", "enrollment": "Enrollment", "survival_risk_tier": "Risk"}),
+                        use_container_width=True,
+                    )
+                    # Enrollment trends for all sites
+                    for _, sch_row in org_schools.head(5).iterrows():
+                        nces_id = sch_row.get("nces_id")
+                        sch_name = sch_row.get("school_name", nces_id)
+                        if nces_id:
+                            eh = db.get_enrollment_history(nces_id)
+                            if not eh.empty and len(eh) > 1:
+                                with st.expander(f"Enrollment trend: {sch_name}"):
+                                    fig_e = px.line(eh, x="school_year", y="enrollment", markers=True,
+                                                    labels={"school_year": "Year", "enrollment": "Enrollment"})
+                                    fig_e.update_layout(height=200, margin=dict(t=10, b=10))
+                                    st.plotly_chart(fig_e, use_container_width=True)
+
+                # All FQHC sites by this operator
+                org_fqhc = db.get_operator_fqhc(ein)
+                if not org_fqhc.empty:
+                    st.markdown("---")
+                    st.markdown(f"**Health Center Sites ({len(org_fqhc)})**")
+                    fq_cols = [c for c in ["site_name", "city", "state", "site_type", "total_patients", "is_active"] if c in org_fqhc.columns]
+                    st.dataframe(
+                        org_fqhc[fq_cols].rename(columns={"site_name": "Site", "site_type": "Type", "total_patients": "Patients", "is_active": "Active"}),
+                        use_container_width=True,
+                    )
+
+                # News feed
+                st.markdown("---")
+                _render_news_feed(org_name)
+
+                # Notes
+                st.markdown("---")
+                _render_notes_widget("org_990", ein)
+
+                # Document upload
+                st.markdown("---")
+                _render_document_upload(ein, "org_990", ein)
+
+    else:
+        st.info("Type an organization name or EIN to get started.")
+
+
+# ---------------------------------------------------------------------------
 # Tools tab — pro forma calculator, gap analysis, state programs, CDFI directory
 # ---------------------------------------------------------------------------
 
@@ -1343,6 +1850,7 @@ with tab_tools:
         "🗺️ Service Gap Analysis",
         "🏦 CDFI Directory",
         "📋 State Programs",
+        "🏆 CDFI Market Activity",
     ])
 
     # -----------------------------------------------------------------------
@@ -1637,3 +2145,83 @@ with tab_tools:
                 )
             else:
                 st.info("No programs match current filters.")
+
+    # -----------------------------------------------------------------------
+    # CDFI Market Activity
+    # -----------------------------------------------------------------------
+
+    with tool_tabs[4]:
+        st.subheader("CDFI Market Activity")
+        st.caption(
+            "CDFI Fund award activity by state and program — shows which CDFIs are active in a market "
+            "and what programs they're receiving capital through. Useful for identifying lenders and "
+            "potential partners in a deal geography."
+        )
+
+        award_states = db.get_cdfi_award_states()
+        if not award_states:
+            st.info(
+                "No CDFI award data loaded yet. Download the CDFI Fund awards dataset and run:\n"
+                "```\npython etl/fetch_cdfi_awards.py --file data/raw/cdfi_awards.xlsx\n```"
+            )
+        else:
+            aw_col1, aw_col2, aw_col3 = st.columns(3)
+            with aw_col1:
+                aw_state_filter = st.multiselect(
+                    "State(s)", options=award_states, key="aw_states",
+                    help="Filter to CDFIs headquartered in these states",
+                )
+            with aw_col2:
+                aw_program_filter = st.multiselect(
+                    "Program(s)", options=["FA", "TA", "BEA", "CMF", "NMTC", "BOND"],
+                    key="aw_programs",
+                    help="FA=Financial Assistance, TA=Technical Assistance, BEA=Bank Enterprise Award, CMF=Capital Magnet Fund",
+                )
+            with aw_col3:
+                aw_min_year = st.number_input(
+                    "From year", min_value=2000, max_value=2030, value=2015,
+                    key="aw_min_year",
+                )
+
+            awards_df = db.get_cdfi_awards(
+                states=aw_state_filter if aw_state_filter else None,
+                programs=aw_program_filter if aw_program_filter else None,
+                min_year=int(aw_min_year),
+            )
+
+            if not awards_df.empty:
+                # Summary metrics
+                am1, am2, am3 = st.columns(3)
+                am1.metric("Total Awards", f"{len(awards_df):,}")
+                total_awarded = awards_df["award_amount"].sum() if "award_amount" in awards_df.columns else 0
+                am2.metric("Total Awarded", _fmt_dollar(total_awarded))
+                unique_awardees = awards_df["awardee_name"].nunique() if "awardee_name" in awards_df.columns else 0
+                am3.metric("Unique CDFIs", f"{unique_awardees:,}")
+
+                # Awards by program bar chart
+                if "program" in awards_df.columns and "award_amount" in awards_df.columns:
+                    prog_summary = awards_df.groupby("program")["award_amount"].sum().reset_index().sort_values("award_amount", ascending=False)
+                    fig_prog = px.bar(prog_summary, x="program", y="award_amount",
+                                      labels={"program": "Program", "award_amount": "Total Awarded"},
+                                      title="Awards by Program")
+                    fig_prog.update_layout(height=250, margin=dict(t=40, b=20))
+                    st.plotly_chart(fig_prog, use_container_width=True)
+
+                show_aw_cols = [c for c in [
+                    "award_year", "program", "awardee_name", "awardee_state", "awardee_city",
+                    "award_amount", "award_type", "cdfi_type", "purpose"
+                ] if c in awards_df.columns]
+                st.dataframe(
+                    awards_df[show_aw_cols].rename(columns={
+                        "award_year": "Year", "awardee_name": "CDFI",
+                        "awardee_state": "State", "awardee_city": "City",
+                        "award_amount": "Amount", "award_type": "Type", "cdfi_type": "CDFI Type",
+                    }),
+                    use_container_width=True, height=400,
+                )
+                st.download_button(
+                    "Download CSV", data=df_to_csv_bytes(awards_df[show_aw_cols]),
+                    file_name="cdfi_market_activity.csv", mime="text/csv",
+                )
+            else:
+                st.info("No awards match current filters.")

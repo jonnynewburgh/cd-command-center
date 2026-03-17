@@ -225,6 +225,19 @@ def extract_financials(org_detail: dict, max_years: int = 1) -> tuple[dict, list
                 net_income = float(total_revenue) - float(total_expenses)
             except (TypeError, ValueError):
                 pass
+
+        # Balance sheet fields for financial ratio calculations.
+        # ProPublica uses field names from the IRS e-file schema, which vary by
+        # form version and year. We try multiple candidate keys and take the first
+        # non-null value. These map to Part X of the Form 990.
+        def _first(*keys):
+            """Return the first non-None value from the filing for any of the given keys."""
+            for k in keys:
+                v = filing.get(k)
+                if v is not None:
+                    return _safe_float(v)
+            return None
+
         return {
             "ein":                      ein,
             "org_name":                 org.get("name"),
@@ -238,6 +251,25 @@ def extract_financials(org_detail: dict, max_years: int = 1) -> tuple[dict, list
             "tax_year":                 filing.get("tax_prd_yr"),
             "filing_pdf_url":           filing.get("pdf_url"),
             "data_source":              "ProPublica",
+            # Balance sheet — Part X (for financial ratio calculations)
+            # cash_savings: Part X line 1 cash and savings
+            "cash_savings":             _first("cashsvngsend", "cash_savings_eoy",
+                                               "cashsavingseoy", "cash_and_savings_eoy"),
+            # total_liabilities: Part X line 26
+            "total_liabilities":        _first("totliabend", "totliabilitieseoy",
+                                               "total_liabilities_eoy"),
+            # unrestricted_net_assets: Part X line 27
+            "unrestricted_net_assets":  _first("unrstntnasstend", "unrestricted_netassets",
+                                               "unrestrictedneteqeoy", "unrst_net_asstend"),
+            # accounts_payable: Part X line 17
+            "accounts_payable":         _first("acctpayableaccrexpenses", "accts_payable_eoy",
+                                               "accnts_payble_acrd_exp_eoy"),
+            # accrued_expenses: Part X line 18 (sometimes bundled with accounts_payable above)
+            "accrued_expenses":         _first("grntspybltoffcrs", None),
+            # notes_payable: Part X lines 19-20
+            "notes_payable":            _first("mortgnotespybltoindvdls",
+                                               "mortgnotespybletorelatedpartseoy",
+                                               "nts_loans_pyble_eoy"),
         }
 
     # Latest filing → irs_990 (includes org-level fields like city, state, ntee_code)
@@ -251,24 +283,18 @@ def extract_financials(org_detail: dict, max_years: int = 1) -> tuple[dict, list
         except (TypeError, ValueError):
             pass
 
-    latest_record = {
-        "ein":                      ein,
-        "org_name":                 org.get("name"),
-        "city":                     org.get("city"),
-        "state":                    org.get("state"),
-        "ntee_code":                org.get("ntee_code"),
-        "subsection_code":          org.get("subsection_code"),
-        "total_revenue":            _safe_float(total_revenue),
-        "total_expenses":           _safe_float(total_expenses),
-        "total_assets":             _safe_float(most_recent_filing.get("totassetsend")),
-        "net_income":               net_income,
-        "program_service_revenue":  _safe_float(most_recent_filing.get("prgmservrev")),
-        "program_service_expenses": _safe_float(most_recent_filing.get("progrmserviceexp")),
-        "officer_compensation":     _safe_float(most_recent_filing.get("compnsatncurrofcr")),
-        "tax_year":                 most_recent_filing.get("tax_prd_yr"),
-        "filing_pdf_url":           most_recent_filing.get("pdf_url"),
-        "data_source":              "ProPublica",
-    }
+    # Build the latest record from the most recent filing using the same helper.
+    # We call _filing_to_record then add org-level fields (city, state, ntee_code)
+    # which don't appear in individual filings.
+    latest_record = _filing_to_record(most_recent_filing) if most_recent_filing else {}
+    latest_record.update({
+        "ein":             ein,
+        "org_name":        org.get("name"),
+        "city":            org.get("city"),
+        "state":           org.get("state"),
+        "ntee_code":       org.get("ntee_code"),
+        "subsection_code": org.get("subsection_code"),
+    })
 
     # History records → irs_990_history (one row per year, up to max_years)
     history_records = []
