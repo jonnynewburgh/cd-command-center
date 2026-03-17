@@ -33,6 +33,25 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ---------------------------------------------------------------------------
+# Password gate — only active when APP_PASSWORD is set in secrets / env vars
+# ---------------------------------------------------------------------------
+_app_password = st.secrets.get("APP_PASSWORD", "") if hasattr(st, "secrets") else ""
+if not _app_password:
+    _app_password = os.environ.get("APP_PASSWORD", "")
+
+if _app_password:
+    if not st.session_state.get("_authenticated"):
+        st.title("CD Command Center")
+        pw = st.text_input("Password", type="password")
+        if st.button("Enter"):
+            if pw == _app_password:
+                st.session_state["_authenticated"] = True
+                st.rerun()
+            else:
+                st.error("Incorrect password.")
+        st.stop()
+
 db.init_db()
 
 # ---------------------------------------------------------------------------

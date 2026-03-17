@@ -20,8 +20,13 @@ try:
 except ImportError:
     _HAS_STREAMLIT = False
 
-# Path to the SQLite database file
-DB_PATH = os.path.join(os.path.dirname(__file__), "data", "cd_command_center.sqlite")
+# Path to the SQLite database file.
+# Override with DATABASE_URL env var for deployments (e.g. Render persistent disk).
+# Example: export DATABASE_URL=/data/cd_command_center.sqlite
+DB_PATH = os.environ.get(
+    "DATABASE_URL",
+    os.path.join(os.path.dirname(__file__), "data", "cd_command_center.sqlite"),
+)
 
 
 def get_connection():

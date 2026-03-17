@@ -11,3 +11,6 @@ venv/
 *.egg-info/
 .DS_Store
 *.log
+
+# Streamlit secrets — never commit real passwords/keys
+.streamlit/secrets.toml
