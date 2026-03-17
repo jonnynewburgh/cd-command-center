@@ -171,6 +171,30 @@ def init_db():
     except Exception:
         pass
 
+    # Phase A-B: new census_tract columns for OZ, EJScreen, trend analysis, and gap analysis
+    new_census_cols = [
+        ("is_opportunity_zone", "INTEGER DEFAULT 0"),  # 1 = Treasury-designated OZ
+        ("ej_index", "REAL"),                          # EPA EJScreen composite score (0-100 percentile)
+        ("pm25_percentile", "REAL"),                   # Particulate matter 2.5 (EJScreen)
+        ("diesel_percentile", "REAL"),                 # Diesel particulate exposure (EJScreen)
+        ("lead_paint_percentile", "REAL"),             # Lead paint indicator (EJScreen)
+        ("superfund_percentile", "REAL"),              # Proximity to Superfund sites (EJScreen)
+        ("wastewater_percentile", "REAL"),             # Wastewater discharge proximity (EJScreen)
+        ("poverty_rate_5yr_ago", "REAL"),              # Poverty rate from 5 years prior (ACS)
+        ("median_income_5yr_ago", "REAL"),             # Median income from 5 years prior (ACS)
+        ("poverty_rate_change", "REAL"),               # poverty_rate - poverty_rate_5yr_ago
+        ("income_change_pct", "REAL"),                 # % change in median income over 5 years
+        ("pop_under_5", "INTEGER"),                    # ACS: population under 5 (ECE gap analysis)
+        ("pop_under_18", "INTEGER"),                   # ACS: population under 18 (school gap analysis)
+        ("pop_uninsured", "INTEGER"),                  # ACS: uninsured population (FQHC gap analysis)
+        ("pop_65_plus", "INTEGER"),                    # ACS: population 65+ (elder care)
+    ]
+    for col, col_type in new_census_cols:
+        try:
+            cur.execute(f"ALTER TABLE census_tracts ADD COLUMN {col} {col_type}")
+        except Exception:
+            pass  # column already exists
+
     # NMTC projects — project-level QALICB investments from CDFI Fund public data release
     cur.execute("""
         CREATE TABLE IF NOT EXISTS nmtc_projects (
@@ -335,6 +359,68 @@ def init_db():
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_990_state ON irs_990(state)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_990_ntee  ON irs_990(ntee_code)")
+
+    # IRS 990 multi-year history — one row per (ein, tax_year).
+    # The main irs_990 table keeps the most recent year per org (unchanged).
+    # This companion table stores all fetched years for trend charts.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS irs_990_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ein TEXT NOT NULL,
+            org_name TEXT,
+            total_revenue REAL,
+            total_expenses REAL,
+            total_assets REAL,
+            net_income REAL,
+            program_service_revenue REAL,
+            program_service_expenses REAL,
+            officer_compensation REAL,
+            tax_year INTEGER NOT NULL,
+            filing_pdf_url TEXT,
+            data_source TEXT DEFAULT 'ProPublica',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(ein, tax_year)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_990h_ein ON irs_990_history(ein)")
+
+    # CDFI directory — certified CDFIs from the CDFI Fund
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS cdfi_directory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cdfi_name TEXT NOT NULL,
+            city TEXT,
+            state TEXT,
+            cdfi_type TEXT,           -- 'Loan Fund', 'Credit Union', 'Community Development Bank', 'VC'
+            total_assets REAL,
+            primary_markets TEXT,     -- geographic service area description
+            target_populations TEXT,  -- e.g. 'Rural', 'Native American', 'Women'
+            certification_date TEXT,
+            website TEXT,
+            updated_at TEXT,
+            UNIQUE(cdfi_name, state)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_cdfi_state ON cdfi_directory(state)")
+
+    # State incentive programs — manually curated reference data per state.
+    # Covers historic tax credits, state NMTCs, LIHTC, and other CD finance programs.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS state_programs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            state TEXT NOT NULL,
+            program_name TEXT NOT NULL,
+            program_type TEXT,        -- 'Historic Tax Credit', 'State NMTC', 'LIHTC', 'Grant', 'Loan'
+            eligible_uses TEXT,       -- 'Real estate', 'Operating', 'Equipment'
+            max_credit_pct REAL,      -- e.g. 25 means 25% state historic tax credit
+            max_amount REAL,          -- dollar cap per project if applicable
+            administering_agency TEXT,
+            website TEXT,
+            notes TEXT,
+            last_verified TEXT        -- date the info was last manually reviewed
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_programs_state ON state_programs(state)")
 
     # Add ein column to schools and fqhc tables if it doesn't exist yet.
     # ALTER TABLE only runs on existing DBs — new DBs get the column from init.
@@ -1538,3 +1624,363 @@ def get_990_summary() -> dict:
         "linked_charter_schools": linked_schools,
         "linked_fqhc_sites": linked_fqhc,
     }
+
+
+# ---------------------------------------------------------------------------
+# NMTC peer comps
+# ---------------------------------------------------------------------------
+
+@_cached(ttl=300)
+def get_peer_nmtc_projects(
+    project_type: str,
+    state: str,
+    qlici_min: float,
+    qlici_max: float,
+    exclude_id: str = None,
+) -> pd.DataFrame:
+    """
+    Return similar NMTC projects for deal comparison.
+
+    Filters by project_type and state, within a QLICI dollar range (±50% of
+    the project's QLICI amount), sorted by closest QLICI amount.
+
+    Args:
+        project_type: 'Real Estate' or 'Non-Real Estate'
+        state: two-letter state abbreviation
+        qlici_min: lower bound of QLICI comparison range
+        qlici_max: upper bound of QLICI comparison range
+        exclude_id: cdfi_project_id to exclude (the current project itself)
+    """
+    conditions = []
+    params = []
+
+    if project_type:
+        conditions.append("project_type = ?")
+        params.append(project_type)
+
+    if state:
+        conditions.append("state = ?")
+        params.append(state)
+
+    if qlici_min is not None:
+        conditions.append("qlici_amount >= ?")
+        params.append(qlici_min)
+
+    if qlici_max is not None:
+        conditions.append("qlici_amount <= ?")
+        params.append(qlici_max)
+
+    if exclude_id:
+        conditions.append("cdfi_project_id != ?")
+        params.append(exclude_id)
+
+    where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+    midpoint = ((qlici_min or 0) + (qlici_max or 0)) / 2
+    # Midpoint goes at end of params (used in ORDER BY, not WHERE)
+    params.append(midpoint)
+
+    query = f"""
+        SELECT * FROM nmtc_projects
+        {where_clause}
+        ORDER BY ABS(qlici_amount - ?) ASC
+        LIMIT 10
+    """
+
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(query, conn, params=params)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Operator profile queries
+# ---------------------------------------------------------------------------
+
+@_cached(ttl=300)
+def get_operator_schools(ein: str) -> pd.DataFrame:
+    """Return all schools operated by the organization with the given EIN."""
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(
+            "SELECT * FROM schools WHERE ein = ? ORDER BY school_name",
+            conn, params=[ein],
+        )
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+@_cached(ttl=300)
+def get_operator_fqhc(ein: str) -> pd.DataFrame:
+    """Return all FQHC sites operated by the organization with the given EIN."""
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(
+            "SELECT * FROM fqhc WHERE ein = ? ORDER BY site_name",
+            conn, params=[ein],
+        )
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+# ---------------------------------------------------------------------------
+# IRS 990 multi-year history
+# ---------------------------------------------------------------------------
+
+def upsert_990_history(record: dict):
+    """Insert or update a 990 history record (keyed on ein + tax_year)."""
+    conn = get_connection()
+    cur = conn.cursor()
+    columns = list(record.keys())
+    values = list(record.values())
+    placeholders = ",".join("?" * len(values))
+    update_clause = ",".join(
+        f"{col}=excluded.{col}" for col in columns if col not in ("ein", "tax_year")
+    )
+    cur.execute(
+        f"INSERT INTO irs_990_history ({','.join(columns)}) VALUES ({placeholders}) "
+        f"ON CONFLICT(ein, tax_year) DO UPDATE SET {update_clause}",
+        values,
+    )
+    conn.commit()
+    conn.close()
+
+
+@_cached(ttl=300)
+def get_990_history(ein: str) -> pd.DataFrame:
+    """
+    Return all 990 filings for an organization, sorted by tax_year descending.
+    Used for trend charts in operator profile views.
+    Falls back to the main irs_990 table if no history records exist yet.
+    """
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(
+            "SELECT * FROM irs_990_history WHERE ein = ? ORDER BY tax_year ASC",
+            conn, params=[ein],
+        )
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+
+    # Fall back to single-year record if no history has been loaded yet
+    if df.empty:
+        single = get_990_by_ein(ein)
+        if single:
+            df = pd.DataFrame([single])
+    return df
+
+
+# ---------------------------------------------------------------------------
+# CDFI directory
+# ---------------------------------------------------------------------------
+
+def upsert_cdfi(record: dict):
+    """Insert or update a CDFI directory record (keyed on cdfi_name + state)."""
+    conn = get_connection()
+    cur = conn.cursor()
+    columns = list(record.keys())
+    values = list(record.values())
+    placeholders = ",".join("?" * len(values))
+    update_clause = ",".join(
+        f"{col}=excluded.{col}" for col in columns if col not in ("cdfi_name", "state")
+    )
+    cur.execute(
+        f"INSERT INTO cdfi_directory ({','.join(columns)}) VALUES ({placeholders}) "
+        f"ON CONFLICT(cdfi_name, state) DO UPDATE SET {update_clause}",
+        values,
+    )
+    conn.commit()
+    conn.close()
+
+
+@_cached(ttl=3600)
+def get_cdfis(states=None, cdfi_type=None) -> pd.DataFrame:
+    """Return CDFI directory entries, optionally filtered by state or type."""
+    conditions = []
+    params = []
+
+    if states:
+        placeholders = ",".join("?" * len(states))
+        conditions.append(f"state IN ({placeholders})")
+        params.extend(states)
+
+    if cdfi_type:
+        conditions.append("cdfi_type = ?")
+        params.append(cdfi_type)
+
+    where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+    query = f"SELECT * FROM cdfi_directory {where_clause} ORDER BY state, cdfi_name"
+
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(query, conn, params=params)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+@_cached(ttl=3600)
+def get_cdfi_states() -> list:
+    """Return sorted list of states that have CDFI directory data."""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT DISTINCT state FROM cdfi_directory WHERE state IS NOT NULL ORDER BY state"
+        )
+        states = [row[0] for row in cur.fetchall()]
+    except Exception:
+        states = []
+    conn.close()
+    return states
+
+
+# ---------------------------------------------------------------------------
+# State incentive programs
+# ---------------------------------------------------------------------------
+
+def upsert_state_program(record: dict):
+    """Insert a state incentive program record. Ignores duplicates."""
+    conn = get_connection()
+    cur = conn.cursor()
+    columns = list(record.keys())
+    values = list(record.values())
+    placeholders = ",".join("?" * len(values))
+    cur.execute(
+        f"INSERT OR IGNORE INTO state_programs ({','.join(columns)}) VALUES ({placeholders})",
+        values,
+    )
+    conn.commit()
+    conn.close()
+
+
+@_cached(ttl=3600)
+def get_state_programs(state: str = None) -> pd.DataFrame:
+    """Return state incentive programs, optionally filtered to a single state."""
+    conditions = []
+    params = []
+
+    if state:
+        conditions.append("state = ?")
+        params.append(state)
+
+    where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+    query = (
+        f"SELECT * FROM state_programs {where_clause} "
+        f"ORDER BY state, program_type, program_name"
+    )
+
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(query, conn, params=params)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+@_cached(ttl=3600)
+def get_program_states() -> list:
+    """Return sorted list of states that have incentive program data."""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT DISTINCT state FROM state_programs WHERE state IS NOT NULL ORDER BY state"
+        )
+        states = [row[0] for row in cur.fetchall()]
+    except Exception:
+        states = []
+    conn.close()
+    return states
+
+
+# ---------------------------------------------------------------------------
+# Service gap analysis
+# ---------------------------------------------------------------------------
+
+@_cached(ttl=300)
+def get_service_gaps(
+    states=None,
+    asset_class: str = "ece",
+    min_poverty_rate: float = 20.0,
+    top_n: int = 50,
+) -> pd.DataFrame:
+    """
+    Find census tracts with high population need but no facilities of the given type.
+
+    A simplified gap analysis: counts facilities assigned to each census tract
+    (via census_tract_id). Tracts with zero facilities and high poverty are gaps.
+
+    Tracts are ranked by a "need score" = total_population × poverty_rate,
+    so the highest-population, highest-poverty tracts come first.
+
+    Args:
+        states: list of state abbreviations to include (None = all)
+        asset_class: 'ece', 'fqhc', or 'schools'
+        min_poverty_rate: minimum poverty rate % to be considered high-need
+        top_n: number of gap tracts to return (default 50)
+    """
+    # Map asset class to its database table
+    asset_tables = {
+        "ece": "ece_centers",
+        "fqhc": "fqhc",
+        "schools": "schools",
+    }
+    if asset_class not in asset_tables:
+        return pd.DataFrame()
+
+    facility_table = asset_tables[asset_class]
+
+    conditions = [f"ct.poverty_rate >= {min_poverty_rate}"]
+    params = []
+
+    if states:
+        placeholders = ",".join("?" * len(states))
+        conditions.append(f"ct.state IN ({placeholders})")
+        params.extend(states)
+
+    where_clause = "WHERE " + " AND ".join(conditions)
+
+    query = f"""
+        SELECT
+            ct.census_tract_id,
+            ct.state,
+            ct.county_name,
+            ct.tract_name,
+            ct.total_population,
+            ct.poverty_rate,
+            ct.median_household_income,
+            ct.nmtc_eligibility_tier,
+            ct.is_opportunity_zone,
+            COALESCE(fac.facility_count, 0) AS facility_count,
+            -- Need score: population × poverty_rate (higher = more urgent gap)
+            ct.total_population * (ct.poverty_rate / 100.0) AS need_score
+        FROM census_tracts ct
+        LEFT JOIN (
+            SELECT census_tract_id, COUNT(*) AS facility_count
+            FROM {facility_table}
+            GROUP BY census_tract_id
+        ) fac ON fac.census_tract_id = ct.census_tract_id
+        {where_clause}
+          AND COALESCE(fac.facility_count, 0) = 0
+          AND ct.total_population > 0
+        ORDER BY need_score DESC
+        LIMIT {top_n}
+    """
+
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(query, conn, params=params)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
