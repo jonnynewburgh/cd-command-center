@@ -31,111 +31,50 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import db
 
-# Urban Institute Education Data API base URL
-ED_DATA_URL = "https://educationdata.urban.org/api/v1/schools/ccd/enrollment/{year}/grade-pk/"
+# Urban Institute Education Data API — CCD school directory endpoint.
+# The directory has total enrollment per school per year directly as a field.
+# Much simpler than the grade-level enrollment endpoint (which would require
+# summing all grades, and the grade-pk endpoint only returns pre-K rows).
+ED_DATA_DIR_URL = "https://educationdata.urban.org/api/v1/schools/ccd/directory/{year}/"
 
 # We fetch data going back this many school years from the most recent available
 DEFAULT_YEARS = 5
 
-# Most recent school year typically available in the API (update annually)
-MOST_RECENT_YEAR = 2022   # SY 2021-22 is usually the most recent
+# Most recent school year available in the API (update annually as NCES releases data)
+MOST_RECENT_YEAR = 2024   # SY 2023-24
 
 # Seconds to sleep between API pages to be polite
 API_SLEEP = 0.2
 
 
-def fetch_enrollment_for_year(year: int, nces_ids: list, verbose: bool = False) -> list:
+def fetch_directory_by_state(year: int, state: str, verbose: bool = False) -> pd.DataFrame:
     """
-    Fetch enrollment data for a list of NCES school IDs for a given school year.
-    The API returns one row per school per grade — we aggregate to total enrollment.
+    Fetch total enrollment for all schools in a state and year from the CCD directory.
 
-    Returns a list of dicts: {nces_id, school_year, enrollment}
+    Uses the school directory endpoint which has a top-level `enrollment` field
+    (total enrollment) directly on each school record — no grade aggregation needed.
+    This is more accurate than summing grade-level rows.
+
+    Returns a DataFrame with columns: nces_id, school_year, enrollment.
     """
-    if not nces_ids:
-        return []
-
-    # The API supports filtering by ncessch (NCES school ID) but only as a
-    # single value per request. For bulk fetches we use state-level queries
-    # and filter locally — much faster than one request per school.
-    # We'll fetch by state instead, then filter to our known NCES IDs.
-    # Since we already have the schools in our DB, we pass the list directly.
-
-    # Split into chunks of 100 to stay within URL length limits
-    results = []
-    nces_set = set(str(n) for n in nces_ids)
-
-    # Fetch all schools for this year from the API (paginated)
-    page = 1
-    while True:
-        try:
-            resp = requests.get(
-                ED_DATA_URL.format(year=year),
-                params={"page": page, "per_page": 5000},
-                timeout=30,
-            )
-            if resp.status_code != 200:
-                if verbose:
-                    print(f"    API error {resp.status_code} for year {year} page {page}")
-                break
-
-            data = resp.json()
-            records = data.get("results", [])
-            if not records:
-                break
-
-            # Aggregate enrollment by school (sum across grades)
-            for rec in records:
-                nces_id = str(rec.get("ncessch", "")).zfill(12)
-                if nces_id not in nces_set:
-                    continue
-                enrollment = rec.get("enrollment") or 0
-                # Find or create running total for this school
-                existing = next((r for r in results if r["nces_id"] == nces_id), None)
-                if existing:
-                    existing["enrollment"] += enrollment
-                else:
-                    results.append({
-                        "nces_id":      nces_id,
-                        "school_year":  year,
-                        "enrollment":   enrollment,
-                    })
-
-            count = data.get("count", 0)
-            fetched = page * 5000
-            if verbose:
-                print(f"    Year {year} page {page}: {len(records)} records, {len(results)} matched so far")
-
-            if fetched >= count:
-                break
-            page += 1
-            time.sleep(API_SLEEP)
-
-        except Exception as e:
-            if verbose:
-                print(f"    Error fetching year {year} page {page}: {e}")
-            break
-
-    return results
-
-
-def fetch_enrollment_by_state(year: int, state: str, verbose: bool = False) -> pd.DataFrame:
-    """
-    Fetch all school enrollment for a state and year from the API.
-    Returns a DataFrame with ncessch, enrollment (aggregated across grades).
-    """
-    # Use a different endpoint that accepts state filter
-    url = f"https://educationdata.urban.org/api/v1/schools/ccd/enrollment/{year}/grade-pk/"
     all_records = []
     page = 1
 
     while True:
         try:
             resp = requests.get(
-                url,
+                ED_DATA_DIR_URL.format(year=year),
                 params={"fips": _state_to_fips(state), "page": page, "per_page": 5000},
                 timeout=30,
             )
+            if resp.status_code == 404:
+                # Year not yet available in the API
+                if verbose:
+                    print(f"      {state} year {year}: not available (404)")
+                break
             if resp.status_code != 200:
+                if verbose:
+                    print(f"      {state} year {year} page {page}: HTTP {resp.status_code}")
                 break
 
             data = resp.json()
@@ -146,7 +85,7 @@ def fetch_enrollment_by_state(year: int, state: str, verbose: bool = False) -> p
             all_records.extend(records)
             count = data.get("count", 0)
             if verbose:
-                print(f"      {state} year {year} page {page}: {len(records)} rows, {count} total")
+                print(f"      {state} year {year} page {page}: {len(records)} rows ({count} total)")
 
             if page * 5000 >= count:
                 break
@@ -165,13 +104,10 @@ def fetch_enrollment_by_state(year: int, state: str, verbose: bool = False) -> p
     if "ncessch" not in df.columns or "enrollment" not in df.columns:
         return pd.DataFrame()
 
-    # Aggregate enrollment across grades for each school
-    df["ncessch"] = df["ncessch"].astype(str).str.zfill(12)
-    df["enrollment"] = pd.to_numeric(df["enrollment"], errors="coerce").fillna(0)
-    agg = df.groupby("ncessch")["enrollment"].sum().reset_index()
-    agg.columns = ["nces_id", "enrollment"]
-    agg["school_year"] = year
-    return agg
+    df["nces_id"] = df["ncessch"].astype(str).str.zfill(12)
+    df["enrollment"] = pd.to_numeric(df["enrollment"], errors="coerce")
+    df["school_year"] = year
+    return df[["nces_id", "school_year", "enrollment"]]
 
 
 # FIPS codes for US states (needed for state-level API filter)
@@ -237,7 +173,7 @@ def main():
             if not state_nces:
                 continue
 
-            df = fetch_enrollment_by_state(year, state, verbose=args.verbose)
+            df = fetch_directory_by_state(year, state, verbose=args.verbose)
             if df.empty:
                 if args.verbose:
                     print(f"    {state}: no data returned for {year}")

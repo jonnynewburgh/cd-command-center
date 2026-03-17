@@ -2521,18 +2521,28 @@ def compute_and_store_ratios(ein: str):
         ]
         avg_cf = round(sum(cf_years) / len(cf_years), 0) if cf_years else None
 
-        # Preserve existing audit-based acid ratio if it was previously set
-        existing = {}
+        # Preserve existing audit-based values if already set.
+        # Use a direct (uncached) DB read so we get fresh data — the cached
+        # get_financial_ratios() would return stale rows during a compute run.
+        acid_audit = None
+        cl_audit   = None
+        has_audit  = 0
         try:
-            existing = get_financial_ratios(ein)
-            if not existing.empty:
-                match = existing[existing["fiscal_year"] == fiscal_year]
-                existing = match.iloc[0].to_dict() if not match.empty else {}
+            _conn = get_connection()
+            _cur  = _conn.cursor()
+            _cur.execute(
+                "SELECT acid_ratio_audit, current_liabilities_audit, has_audit_data "
+                "FROM financial_ratios WHERE ein = ? AND fiscal_year = ?",
+                (ein, fiscal_year),
+            )
+            _row = _cur.fetchone()
+            _conn.close()
+            if _row:
+                acid_audit = _row[0]
+                cl_audit   = _row[1]
+                has_audit  = _row[2] or 0
         except Exception:
             pass
-        acid_audit = existing.get("acid_ratio_audit")
-        cl_audit   = existing.get("current_liabilities_audit")
-        has_audit  = existing.get("has_audit_data", 0)
 
         record = {
             "ein":                       ein,

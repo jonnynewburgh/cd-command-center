@@ -1050,9 +1050,14 @@ def _render_financial_ratios(ein: str):
     if not ein:
         return
 
-    # Compute/refresh ratios from 990 history
-    db.compute_and_store_ratios(ein)
+    # Only compute ratios if none exist yet. Computing on every render is slow
+    # (DB write on every Streamlit re-run). Re-computation is triggered explicitly
+    # by the user via the "Recalculate" button below, or happens automatically
+    # when new data is uploaded via the document upload widget.
     ratios_df = db.get_financial_ratios(ein)
+    if ratios_df.empty:
+        db.compute_and_store_ratios(ein)
+        ratios_df = db.get_financial_ratios(ein)
 
     if ratios_df.empty:
         st.caption("No financial data available for ratio calculation. Run 990 fetch with --years 3.")
@@ -1109,6 +1114,10 @@ def _render_financial_ratios(ein: str):
         st.caption(f"FY{year} · Source: Audit document")
     else:
         st.caption(f"FY{year} · Source: 990 (approximate — upload audit for precise current-liabilities split)")
+
+    if st.button("↺ Recalculate Ratios", key=f"recalc_ratios_{ein}"):
+        db.compute_and_store_ratios(ein)
+        st.rerun()
 
     # Show multi-year trend if available
     if len(ratios_df) > 1:
@@ -1224,7 +1233,8 @@ def _render_document_upload(ein: str, entity_type: str, entity_id: str):
     if uploaded_file is not None:
         if st.button("Upload & Extract", key=f"do_upload_{entity_type}_{entity_id}"):
             # Save file to disk
-            upload_dir = os.path.join("data", "uploads", ein or "general")
+            _app_dir = os.path.dirname(os.path.abspath(__file__))
+            upload_dir = os.path.join(_app_dir, "data", "uploads", ein or "general")
             os.makedirs(upload_dir, exist_ok=True)
             filepath = os.path.join(upload_dir, uploaded_file.name)
             with open(filepath, "wb") as f:

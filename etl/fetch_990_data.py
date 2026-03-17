@@ -264,8 +264,10 @@ def extract_financials(org_detail: dict, max_years: int = 1) -> tuple[dict, list
             # accounts_payable: Part X line 17
             "accounts_payable":         _first("acctpayableaccrexpenses", "accts_payable_eoy",
                                                "accnts_payble_acrd_exp_eoy"),
-            # accrued_expenses: Part X line 18 (sometimes bundled with accounts_payable above)
-            "accrued_expenses":         _first("grntspybltoffcrs", None),
+            # accrued_expenses: Part X line 18 (often bundled with AP in ProPublica data;
+            # try a few known field name variants from different 990 e-file schema versions)
+            "accrued_expenses":         _first("grntspybltoffcrs", "accrued_exp_eoy",
+                                               "accrued_expenses_eoy"),
             # notes_payable: Part X lines 19-20
             "notes_payable":            _first("mortgnotespybltoindvdls",
                                                "mortgnotespybletorelatedpartseoy",
