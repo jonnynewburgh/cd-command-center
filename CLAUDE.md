@@ -40,7 +40,8 @@ cd-command-center/
 ├── utils/
 │   ├── geo.py             # Geography helpers (census tract lookups, distance calculations)
 │   ├── maps.py            # Map rendering functions
-│   └── export.py          # CSV/report export functions
+│   ├── export.py          # CSV/report export functions
+│   └── pdf_extractor.py   # PDF text extraction + financial line item regex parser
 ├── etl/
 │   └── (data ingestion scripts per source)
 └── .streamlit/
@@ -56,9 +57,18 @@ The database (`cd_command_center.sqlite`) consolidates all data sources. Key tab
 - `cde_allocations` — CDE-level allocation data
 - `fqhc` — HRSA health center data (UDS, site-level)
 - `ece_centers` — Early care and education facility data
-- `census_tracts` — ACS demographic data, NMTC eligibility indicators (poverty rate, median income, etc.)
-- `irs_990` — 990 data for relevant nonprofit operators and funders
+- `census_tracts` — ACS demographic data, NMTC eligibility indicators, OZ flag, EJScreen indicators, 5-year change columns, gap analysis population fields
+- `irs_990` — 990 data (most recent year) for nonprofit facility operators; includes balance sheet fields for ratio calculation
+- `irs_990_history` — multi-year 990 filings for trend charts (one row per EIN + tax_year)
 - `lea_accountability` — LEA/school-level accountability scores from state DOEs
+- `cdfi_directory` — certified CDFIs from the CDFI Fund
+- `state_programs` — state-level financing incentive programs (historic tax credits, state NMTCs, etc.)
+- `enrollment_history` — NCES historical enrollment per school per year (for trend charts)
+- `cdfi_awards` — CDFI Fund Financial Assistance, BEA, CMF, and other awards by awardee and year
+- `user_notes` — per-entity freetext notes (school, fqhc, ece, nmtc, tract, org_990)
+- `user_bookmarks` — saved entities for quick sidebar access
+- `documents` — uploaded PDF documents (audits, financials) with extracted financial data (JSON) and verified flag
+- `financial_ratios` — computed ratios per EIN per year: acid ratio (990~, audit✓), leverage ratio, 3yr avg operating cash flow
 
 Every facility table has `latitude`, `longitude`, and `census_tract_id` columns for geographic joins.
 
@@ -86,7 +96,7 @@ Build in this order. Each phase should produce a working, usable version of the 
 - Data caching for performance
 - Filterable/sortable data tables with CSV export
 
-### Phase 3: FQHC/health center data
+### Phase 3: FQHC/health center data ✅
 - HRSA UDS data integration
 - Health center markers as a new map layer (toggle on/off)
 - Add to search and comparison
@@ -95,9 +105,31 @@ Build in this order. Each phase should produce a working, usable version of the 
 - State licensing data for early care and education centers
 - ECE markers as a new map layer
 
-### Phase 5: 990/philanthropy data
+### Phase 5: 990/philanthropy data ✅
 - IRS 990 data for nonprofit facility operators and funders
 - Financial health indicators for nonprofit operators
+
+### Phase 5.5: Deal analysis tools ✅
+- **Opportunity Zone overlay:** OZ flag on census_tracts, sidebar filter, badge in context panel
+- **EJScreen indicators:** EPA environmental justice scores on census_tracts, shown in detail views
+- **5-year tract change:** Historical ACS data loads poverty/income deltas on census_tracts
+- **Service gap analysis:** Find high-poverty tracts with zero facilities (ECE/FQHC/schools)
+- **NMTC peer comps:** Comparable deals by project type, state, and QLICI size
+- **Multi-site operator profiles:** All sites + 990 trend chart for orgs with EIN linked
+- **990 multi-year history:** `irs_990_history` table + `--years N` flag on fetch_990_data.py
+- **NMTC pro forma calculator:** Interactive deal structure calculator in Tools tab
+- **CDFI directory:** Certified CDFIs from CDFI Fund, filterable by state and type
+- **State incentive programs:** Historic tax credits, state NMTCs, and other programs by state
+
+### Phase 5.6: Operator intelligence + financial analysis ✅
+- **Org-first search:** New "Org Lookup" tab — search by name/EIN, see all sites, 990 trend, ratios, news
+- **Financial ratios:** Acid ratio (990-approximate ~, audit-precise ✓), leverage ratio, 3-year avg operating cash flow — per EIN per fiscal year in `financial_ratios` table
+- **Audit preference:** Upload audit PDFs; pdfplumber extracts cash, current liabilities, net assets, operating CF; manual override fields; saves audit-quality ratios
+- **Document upload:** `data/uploads/{ein}/` storage; extracted JSON stored in `documents` table; confirmed values update `financial_ratios`
+- **Enrollment trends:** NCES historical enrollment per school via Education Data API; sparkline in school detail; `enrollment_history` table
+- **News feed:** Google News RSS by org name in every detail panel (school, FQHC, org lookup)
+- **Notes & bookmarks:** Per-entity freetext notes and starred bookmarks persisted in SQLite; bookmarks in sidebar for quick access
+- **CDFI market activity:** New Tools tab showing CDFI Fund FA/BEA/CMF award data by state/program/year; `cdfi_awards` table + `etl/fetch_cdfi_awards.py`
 
 ### Phase 6: Polish for external users
 - Authentication and user permissions
@@ -145,6 +177,7 @@ python etl/assign_census_tracts.py --states CA --limit 500
 # Load census tract demographics
 python etl/load_census_tracts.py --states CA TX NY
 python etl/load_census_tracts.py --all
+python etl/load_census_tracts.py --states CA --historical   # also load 5yr-ago data for trend columns
 
 # Load NMTC project + CDE data from CDFI Fund Excel
 python etl/load_nmtc_data.py --file data/raw/nmtc_public_data_2024.xlsx
@@ -163,6 +196,42 @@ python etl/load_ece_data.py --file data/raw/ca_licensed_facilities.csv --state C
 python etl/load_ece_data.py --file data/raw/tx_childcare.xlsx --state TX --source "TX HHSC"
 python etl/load_ece_data.py --file data/raw/ny_childcare.csv --state NY --all-facilities
 python etl/load_ece_data.py --file data/raw/ca_licensed_facilities.csv --columns-only  # inspect columns
+
+# Load IRS 990 data (Phase 5)
+python etl/fetch_990_data.py --schools --states CA TX    # charter schools only
+python etl/fetch_990_data.py --fqhc --states CA          # health centers only
+python etl/fetch_990_data.py --years 3                    # load 3 years of history per org
+
+# Load Opportunity Zone designations (Phase 5.5)
+# Download from: https://www.irs.gov/pub/irs-utl/Designated_QOZ_8996.xlsx
+python etl/load_opportunity_zones.py --file data/raw/opportunity_zones.csv
+python etl/load_opportunity_zones.py --file data/raw/opportunity_zones.csv --columns-only
+
+# Load EPA EJScreen environmental justice indicators (Phase 5.5)
+# Download national CSV from: https://gaftp.epa.gov/EJSCREEN/2023/
+python etl/load_ejscreen.py --file data/raw/EJSCREEN_2023_Tracts.csv --states CA TX
+python etl/load_ejscreen.py --file data/raw/EJSCREEN_2023_Tracts.csv --columns-only
+
+# Load CDFI directory from CDFI Fund (Phase 5.5)
+# Download certified CDFI list from: https://www.cdfifund.gov/research-and-resources/data-resources
+python etl/load_cdfi_directory.py --file data/raw/cdfi_certified_list.xlsx
+python etl/load_cdfi_directory.py --file data/raw/cdfi_certified_list.xlsx --columns-only
+
+# Load state incentive programs from seed file (Phase 5.5)
+python etl/load_state_programs.py                          # uses data/raw/state_programs_seed.csv
+python etl/load_state_programs.py --file data/raw/my_programs.csv  # custom file
+
+# Load historical enrollment data from NCES (Phase 5.6)
+python etl/fetch_enrollment_trends.py                      # all schools in DB, 5 years
+python etl/fetch_enrollment_trends.py --states CA TX       # specific states
+python etl/fetch_enrollment_trends.py --years 8            # up to 8 years
+python etl/fetch_enrollment_trends.py --charter-only       # charter schools only
+
+# Load CDFI Fund award data (Phase 5.6)
+# Download from: https://www.cdfifund.gov/research-and-resources/data-resources
+python etl/fetch_cdfi_awards.py --file data/raw/cdfi_awards.xlsx
+python etl/fetch_cdfi_awards.py --file data/raw/cdfi_awards.csv --states CA TX
+python etl/fetch_cdfi_awards.py --file data/raw/cdfi_awards.xlsx --columns-only
 
 # Run tests (when they exist)
 pytest tests/

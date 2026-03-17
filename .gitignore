@@ -1,4 +1,7 @@
-data/raw/
+# Ignore raw data files (large downloads, state licensing files, etc.) but
+# allow seed files that are small enough to commit and version in Git.
+data/raw/*
+!data/raw/state_programs_seed.csv
 __pycache__/
 *.pyc
 *.pyo
@@ -8,3 +11,6 @@ venv/
 *.egg-info/
 .DS_Store
 *.log
+
+# Streamlit secrets — never commit real passwords/keys
+.streamlit/secrets.toml

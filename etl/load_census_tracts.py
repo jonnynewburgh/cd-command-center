@@ -77,7 +77,18 @@ ACS_VARIABLES = [
     "B19113_001E",   # Median family income (used for NMTC income test)
     "B23025_003E",   # Civilian labor force total
     "B23025_005E",   # Civilian labor force unemployed
+    # Gap analysis variables (Phase B3)
+    "B01001_003E",   # Male population under 5 years
+    "B01001_027E",   # Female population under 5 years
+    "B09001_001E",   # Population under 18 in households (proxy for school-age)
     "NAME",          # Tract name
+]
+
+# Historical run only needs these two (for 5-year trend columns)
+ACS_HISTORICAL_VARIABLES = [
+    "B17001_001E",   # Poverty universe
+    "B17001_002E",   # People below poverty level
+    "B19013_001E",   # Median household income
 ]
 
 # National median family income (approximate, 2022 ACS)
@@ -228,6 +239,15 @@ def parse_tract_record(raw: dict, state_abbr: str, year: int) -> dict:
     # Tract name from Census (e.g., "Census Tract 1234.56, Los Angeles County, California")
     tract_name = raw.get("NAME", "")
 
+    # Gap analysis population variables
+    pop_male_under5  = safe_int(raw.get("B01001_003E"))
+    pop_fem_under5   = safe_int(raw.get("B01001_027E"))
+    pop_under_18     = safe_int(raw.get("B09001_001E"))
+
+    pop_under_5 = None
+    if pop_male_under5 is not None or pop_fem_under5 is not None:
+        pop_under_5 = (pop_male_under5 or 0) + (pop_fem_under5 or 0)
+
     return {
         "census_tract_id": census_tract_id,
         "state_fips": state_fips,
@@ -245,7 +265,129 @@ def parse_tract_record(raw: dict, state_abbr: str, year: int) -> dict:
         "county_name": None,            # we have county FIPS; name can be added later
         "state": state_abbr,
         "data_year": year,
+        "pop_under_5": pop_under_5,
+        "pop_under_18": pop_under_18,
     }
+
+
+def fetch_state_tracts_historical(state_fips: str, year: int, api_key: str = None) -> list[dict]:
+    """
+    Fetch only poverty + income variables for a historical year.
+    Used to populate *_5yr_ago columns for tract change-over-time analysis.
+    Returns list of dicts with census_tract_id, poverty_rate, median_hh_income.
+    """
+    variables = ",".join(ACS_HISTORICAL_VARIABLES + ["NAME"])
+    url = f"{BASE_URL}/{year}/acs/acs5"
+    params = {
+        "get": variables,
+        "for": "tract:*",
+        "in": f"state:{state_fips}",
+    }
+    if api_key:
+        params["key"] = api_key
+
+    try:
+        resp = requests.get(url, params=params, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException as e:
+        print(f"    Census API error for state {state_fips} (year {year}): {e}")
+        return []
+
+    if not data or len(data) < 2:
+        return []
+
+    headers = data[0]
+    rows = data[1:]
+    results = []
+    for row in rows:
+        raw = dict(zip(headers, row))
+        state_f = raw.get("state", "")
+        county_f = raw.get("county", "")
+        tract_c = raw.get("tract", "")
+        census_tract_id = f"{state_f}{county_f}{tract_c}"
+
+        def safe_int(val):
+            try:
+                v = int(val)
+                return None if v < 0 else v
+            except (TypeError, ValueError):
+                return None
+
+        def safe_float(val):
+            try:
+                v = float(val)
+                return None if v < 0 else v
+            except (TypeError, ValueError):
+                return None
+
+        pov_universe = safe_int(raw.get("B17001_001E"))
+        pov_count    = safe_int(raw.get("B17001_002E"))
+        hh_income    = safe_float(raw.get("B19013_001E"))
+
+        poverty_rate = None
+        if pov_universe and pov_universe > 0 and pov_count is not None:
+            poverty_rate = round(pov_count / pov_universe * 100, 2)
+
+        results.append({
+            "census_tract_id": census_tract_id,
+            "poverty_rate_5yr_ago": poverty_rate,
+            "median_income_5yr_ago": hh_income,
+        })
+
+    return results
+
+
+def apply_historical_data(historical_records: list[dict]):
+    """
+    Update census_tracts with 5-year-ago values and compute change columns.
+    Reads current poverty_rate and median_household_income to compute deltas.
+    Only updates tracts that already exist in the database.
+    """
+    import sqlite3
+    conn = db.get_connection()
+    cur = conn.cursor()
+
+    updated = 0
+    for rec in historical_records:
+        tid = rec["census_tract_id"]
+        pov_old = rec.get("poverty_rate_5yr_ago")
+        inc_old = rec.get("median_income_5yr_ago")
+
+        # Look up current values to compute deltas
+        cur.execute(
+            "SELECT poverty_rate, median_household_income FROM census_tracts WHERE census_tract_id = ?",
+            (tid,),
+        )
+        row = cur.fetchone()
+        if not row:
+            continue  # tract not in DB yet, skip
+
+        pov_now, inc_now = row[0], row[1]
+
+        # Compute delta columns
+        pov_change = None
+        if pov_now is not None and pov_old is not None:
+            pov_change = round(pov_now - pov_old, 2)
+
+        inc_change_pct = None
+        if inc_now is not None and inc_old is not None and inc_old > 0:
+            inc_change_pct = round((inc_now - inc_old) / inc_old * 100, 2)
+
+        cur.execute(
+            """UPDATE census_tracts
+               SET poverty_rate_5yr_ago = ?,
+                   median_income_5yr_ago = ?,
+                   poverty_rate_change = ?,
+                   income_change_pct = ?
+               WHERE census_tract_id = ?""",
+            (pov_old, inc_old, pov_change, inc_change_pct, tid),
+        )
+        updated += 1
+
+    conn.commit()
+    conn.close()
+    return updated
 
 
 def main():
@@ -274,6 +416,15 @@ def main():
         "--api-key",
         default=None,
         help="Census Bureau API key (optional; get one free at api.census.gov/data/key_signup.html)",
+    )
+    parser.add_argument(
+        "--historical",
+        action="store_true",
+        help=(
+            "Also load data from 5 years prior (year - 5) and compute change columns. "
+            "Requires current-year data to already be loaded. Populates "
+            "poverty_rate_5yr_ago, median_income_5yr_ago, poverty_rate_change, income_change_pct."
+        ),
     )
     args = parser.parse_args()
 
@@ -339,6 +490,26 @@ def main():
     print(f"  LIC or better:        {summary.get('eligible_tracts', 0):,}")
     print(f"  Severely Distressed:  {summary.get('severely_distressed', 0):,}")
     print(f"  Deep Distress:        {summary.get('deep_distress', 0):,}")
+
+    # --- Historical mode: load 5-years-ago data and compute change columns ---
+    if args.historical:
+        historical_year = args.year - 5
+        print()
+        print(f"Loading historical ACS data for year {historical_year} (5 years prior)...")
+
+        total_historical = 0
+        for abbr, fips in states_to_fetch.items():
+            print(f"  Fetching {abbr} ({historical_year})...", end="", flush=True)
+            hist_records = fetch_state_tracts_historical(fips, historical_year, args.api_key)
+            if not hist_records:
+                print(" no data returned, skipping")
+                continue
+            updated = apply_historical_data(hist_records)
+            total_historical += updated
+            print(f" {updated:,} tracts updated with historical data")
+            time.sleep(PAGE_SLEEP)
+
+        print(f"Historical data load complete. {total_historical:,} tracts updated with 5-year trend.")
 
 
 if __name__ == "__main__":
