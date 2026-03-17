@@ -575,6 +575,20 @@ def init_db():
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ratios_ein ON financial_ratios(ein)")
 
+    # Pipeline audit log — written by ETL pipeline scripts after every run.
+    # Lets the app show data freshness ("last updated X days ago").
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS pipeline_runs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_name TEXT      NOT NULL,
+            run_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            status      TEXT      NOT NULL,   -- 'success' or 'failed'
+            rows_loaded INTEGER,
+            notes       TEXT
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_pipeline_source ON pipeline_runs(source_name)")
+
     conn.commit()
     conn.close()
 
