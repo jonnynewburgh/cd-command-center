@@ -193,25 +193,57 @@ def best_match(query_name: str, results: list[dict]) -> dict | None:
     return None
 
 
-def extract_financials(org_detail: dict) -> dict:
+def extract_financials(org_detail: dict, max_years: int = 1) -> tuple[dict, list[dict]]:
     """
-    Pull the most recent year's financial data from a ProPublica org detail response.
-    Returns a flat dict ready to upsert into irs_990.
+    Pull financial data from a ProPublica org detail response.
+
+    Returns:
+        (latest_record, history_records)
+        latest_record: flat dict for irs_990 table (most recent year)
+        history_records: list of dicts for irs_990_history (up to max_years years)
+
+    Args:
+        org_detail: the dict returned by fetch_org_detail()
+        max_years: how many years of history to extract (default 1 = current only)
     """
     org = org_detail.get("organization", {})
     filings = org_detail.get("filings_with_data", [])
 
-    # Sort filings newest-first and take the first one
+    # Sort filings newest-first
     filings_sorted = sorted(filings, key=lambda f: f.get("tax_prd_yr", 0), reverse=True)
-    filing = filings_sorted[0] if filings_sorted else {}
 
     ein_raw = org.get("ein", "")
     ein = str(ein_raw).zfill(9) if ein_raw else None
 
-    total_revenue  = filing.get("totrevenue")
-    total_expenses = filing.get("totfuncexpns")
+    def _filing_to_record(filing: dict) -> dict:
+        """Convert a single filing dict to our irs_990/irs_990_history schema."""
+        total_revenue  = filing.get("totrevenue")
+        total_expenses = filing.get("totfuncexpns")
+        net_income = None
+        if total_revenue is not None and total_expenses is not None:
+            try:
+                net_income = float(total_revenue) - float(total_expenses)
+            except (TypeError, ValueError):
+                pass
+        return {
+            "ein":                      ein,
+            "org_name":                 org.get("name"),
+            "total_revenue":            _safe_float(total_revenue),
+            "total_expenses":           _safe_float(total_expenses),
+            "total_assets":             _safe_float(filing.get("totassetsend")),
+            "net_income":               net_income,
+            "program_service_revenue":  _safe_float(filing.get("prgmservrev")),
+            "program_service_expenses": _safe_float(filing.get("progrmserviceexp")),
+            "officer_compensation":     _safe_float(filing.get("compnsatncurrofcr")),
+            "tax_year":                 filing.get("tax_prd_yr"),
+            "filing_pdf_url":           filing.get("pdf_url"),
+            "data_source":              "ProPublica",
+        }
 
-    # net_income isn't a direct field — compute it if we have both
+    # Latest filing → irs_990 (includes org-level fields like city, state, ntee_code)
+    most_recent_filing = filings_sorted[0] if filings_sorted else {}
+    total_revenue  = most_recent_filing.get("totrevenue")
+    total_expenses = most_recent_filing.get("totfuncexpns")
     net_income = None
     if total_revenue is not None and total_expenses is not None:
         try:
@@ -219,7 +251,7 @@ def extract_financials(org_detail: dict) -> dict:
         except (TypeError, ValueError):
             pass
 
-    return {
+    latest_record = {
         "ein":                      ein,
         "org_name":                 org.get("name"),
         "city":                     org.get("city"),
@@ -228,15 +260,24 @@ def extract_financials(org_detail: dict) -> dict:
         "subsection_code":          org.get("subsection_code"),
         "total_revenue":            _safe_float(total_revenue),
         "total_expenses":           _safe_float(total_expenses),
-        "total_assets":             _safe_float(filing.get("totassetsend")),
+        "total_assets":             _safe_float(most_recent_filing.get("totassetsend")),
         "net_income":               net_income,
-        "program_service_revenue":  _safe_float(filing.get("prgmservrev")),
-        "program_service_expenses": _safe_float(filing.get("progrmserviceexp")),
-        "officer_compensation":     _safe_float(filing.get("compnsatncurrofcr")),
-        "tax_year":                 filing.get("tax_prd_yr"),
-        "filing_pdf_url":           filing.get("pdf_url"),
+        "program_service_revenue":  _safe_float(most_recent_filing.get("prgmservrev")),
+        "program_service_expenses": _safe_float(most_recent_filing.get("progrmserviceexp")),
+        "officer_compensation":     _safe_float(most_recent_filing.get("compnsatncurrofcr")),
+        "tax_year":                 most_recent_filing.get("tax_prd_yr"),
+        "filing_pdf_url":           most_recent_filing.get("pdf_url"),
         "data_source":              "ProPublica",
     }
+
+    # History records → irs_990_history (one row per year, up to max_years)
+    history_records = []
+    for filing in filings_sorted[:max_years]:
+        rec = _filing_to_record(filing)
+        if rec.get("ein") and rec.get("tax_year"):
+            history_records.append(rec)
+
+    return latest_record, history_records
 
 
 def _safe_float(val) -> float | None:
@@ -253,7 +294,7 @@ def _safe_float(val) -> float | None:
 # Per-facility-type fetch functions
 # ---------------------------------------------------------------------------
 
-def fetch_990_for_charter_schools(states=None, limit=None, overwrite=False, verbose=False):
+def fetch_990_for_charter_schools(states=None, limit=None, overwrite=False, verbose=False, years=1):
     """
     For each charter school, search ProPublica using the LEA name (the
     operator/district entity that files the 990), link the EIN, and store
@@ -362,12 +403,15 @@ def fetch_990_for_charter_schools(states=None, limit=None, overwrite=False, verb
             failed += 1
             continue
 
-        financials = extract_financials(detail)
+        financials, history = extract_financials(detail, max_years=years)
         if not financials.get("ein"):
             failed += 1
             continue
 
         db.upsert_990(financials)
+        # Store multi-year history if --years > 1
+        for hist_rec in history:
+            db.upsert_990_history(hist_rec)
 
         # Link the EIN to all schools with this lea_id
         conn = db.get_connection()
@@ -395,7 +439,7 @@ def fetch_990_for_charter_schools(states=None, limit=None, overwrite=False, verb
     return linked
 
 
-def fetch_990_for_fqhc(states=None, limit=None, overwrite=False, verbose=False):
+def fetch_990_for_fqhc(states=None, limit=None, overwrite=False, verbose=False, years=1):
     """
     For each FQHC parent organization, search ProPublica using health_center_name,
     link the EIN, and store the financial data.
@@ -464,12 +508,14 @@ def fetch_990_for_fqhc(states=None, limit=None, overwrite=False, verbose=False):
             failed += 1
             continue
 
-        financials = extract_financials(detail)
+        financials, history = extract_financials(detail, max_years=years)
         if not financials.get("ein"):
             failed += 1
             continue
 
         db.upsert_990(financials)
+        for hist_rec in history:
+            db.upsert_990_history(hist_rec)
 
         # Link the EIN to all sites belonging to this health center org
         conn = db.get_connection()
@@ -503,6 +549,11 @@ def main():
     parser.add_argument("--limit",     type=int, help="Max organizations to process per facility type")
     parser.add_argument("--overwrite", action="store_true", help="Re-fetch even already-linked facilities")
     parser.add_argument("--verbose",   action="store_true", help="Print search query and top API results for each org")
+    parser.add_argument(
+        "--years", type=int, default=1,
+        help="Number of years of 990 history to store in irs_990_history table (default 1 = most recent only). "
+             "Use --years 3 to load 3 years of filings per organization.",
+    )
     args = parser.parse_args()
 
     # Ensure all tables and columns exist (adds ein column to schools/fqhc if missing)
@@ -519,6 +570,8 @@ def main():
         print(f"  States:   {args.states}")
     if args.limit:
         print(f"  Limit:    {args.limit} per facility type")
+    if args.years > 1:
+        print(f"  Years:    {args.years} years of history per org (stored in irs_990_history)")
     print()
 
     if do_schools:
@@ -528,6 +581,7 @@ def main():
             limit=args.limit,
             overwrite=args.overwrite,
             verbose=args.verbose,
+            years=args.years,
         )
         print()
 
@@ -538,6 +592,7 @@ def main():
             limit=args.limit,
             overwrite=args.overwrite,
             verbose=args.verbose,
+            years=args.years,
         )
         print()
 

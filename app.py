@@ -82,6 +82,13 @@ nmtc_eligible_filter = st.sidebar.checkbox(
     help="Show only facilities whose census tract qualifies as LIC, Severely Distressed, or Deep Distress",
 )
 
+oz_filter = st.sidebar.checkbox(
+    "Opportunity Zones only",
+    value=False,
+    key="oz_filter",
+    help="Show only facilities in Treasury-designated Opportunity Zones",
+)
+
 # --- School filters (collapsed by default so they don't dominate the sidebar) ---
 if show_schools:
     school_expander = st.sidebar.expander("School filters", expanded=False)
@@ -247,6 +254,17 @@ if show_schools:
         if frl_threshold > 0 and not schools_df.empty:
             schools_df = schools_df[schools_df["pct_free_reduced_lunch"].fillna(0) >= frl_threshold]
 
+        # Apply OZ filter
+        if oz_filter and not schools_df.empty and "census_tract_id" in schools_df.columns:
+            oz_tracts = {
+                row["census_tract_id"]
+                for _, row in db.get_census_tracts(
+                    states=state_filter, nmtc_eligible_only=False
+                ).iterrows()
+                if row.get("is_opportunity_zone") == 1
+            }
+            schools_df = schools_df[schools_df["census_tract_id"].isin(oz_tracts)]
+
 # --- NMTC Projects data ---
 projects_df = pd.DataFrame()
 if show_nmtc_projects:
@@ -410,7 +428,7 @@ def _render_990_section(rec: dict):
 
 
 def _render_census_context(census_tract_id):
-    """Show census tract demographics and NMTC eligibility for a given tract ID."""
+    """Show census tract demographics, NMTC eligibility, OZ status, and EJ indicators."""
     if not census_tract_id:
         return
     tract = db.get_census_tract(census_tract_id)
@@ -418,14 +436,52 @@ def _render_census_context(census_tract_id):
         st.caption(f"Census tract: {census_tract_id} (no demographic data loaded)")
         return
     st.markdown(f"**Census Tract {census_tract_id}**")
+
+    # NMTC eligibility badge
     tier = tract.get("nmtc_eligibility_tier", "Unknown")
     tier_icons = {"Deep Distress": "🔴", "Severely Distressed": "🟠", "LIC": "🟡", "Not Eligible": "⚪"}
-    st.markdown(f"NMTC Eligibility: {tier_icons.get(tier, '⚪')} **{tier}**")
+    badges = [f"NMTC: {tier_icons.get(tier, '⚪')} **{tier}**"]
+
+    # Opportunity Zone badge
+    if tract.get("is_opportunity_zone") == 1:
+        badges.append("🌟 **Opportunity Zone**")
+
+    st.markdown("  ·  ".join(badges))
+
+    # Core demographic metrics
     c1, c2, c3 = st.columns(3)
     c1.metric("Poverty Rate", _fmt_pct(tract.get("poverty_rate")))
     c2.metric("Median HH Income", _fmt_dollar(tract.get("median_household_income")))
     pop = tract.get("total_population")
     c3.metric("Population", f"{int(pop):,}" if pop else "—")
+
+    # 5-year trend (show if historical data loaded)
+    if tract.get("poverty_rate_5yr_ago") is not None:
+        pov_now = tract.get("poverty_rate")
+        pov_then = tract.get("poverty_rate_5yr_ago")
+        inc_chg = tract.get("income_change_pct")
+        trend_parts = []
+        if pov_now is not None and pov_then is not None:
+            delta = pov_now - pov_then
+            arrow = "↑" if delta > 0 else "↓"
+            trend_parts.append(f"Poverty {arrow}{abs(delta):.1f}pp (5yr)")
+        if inc_chg is not None:
+            arrow = "↑" if inc_chg > 0 else "↓"
+            trend_parts.append(f"Income {arrow}{abs(inc_chg):.1f}% (5yr)")
+        if trend_parts:
+            st.caption("5-year trend: " + "  ·  ".join(trend_parts))
+
+    # EJScreen environmental indicators (collapsed to save space)
+    ej_index = tract.get("ej_index")
+    if ej_index is not None:
+        with st.expander(f"Environmental Justice (EJ Index: {ej_index:.0f}th percentile)"):
+            ej_cols = st.columns(3)
+            ej_cols[0].metric("PM2.5", f"{tract['pm25_percentile']:.0f}th pct" if tract.get("pm25_percentile") is not None else "—")
+            ej_cols[1].metric("Diesel", f"{tract['diesel_percentile']:.0f}th pct" if tract.get("diesel_percentile") is not None else "—")
+            ej_cols[2].metric("Lead Paint", f"{tract['lead_paint_percentile']:.0f}th pct" if tract.get("lead_paint_percentile") is not None else "—")
+            ej_cols2 = st.columns(2)
+            ej_cols2[0].metric("Superfund", f"{tract['superfund_percentile']:.0f}th pct" if tract.get("superfund_percentile") is not None else "—")
+            ej_cols2[1].metric("Wastewater", f"{tract['wastewater_percentile']:.0f}th pct" if tract.get("wastewater_percentile") is not None else "—")
 
 
 def _render_nearby_facilities(nearby: dict):
@@ -575,10 +631,41 @@ def _render_school_detail(school_id):
         st.markdown("---")
         st.markdown("**990 / Financial Health**")
         nces_id = school.get("nces_id")
+        ein = school.get("ein")
         if nces_id:
             _render_990_section(db.get_990_for_school(nces_id))
         else:
             st.caption("No NCES ID — cannot look up 990.")
+
+        # Operator profile — show all other schools run by same org if EIN is linked
+        if ein:
+            other_schools = db.get_operator_schools(ein)
+            # Exclude the current school from the list
+            if not other_schools.empty and "id" in other_schools.columns:
+                other_schools = other_schools[other_schools["id"] != school_id]
+            if not other_schools.empty:
+                st.markdown("---")
+                st.markdown(f"**Other Schools by Same Operator** (EIN {ein})")
+                op_cols = [c for c in ["school_name", "city", "state", "school_status", "enrollment", "survival_risk_tier"] if c in other_schools.columns]
+                st.dataframe(
+                    other_schools[op_cols].rename(columns={"school_name": "School", "school_status": "Status", "enrollment": "Enrollment", "survival_risk_tier": "Risk"}),
+                    use_container_width=True,
+                )
+
+            # 990 multi-year trend chart
+            history_df = db.get_990_history(ein)
+            if not history_df.empty and len(history_df) > 1 and "tax_year" in history_df.columns:
+                st.markdown("---")
+                st.markdown("**Financial Trend (990 History)**")
+                trend_cols = [c for c in ["total_revenue", "total_expenses", "net_income"] if c in history_df.columns]
+                if trend_cols:
+                    trend_df = history_df[["tax_year"] + trend_cols].sort_values("tax_year")
+                    trend_melted = trend_df.melt(id_vars="tax_year", value_vars=trend_cols, var_name="Metric", value_name="Amount")
+                    fig = px.line(trend_melted, x="tax_year", y="Amount", color="Metric",
+                                  labels={"tax_year": "Tax Year", "Amount": "$ Amount"},
+                                  title="Revenue / Expense Trend")
+                    fig.update_layout(height=300, margin=dict(t=40, b=20))
+                    st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("---")
     st.markdown("**Census Tract Context**")
@@ -620,6 +707,36 @@ def _render_fqhc_detail(bhcmis_id):
     st.markdown("---")
     st.markdown("**990 / Financial Health**")
     _render_990_section(db.get_990_for_fqhc(bhcmis_id))
+
+    ein = site.get("ein")
+    if ein:
+        # Other sites run by the same health center organization
+        other_sites = db.get_operator_fqhc(ein)
+        if not other_sites.empty and "bhcmis_id" in other_sites.columns:
+            other_sites = other_sites[other_sites["bhcmis_id"] != bhcmis_id]
+        if not other_sites.empty:
+            st.markdown("---")
+            st.markdown(f"**Other Sites — Same Organization** (EIN {ein})")
+            op_cols = [c for c in ["site_name", "city", "state", "site_type", "total_patients"] if c in other_sites.columns]
+            st.dataframe(
+                other_sites[op_cols].rename(columns={"site_name": "Site", "site_type": "Type", "total_patients": "Patients"}),
+                use_container_width=True,
+            )
+
+        # 990 multi-year trend chart
+        history_df = db.get_990_history(ein)
+        if not history_df.empty and len(history_df) > 1 and "tax_year" in history_df.columns:
+            st.markdown("---")
+            st.markdown("**Financial Trend (990 History)**")
+            trend_cols = [c for c in ["total_revenue", "total_expenses", "net_income"] if c in history_df.columns]
+            if trend_cols:
+                trend_df = history_df[["tax_year"] + trend_cols].sort_values("tax_year")
+                trend_melted = trend_df.melt(id_vars="tax_year", value_vars=trend_cols, var_name="Metric", value_name="Amount")
+                fig = px.line(trend_melted, x="tax_year", y="Amount", color="Metric",
+                              labels={"tax_year": "Tax Year", "Amount": "$ Amount"},
+                              title="Revenue / Expense Trend")
+                fig.update_layout(height=300, margin=dict(t=40, b=20))
+                st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("---")
     st.markdown("**Census Tract Context**")
@@ -715,6 +832,29 @@ def _render_nmtc_detail(cdfi_project_id):
         else:
             st.caption("No other projects found for this CDE.")
 
+    # Peer comps — similar deals by project type and state, comparable QLICI size
+    qlici = project.get("qlici_amount")
+    project_type = project.get("project_type")
+    state = project.get("state")
+    if qlici and project_type and state:
+        qlici_min = float(qlici) * 0.5
+        qlici_max = float(qlici) * 2.0
+        peers = db.get_peer_nmtc_projects(
+            project_type=project_type,
+            state=state,
+            qlici_min=qlici_min,
+            qlici_max=qlici_max,
+            exclude_id=cdfi_project_id,
+        )
+        if not peers.empty:
+            st.markdown("---")
+            st.markdown(f"**Comparable Deals** ({project_type} in {state}, QLICI ½×–2× this deal)")
+            peer_cols = [c for c in ["project_name", "cde_name", "city", "qlici_amount", "fiscal_year", "jobs_created"] if c in peers.columns]
+            st.dataframe(
+                peers[peer_cols].rename(columns={"project_name": "Project", "cde_name": "CDE", "qlici_amount": "QLICI", "fiscal_year": "FY", "jobs_created": "Jobs"}),
+                use_container_width=True,
+            )
+
     st.markdown("---")
     st.markdown("**Nearby Facilities** (within 1 mile)")
     lat, lon = project.get("latitude"), project.get("longitude")
@@ -733,7 +873,7 @@ def _render_nmtc_detail(cdfi_project_id):
 
 st.title("CD Command Center")
 
-tab_dashboard, tab_detail = st.tabs(["📊 Dashboard", "🔍 Site Detail"])
+tab_dashboard, tab_detail, tab_tools = st.tabs(["📊 Dashboard", "🔍 Site Detail", "🧮 Tools"])
 
 with tab_dashboard:
     if search_active:
@@ -1101,7 +1241,8 @@ with tab_dashboard:
         - ✅ **Phase 2.5**: Unified GIS layout + all public schools
         - ✅ **Phase 3**: FQHC / health centers
         - ✅ **Phase 4**: ECE / child care facility data
-        - 🔄 **Phase 5**: 990 / philanthropy data (in progress)
+        - ✅ **Phase 5**: 990 / philanthropy data
+        - ✅ **Phase 5.5**: Deal analysis tools — OZ overlay, EJScreen, peer comps, operator profiles, pro forma calculator, gap analysis, CDFI directory, state programs
         - ⬜ Phase 6: Auth + PostgreSQL migration
         """
     )
@@ -1190,3 +1331,309 @@ with tab_detail:
             st.rerun()
     elif not detail_search:
         st.info("Use the search box above, or select a site from the data tables in the Dashboard tab.")
+
+# ---------------------------------------------------------------------------
+# Tools tab — pro forma calculator, gap analysis, state programs, CDFI directory
+# ---------------------------------------------------------------------------
+
+with tab_tools:
+
+    tool_tabs = st.tabs([
+        "📐 NMTC Pro Forma",
+        "🗺️ Service Gap Analysis",
+        "🏦 CDFI Directory",
+        "📋 State Programs",
+    ])
+
+    # -----------------------------------------------------------------------
+    # NMTC Pro Forma Calculator
+    # -----------------------------------------------------------------------
+
+    with tool_tabs[0]:
+        st.subheader("NMTC Structure Calculator")
+        st.caption(
+            "Estimate the federal tax credit, equity proceeds, and net borrower benefit "
+            "for a New Markets Tax Credit deal."
+        )
+
+        with st.expander("How NMTC deals work", expanded=False):
+            st.markdown("""
+**The basic structure:**
+1. A CDE receives an NMTC allocation from Treasury
+2. A tax credit investor provides equity to the CDE (the CDE is the pass-through entity)
+3. The investor earns 39% of the NMTC allocation in federal tax credits over 7 years
+4. The CDE combines the equity with a leverage loan and makes a QLICI (Qualified Low-Income Community Investment) to the project
+5. At the end of the 7-year compliance period, the investor exits and the leverage loan is paid off or forgiven
+
+**Key terms:**
+- **QLICI amount:** The total investment into the project (equity + leverage)
+- **Credit amount:** 39% of QLICI, earned over 7 years (5% in years 1-3, 6% in years 4-7)
+- **Equity price:** What the investor pays per dollar of credit (typically $0.75–$0.90)
+- **Net benefit:** The "subsidy" the project receives — how much cheaper the NMTC financing is vs. market
+            """)
+
+        st.markdown("---")
+        col_left, col_right = st.columns(2)
+
+        with col_left:
+            st.markdown("**Inputs**")
+            qlici_amount = st.number_input(
+                "QLICI Amount ($M)",
+                min_value=0.5, max_value=500.0, value=10.0, step=0.5,
+                help="Total Qualified Low-Income Community Investment into the project",
+            )
+            equity_price = st.slider(
+                "Equity price (¢ per $1 of credit)",
+                min_value=0.60, max_value=1.00, value=0.85, step=0.01,
+                format="$%.2f",
+                help="What the tax credit investor pays per dollar of federal credit. Typically $0.75–$0.90.",
+            )
+            leverage_rate = st.slider(
+                "Leverage loan interest rate (%)",
+                min_value=0.0, max_value=10.0, value=4.5, step=0.25,
+                help="Interest rate on the leverage loan that goes into the QLICI alongside investor equity",
+            )
+            cde_fee_pct = st.slider(
+                "CDE fee (% of QLICI)",
+                min_value=0.0, max_value=5.0, value=1.0, step=0.25,
+                help="Fee the CDE charges for using its allocation and acting as pass-through entity",
+            )
+            leverage_pct = st.slider(
+                "Leverage loan as % of QLICI",
+                min_value=0, max_value=90, value=55, step=5,
+                help="What share of the QLICI is funded by the leverage loan (vs. investor equity). Typically 55-70%.",
+            )
+
+        with col_right:
+            st.markdown("**Outputs**")
+
+            # Calculations
+            qlici_dollars = qlici_amount * 1_000_000
+            credit_amount = qlici_dollars * 0.39          # 39% NMTC credit rate
+            equity_proceeds = credit_amount * equity_price # investor pays equity_price per credit dollar
+            leverage_loan = qlici_dollars * (leverage_pct / 100)
+            equity_from_investor = qlici_dollars - leverage_loan
+            cde_fee = qlici_dollars * (cde_fee_pct / 100)
+            annual_interest = leverage_loan * (leverage_rate / 100)
+            # Net benefit = equity proceeds above par minus CDE fees
+            net_benefit = equity_proceeds - cde_fee
+            # Effective subsidy rate = net benefit / project cost
+            subsidy_rate = (net_benefit / qlici_dollars * 100) if qlici_dollars > 0 else 0
+
+            m1, m2 = st.columns(2)
+            m1.metric("Federal Tax Credits", _fmt_dollar(credit_amount))
+            m2.metric("Equity Proceeds", _fmt_dollar(equity_proceeds),
+                      help="Credits × equity price — the cash the investor puts in upfront")
+
+            m3, m4 = st.columns(2)
+            m3.metric("Leverage Loan", _fmt_dollar(leverage_loan))
+            m4.metric("Annual Interest Cost", _fmt_dollar(annual_interest))
+
+            m5, m6 = st.columns(2)
+            m5.metric("CDE Fee", _fmt_dollar(cde_fee))
+            m6.metric("Net Benefit to Borrower", _fmt_dollar(net_benefit),
+                      delta=f"{subsidy_rate:.1f}% effective subsidy",
+                      delta_color="normal")
+
+            st.markdown("---")
+            st.markdown("**Deal Summary**")
+            st.markdown(f"""
+| Item | Amount |
+|------|--------|
+| QLICI (total project investment) | {_fmt_dollar(qlici_dollars)} |
+| Leverage loan ({leverage_pct}%) | {_fmt_dollar(leverage_loan)} |
+| Investor equity needed | {_fmt_dollar(equity_from_investor)} |
+| Federal tax credits generated | {_fmt_dollar(credit_amount)} |
+| Investor pays (equity price × credits) | {_fmt_dollar(equity_proceeds)} |
+| CDE fee | {_fmt_dollar(cde_fee)} |
+| **Net borrower benefit** | **{_fmt_dollar(net_benefit)}** |
+| Annual leverage interest | {_fmt_dollar(annual_interest)} |
+""")
+
+    # -----------------------------------------------------------------------
+    # Service Gap Analysis
+    # -----------------------------------------------------------------------
+
+    with tool_tabs[1]:
+        st.subheader("Service Gap Analysis")
+        st.caption(
+            "Find census tracts with high poverty and no nearby facilities. "
+            "Useful for identifying underserved markets for new facility investments."
+        )
+
+        gap_col1, gap_col2, gap_col3 = st.columns(3)
+        with gap_col1:
+            gap_asset_class = st.selectbox(
+                "Asset class",
+                options=["ece", "fqhc", "schools"],
+                format_func=lambda x: {"ece": "ECE / Child Care Centers", "fqhc": "Health Centers (FQHC)", "schools": "Schools"}.get(x, x),
+                key="gap_asset_class",
+            )
+        with gap_col2:
+            gap_min_poverty = st.slider(
+                "Min poverty rate (%)",
+                min_value=10, max_value=50, value=20, step=5,
+                key="gap_min_poverty",
+                help="Only include tracts with at least this poverty rate",
+            )
+        with gap_col3:
+            gap_states = st.multiselect(
+                "State(s)",
+                options=sorted(set(db.get_census_tract_states())),
+                key="gap_states",
+                help="Leave empty for all states (slow on large datasets)",
+            )
+
+        if st.button("Run Gap Analysis", key="run_gap_analysis"):
+            with st.spinner("Analyzing..."):
+                gaps_df = db.get_service_gaps(
+                    states=gap_states if gap_states else None,
+                    asset_class=gap_asset_class,
+                    min_poverty_rate=float(gap_min_poverty),
+                )
+
+            if gaps_df.empty:
+                st.info(
+                    "No gaps found with current filters, or no census tract / facility data loaded. "
+                    "Run `python etl/load_census_tracts.py` to load tract demographics."
+                )
+            else:
+                asset_label = {"ece": "ECE centers", "fqhc": "health centers", "schools": "schools"}[gap_asset_class]
+                st.success(f"Found {len(gaps_df):,} high-need tracts with zero {asset_label}.")
+
+                # Summary metrics
+                gm1, gm2, gm3 = st.columns(3)
+                gm1.metric("Gap tracts", f"{len(gaps_df):,}")
+                total_pop = gaps_df["total_population"].sum() if "total_population" in gaps_df.columns else 0
+                gm2.metric("Population in gap tracts", f"{int(total_pop):,}" if total_pop else "—")
+                oz_gaps = gaps_df[gaps_df.get("is_opportunity_zone", pd.Series(0, index=gaps_df.index)) == 1].shape[0] if "is_opportunity_zone" in gaps_df.columns else 0
+                gm3.metric("Also in Opportunity Zone", f"{oz_gaps:,}")
+
+                # Display table
+                display_gap_cols = [c for c in [
+                    "state", "county_name", "census_tract_id", "total_population",
+                    "poverty_rate", "median_household_income", "nmtc_eligibility_tier",
+                    "need_score"
+                ] if c in gaps_df.columns]
+                st.dataframe(
+                    gaps_df[display_gap_cols].rename(columns={
+                        "county_name": "County", "census_tract_id": "Tract",
+                        "total_population": "Population", "poverty_rate": "Poverty %",
+                        "median_household_income": "Median HH Income",
+                        "nmtc_eligibility_tier": "NMTC Tier", "need_score": "Need Score",
+                    }),
+                    use_container_width=True, height=400,
+                )
+
+                csv_bytes = df_to_csv_bytes(gaps_df[display_gap_cols])
+                st.download_button(
+                    "Download gaps CSV", data=csv_bytes,
+                    file_name=f"service_gaps_{gap_asset_class}.csv", mime="text/csv",
+                )
+        else:
+            st.info("Set filters and click **Run Gap Analysis** to find underserved tracts.")
+
+    # -----------------------------------------------------------------------
+    # CDFI Directory
+    # -----------------------------------------------------------------------
+
+    with tool_tabs[2]:
+        st.subheader("CDFI Directory")
+        st.caption("Certified Community Development Financial Institutions from the CDFI Fund.")
+
+        cdfi_states_available = db.get_cdfi_states()
+        if not cdfi_states_available:
+            st.info(
+                "No CDFI data loaded yet. Download the certified CDFI list from the CDFI Fund "
+                "and run:\n```\npython etl/load_cdfi_directory.py --file data/raw/cdfi_certified_list.xlsx\n```"
+            )
+        else:
+            cdfi_filter_col1, cdfi_filter_col2 = st.columns(2)
+            with cdfi_filter_col1:
+                cdfi_state_filter = st.multiselect(
+                    "State(s)",
+                    options=cdfi_states_available,
+                    key="cdfi_state_filter",
+                )
+            with cdfi_filter_col2:
+                cdfi_type_options = ["All types", "Loan Fund", "Credit Union", "Community Development Bank", "Venture Capital"]
+                cdfi_type_filter = st.selectbox("CDFI type", cdfi_type_options, key="cdfi_type_filter")
+
+            cdfis_df = db.get_cdfis(
+                states=cdfi_state_filter if cdfi_state_filter else None,
+                cdfi_type=None if cdfi_type_filter == "All types" else cdfi_type_filter,
+            )
+
+            if not cdfis_df.empty:
+                st.metric("CDFIs shown", len(cdfis_df))
+                show_cdfi_cols = [c for c in [
+                    "cdfi_name", "city", "state", "cdfi_type", "total_assets",
+                    "primary_markets", "target_populations", "website"
+                ] if c in cdfis_df.columns]
+                st.dataframe(
+                    cdfis_df[show_cdfi_cols].rename(columns={
+                        "cdfi_name": "CDFI", "cdfi_type": "Type",
+                        "total_assets": "Total Assets", "primary_markets": "Markets",
+                        "target_populations": "Target Populations",
+                    }),
+                    use_container_width=True, height=400,
+                )
+                st.download_button(
+                    "Download CSV", data=df_to_csv_bytes(cdfis_df[show_cdfi_cols]),
+                    file_name="cdfi_directory.csv", mime="text/csv",
+                )
+            else:
+                st.info("No CDFIs match the current filters.")
+
+    # -----------------------------------------------------------------------
+    # State Incentive Programs
+    # -----------------------------------------------------------------------
+
+    with tool_tabs[3]:
+        st.subheader("State Incentive Programs")
+        st.caption(
+            "State-level financing programs that can stack with NMTC: historic tax credits, "
+            "state NMTCs, LIHTC, and other community development incentives."
+        )
+
+        program_states = db.get_program_states()
+        if not program_states:
+            st.info(
+                "No state program data loaded yet. Run:\n"
+                "```\npython etl/load_state_programs.py\n```"
+            )
+        else:
+            prog_state_select = st.selectbox(
+                "Select a state",
+                ["(All states)"] + program_states,
+                key="prog_state_select",
+            )
+            prog_type_filter = st.multiselect(
+                "Program type",
+                ["Historic Tax Credit", "State NMTC", "LIHTC", "Grant", "Loan", "Other"],
+                key="prog_type_filter",
+            )
+
+            programs_df = db.get_state_programs(
+                state=None if prog_state_select == "(All states)" else prog_state_select
+            )
+
+            if prog_type_filter and not programs_df.empty and "program_type" in programs_df.columns:
+                programs_df = programs_df[programs_df["program_type"].isin(prog_type_filter)]
+
+            if not programs_df.empty:
+                st.metric("Programs shown", len(programs_df))
+                show_prog_cols = [c for c in [
+                    "state", "program_name", "program_type", "eligible_uses",
+                    "max_credit_pct", "max_amount", "administering_agency", "website", "notes"
+                ] if c in programs_df.columns]
+                st.dataframe(
+                    programs_df[show_prog_cols].rename(columns={
+                        "program_name": "Program", "program_type": "Type",
+                        "eligible_uses": "Eligible Uses", "max_credit_pct": "Max Credit %",
+                        "max_amount": "Max Amount", "administering_agency": "Agency",
+                    }),
+                    use_container_width=True, height=400,
+                )
+            else:
+                st.info("No programs match current filters.")

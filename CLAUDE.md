@@ -56,9 +56,12 @@ The database (`cd_command_center.sqlite`) consolidates all data sources. Key tab
 - `cde_allocations` — CDE-level allocation data
 - `fqhc` — HRSA health center data (UDS, site-level)
 - `ece_centers` — Early care and education facility data
-- `census_tracts` — ACS demographic data, NMTC eligibility indicators (poverty rate, median income, etc.)
-- `irs_990` — 990 data for relevant nonprofit operators and funders
+- `census_tracts` — ACS demographic data, NMTC eligibility indicators, OZ flag, EJScreen indicators, 5-year change columns, gap analysis population fields
+- `irs_990` — 990 data (most recent year) for nonprofit facility operators
+- `irs_990_history` — multi-year 990 filings for trend charts (one row per EIN + tax_year)
 - `lea_accountability` — LEA/school-level accountability scores from state DOEs
+- `cdfi_directory` — certified CDFIs from the CDFI Fund
+- `state_programs` — state-level financing incentive programs (historic tax credits, state NMTCs, etc.)
 
 Every facility table has `latitude`, `longitude`, and `census_tract_id` columns for geographic joins.
 
@@ -86,7 +89,7 @@ Build in this order. Each phase should produce a working, usable version of the 
 - Data caching for performance
 - Filterable/sortable data tables with CSV export
 
-### Phase 3: FQHC/health center data
+### Phase 3: FQHC/health center data ✅
 - HRSA UDS data integration
 - Health center markers as a new map layer (toggle on/off)
 - Add to search and comparison
@@ -95,9 +98,21 @@ Build in this order. Each phase should produce a working, usable version of the 
 - State licensing data for early care and education centers
 - ECE markers as a new map layer
 
-### Phase 5: 990/philanthropy data
+### Phase 5: 990/philanthropy data ✅
 - IRS 990 data for nonprofit facility operators and funders
 - Financial health indicators for nonprofit operators
+
+### Phase 5.5: Deal analysis tools ✅
+- **Opportunity Zone overlay:** OZ flag on census_tracts, sidebar filter, badge in context panel
+- **EJScreen indicators:** EPA environmental justice scores on census_tracts, shown in detail views
+- **5-year tract change:** Historical ACS data loads poverty/income deltas on census_tracts
+- **Service gap analysis:** Find high-poverty tracts with zero facilities (ECE/FQHC/schools)
+- **NMTC peer comps:** Comparable deals by project type, state, and QLICI size
+- **Multi-site operator profiles:** All sites + 990 trend chart for orgs with EIN linked
+- **990 multi-year history:** `irs_990_history` table + `--years N` flag on fetch_990_data.py
+- **NMTC pro forma calculator:** Interactive deal structure calculator in Tools tab
+- **CDFI directory:** Certified CDFIs from CDFI Fund, filterable by state and type
+- **State incentive programs:** Historic tax credits, state NMTCs, and other programs by state
 
 ### Phase 6: Polish for external users
 - Authentication and user permissions
@@ -145,6 +160,7 @@ python etl/assign_census_tracts.py --states CA --limit 500
 # Load census tract demographics
 python etl/load_census_tracts.py --states CA TX NY
 python etl/load_census_tracts.py --all
+python etl/load_census_tracts.py --states CA --historical   # also load 5yr-ago data for trend columns
 
 # Load NMTC project + CDE data from CDFI Fund Excel
 python etl/load_nmtc_data.py --file data/raw/nmtc_public_data_2024.xlsx
@@ -163,6 +179,30 @@ python etl/load_ece_data.py --file data/raw/ca_licensed_facilities.csv --state C
 python etl/load_ece_data.py --file data/raw/tx_childcare.xlsx --state TX --source "TX HHSC"
 python etl/load_ece_data.py --file data/raw/ny_childcare.csv --state NY --all-facilities
 python etl/load_ece_data.py --file data/raw/ca_licensed_facilities.csv --columns-only  # inspect columns
+
+# Load IRS 990 data (Phase 5)
+python etl/fetch_990_data.py --schools --states CA TX    # charter schools only
+python etl/fetch_990_data.py --fqhc --states CA          # health centers only
+python etl/fetch_990_data.py --years 3                    # load 3 years of history per org
+
+# Load Opportunity Zone designations (Phase 5.5)
+# Download from: https://www.irs.gov/pub/irs-utl/Designated_QOZ_8996.xlsx
+python etl/load_opportunity_zones.py --file data/raw/opportunity_zones.csv
+python etl/load_opportunity_zones.py --file data/raw/opportunity_zones.csv --columns-only
+
+# Load EPA EJScreen environmental justice indicators (Phase 5.5)
+# Download national CSV from: https://gaftp.epa.gov/EJSCREEN/2023/
+python etl/load_ejscreen.py --file data/raw/EJSCREEN_2023_Tracts.csv --states CA TX
+python etl/load_ejscreen.py --file data/raw/EJSCREEN_2023_Tracts.csv --columns-only
+
+# Load CDFI directory from CDFI Fund (Phase 5.5)
+# Download certified CDFI list from: https://www.cdfifund.gov/research-and-resources/data-resources
+python etl/load_cdfi_directory.py --file data/raw/cdfi_certified_list.xlsx
+python etl/load_cdfi_directory.py --file data/raw/cdfi_certified_list.xlsx --columns-only
+
+# Load state incentive programs from seed file (Phase 5.5)
+python etl/load_state_programs.py                          # uses data/raw/state_programs_seed.csv
+python etl/load_state_programs.py --file data/raw/my_programs.csv  # custom file
 
 # Run tests (when they exist)
 pytest tests/
