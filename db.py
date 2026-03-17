@@ -431,6 +431,145 @@ def init_db():
         except Exception:
             pass  # column already exists
 
+    # Add extra financial columns to irs_990 and irs_990_history for ratio calculations.
+    # These map to Part X of the 990 form: balance sheet items.
+    extra_990_cols = [
+        ("total_liabilities",        "REAL"),   # Part X line 26 total liabilities
+        ("unrestricted_net_assets",  "REAL"),   # Part X line 27
+        ("cash_savings",             "REAL"),   # Part X line 1 (cash & savings) — acid ratio numerator
+        ("accounts_payable",         "REAL"),   # Part X line 17 — proxy current liabilities
+        ("accrued_expenses",         "REAL"),   # Part X line 18 — proxy current liabilities
+        ("notes_payable",            "REAL"),   # Part X lines 19-20 — component of total debt
+    ]
+    for col, col_type in extra_990_cols:
+        for tbl in ("irs_990", "irs_990_history"):
+            try:
+                cur.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {col_type}")
+            except Exception:
+                pass
+
+    # Enrollment history — NCES historical enrollment per school, one row per year
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS enrollment_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nces_id TEXT NOT NULL,
+            school_year INTEGER NOT NULL,     -- e.g. 2023 = school year 2022-23
+            enrollment INTEGER,
+            pct_free_reduced_lunch REAL,
+            pct_black REAL,
+            pct_hispanic REAL,
+            pct_white REAL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(nces_id, school_year)
+        )
+    """)
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_enroll_nces ON enrollment_history(nces_id)"
+    )
+
+    # CDFI awards — CDFI Fund Financial Assistance and other award programs by awardee
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS cdfi_awards (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            award_year INTEGER,
+            program TEXT,               -- 'FA', 'TA', 'BEA', 'NMTC', 'CMF', 'Bond Guarantee'
+            awardee_name TEXT,
+            awardee_state TEXT,
+            awardee_city TEXT,
+            award_amount REAL,
+            award_type TEXT,            -- 'Grant', 'Loan', 'Credit', 'Guarantee'
+            cdfi_type TEXT,             -- 'Loan Fund', 'Credit Union', 'Community Bank', etc.
+            purpose TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(award_year, program, awardee_name)
+        )
+    """)
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_awards_state ON cdfi_awards(awardee_state)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_awards_year  ON cdfi_awards(award_year)"
+    )
+
+    # User notes — per-entity freetext notes saved locally
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_type TEXT NOT NULL,   -- 'school', 'fqhc', 'ece', 'nmtc', 'tract'
+            entity_id TEXT NOT NULL,     -- nces_id, bhcmis_id, etc.
+            note_text TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_notes_entity ON user_notes(entity_type, entity_id)"
+    )
+
+    # User bookmarks — saved entities for quick access from the sidebar
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_bookmarks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            label TEXT,                  -- display name shown in bookmark list
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(entity_type, entity_id)
+        )
+    """)
+
+    # Documents — uploaded files (audits, financial statements) stored per EIN / entity
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ein TEXT,                    -- EIN of the organization (nullable)
+            entity_type TEXT,            -- 'school', 'fqhc', 'general'
+            entity_id TEXT,              -- nces_id, bhcmis_id, etc.
+            filename TEXT NOT NULL,
+            filepath TEXT NOT NULL,      -- path relative to project root (data/uploads/...)
+            doc_type TEXT,               -- 'Audit', 'Financial Statements', '990', 'Other'
+            fiscal_year INTEGER,         -- fiscal year the document covers
+            extracted_data TEXT,         -- JSON blob of financial line items parsed from PDF
+            verified INTEGER DEFAULT 0,  -- 1 = user confirmed extracted values are correct
+            upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_docs_ein    ON documents(ein)")
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_docs_entity ON documents(entity_type, entity_id)"
+    )
+
+    # Financial ratios — computed once per EIN per fiscal year; refreshed when new data arrives
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS financial_ratios (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ein TEXT NOT NULL,
+            fiscal_year INTEGER NOT NULL,
+            -- Acid ratio = cash / current_liabilities
+            --   990-based: cash_savings / (accounts_payable + accrued_expenses) — approximate
+            --   audit-based: precise current asset / current liability split
+            acid_ratio_990 REAL,
+            acid_ratio_audit REAL,
+            -- Leverage ratio = unrestricted_net_assets / total_debt
+            leverage_ratio REAL,
+            -- 3-year average operating cash flow (approximated from irs_990_history)
+            avg_operating_cash_flow REAL,
+            -- Raw inputs stored for transparency / manual override
+            cash_and_equivalents REAL,
+            accounts_payable REAL,
+            accrued_expenses REAL,
+            current_liabilities_audit REAL,   -- from audit PDF (more accurate)
+            unrestricted_net_assets REAL,
+            total_liabilities REAL,
+            total_debt REAL,                  -- notes payable + mortgages
+            has_audit_data INTEGER DEFAULT 0, -- 1 = audit PDF was used
+            data_source TEXT,                 -- '990', 'Audit', 'Manual'
+            calculated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(ein, fiscal_year)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ratios_ein ON financial_ratios(ein)")
+
     conn.commit()
     conn.close()
 
@@ -1980,6 +2119,464 @@ def get_service_gaps(
     conn = get_connection()
     try:
         df = pd.read_sql_query(query, conn, params=params)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Enrollment history
+# ---------------------------------------------------------------------------
+
+def upsert_enrollment_history(record: dict):
+    """Insert or update an enrollment history record (keyed on nces_id + school_year)."""
+    conn = get_connection()
+    cur = conn.cursor()
+    columns = list(record.keys())
+    values = list(record.values())
+    placeholders = ",".join("?" * len(values))
+    update_clause = ",".join(
+        f"{col}=excluded.{col}" for col in columns if col not in ("nces_id", "school_year")
+    )
+    cur.execute(
+        f"INSERT INTO enrollment_history ({','.join(columns)}) VALUES ({placeholders}) "
+        f"ON CONFLICT(nces_id, school_year) DO UPDATE SET {update_clause}",
+        values,
+    )
+    conn.commit()
+    conn.close()
+
+
+@_cached(ttl=300)
+def get_enrollment_history(nces_id: str) -> pd.DataFrame:
+    """Return enrollment history for a school, sorted by year ascending."""
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(
+            "SELECT * FROM enrollment_history WHERE nces_id = ? ORDER BY school_year ASC",
+            conn, params=[nces_id],
+        )
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+# ---------------------------------------------------------------------------
+# CDFI awards
+# ---------------------------------------------------------------------------
+
+def upsert_cdfi_award(record: dict):
+    """Insert or update a CDFI award record (keyed on award_year + program + awardee_name)."""
+    conn = get_connection()
+    cur = conn.cursor()
+    columns = list(record.keys())
+    values = list(record.values())
+    placeholders = ",".join("?" * len(values))
+    update_clause = ",".join(
+        f"{col}=excluded.{col}"
+        for col in columns
+        if col not in ("award_year", "program", "awardee_name")
+    )
+    cur.execute(
+        f"INSERT INTO cdfi_awards ({','.join(columns)}) VALUES ({placeholders}) "
+        f"ON CONFLICT(award_year, program, awardee_name) DO UPDATE SET {update_clause}",
+        values,
+    )
+    conn.commit()
+    conn.close()
+
+
+@_cached(ttl=3600)
+def get_cdfi_awards(states=None, programs=None, min_year=None) -> pd.DataFrame:
+    """Return CDFI award records, filterable by state, program type, and year."""
+    conditions = []
+    params = []
+
+    if states:
+        placeholders = ",".join("?" * len(states))
+        conditions.append(f"awardee_state IN ({placeholders})")
+        params.extend(states)
+
+    if programs:
+        placeholders = ",".join("?" * len(programs))
+        conditions.append(f"program IN ({placeholders})")
+        params.extend(programs)
+
+    if min_year is not None:
+        conditions.append("award_year >= ?")
+        params.append(min_year)
+
+    where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+    query = (
+        f"SELECT * FROM cdfi_awards {where_clause} "
+        f"ORDER BY awardee_state, award_year DESC, award_amount DESC"
+    )
+
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(query, conn, params=params)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+@_cached(ttl=3600)
+def get_cdfi_award_states() -> list:
+    """Return sorted list of states with CDFI award data."""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT DISTINCT awardee_state FROM cdfi_awards "
+            "WHERE awardee_state IS NOT NULL ORDER BY awardee_state"
+        )
+        states = [row[0] for row in cur.fetchall()]
+    except Exception:
+        states = []
+    conn.close()
+    return states
+
+
+# ---------------------------------------------------------------------------
+# User notes
+# ---------------------------------------------------------------------------
+
+def get_user_notes(entity_type: str, entity_id: str) -> list:
+    """Return all notes for a specific entity, newest first."""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT * FROM user_notes WHERE entity_type = ? AND entity_id = ? "
+            "ORDER BY updated_at DESC",
+            (entity_type, str(entity_id)),
+        )
+        notes = [dict(row) for row in cur.fetchall()]
+    except Exception:
+        notes = []
+    conn.close()
+    return notes
+
+
+def save_user_note(entity_type: str, entity_id: str, note_text: str) -> int:
+    """Insert a new note. Returns the new note id."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO user_notes (entity_type, entity_id, note_text) VALUES (?, ?, ?)",
+        (entity_type, str(entity_id), note_text),
+    )
+    note_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return note_id
+
+
+def update_user_note(note_id: int, note_text: str):
+    """Update the text of an existing note."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE user_notes SET note_text = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (note_text, note_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_user_note(note_id: int):
+    """Delete a note by its id."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM user_notes WHERE id = ?", (note_id,))
+    conn.commit()
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Bookmarks
+# ---------------------------------------------------------------------------
+
+def get_bookmarks() -> list:
+    """Return all bookmarks, newest first."""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT * FROM user_bookmarks ORDER BY created_at DESC")
+        bookmarks = [dict(row) for row in cur.fetchall()]
+    except Exception:
+        bookmarks = []
+    conn.close()
+    return bookmarks
+
+
+def save_bookmark(entity_type: str, entity_id: str, label: str):
+    """Save a bookmark. Ignores duplicates (UNIQUE on entity_type + entity_id)."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT OR IGNORE INTO user_bookmarks (entity_type, entity_id, label) VALUES (?, ?, ?)",
+        (entity_type, str(entity_id), label),
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_bookmark(entity_type: str, entity_id: str):
+    """Remove a bookmark by entity type + id."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM user_bookmarks WHERE entity_type = ? AND entity_id = ?",
+        (entity_type, str(entity_id)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def is_bookmarked(entity_type: str, entity_id: str) -> bool:
+    """Return True if the entity has been bookmarked."""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT 1 FROM user_bookmarks WHERE entity_type = ? AND entity_id = ?",
+            (entity_type, str(entity_id)),
+        )
+        found = cur.fetchone() is not None
+    except Exception:
+        found = False
+    conn.close()
+    return found
+
+
+# ---------------------------------------------------------------------------
+# Documents
+# ---------------------------------------------------------------------------
+
+def save_document(record: dict) -> int:
+    """Insert a document record. Returns the new document id."""
+    conn = get_connection()
+    cur = conn.cursor()
+    columns = list(record.keys())
+    values = list(record.values())
+    placeholders = ",".join("?" * len(values))
+    cur.execute(
+        f"INSERT INTO documents ({','.join(columns)}) VALUES ({placeholders})",
+        values,
+    )
+    doc_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return doc_id
+
+
+def get_documents(ein: str = None, entity_type: str = None, entity_id: str = None) -> pd.DataFrame:
+    """Return documents, filtered by EIN and/or entity."""
+    conditions = []
+    params = []
+
+    if ein:
+        conditions.append("ein = ?")
+        params.append(ein)
+    if entity_type:
+        conditions.append("entity_type = ?")
+        params.append(entity_type)
+    if entity_id:
+        conditions.append("entity_id = ?")
+        params.append(str(entity_id))
+
+    where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+    query = f"SELECT * FROM documents {where_clause} ORDER BY upload_date DESC"
+
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(query, conn, params=params)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+def update_document_data(doc_id: int, extracted_data: str, verified: bool = False):
+    """Store extracted financial data (JSON string) and optionally mark as verified."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE documents SET extracted_data = ?, verified = ? WHERE id = ?",
+        (extracted_data, 1 if verified else 0, doc_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_document(doc_id: int) -> str:
+    """Delete a document record and return its filepath so the caller can remove the file."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT filepath FROM documents WHERE id = ?", (doc_id,))
+    row = cur.fetchone()
+    filepath = dict(row)["filepath"] if row else None
+    cur.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+    conn.commit()
+    conn.close()
+    return filepath
+
+
+# ---------------------------------------------------------------------------
+# Financial ratios
+# ---------------------------------------------------------------------------
+
+def upsert_financial_ratios(record: dict):
+    """Insert or update financial ratio record (keyed on ein + fiscal_year)."""
+    conn = get_connection()
+    cur = conn.cursor()
+    columns = list(record.keys())
+    values = list(record.values())
+    placeholders = ",".join("?" * len(values))
+    update_clause = ",".join(
+        f"{col}=excluded.{col}" for col in columns if col not in ("ein", "fiscal_year")
+    )
+    cur.execute(
+        f"INSERT INTO financial_ratios ({','.join(columns)}) VALUES ({placeholders}) "
+        f"ON CONFLICT(ein, fiscal_year) DO UPDATE SET {update_clause}, "
+        f"calculated_at=CURRENT_TIMESTAMP",
+        values,
+    )
+    conn.commit()
+    conn.close()
+
+
+@_cached(ttl=300)
+def get_financial_ratios(ein: str) -> pd.DataFrame:
+    """Return financial ratio history for an organization, newest first."""
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(
+            "SELECT * FROM financial_ratios WHERE ein = ? ORDER BY fiscal_year DESC",
+            conn, params=[ein],
+        )
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+def get_latest_financial_ratios(ein: str) -> dict:
+    """Return only the most recent ratio row for an organization."""
+    df = get_financial_ratios(ein)
+    if df.empty:
+        return {}
+    return df.iloc[0].to_dict()
+
+
+def compute_and_store_ratios(ein: str):
+    """
+    Compute financial ratios from 990 history and store them.
+
+    For each year in irs_990_history:
+      - acid_ratio_990: cash_savings / (accounts_payable + accrued_expenses)
+        Labeled approximate because 990 doesn't isolate current liabilities.
+      - leverage_ratio: unrestricted_net_assets / total_liabilities
+      - avg_operating_cash_flow: 3-year rolling average of net_income
+        (net_income is the 990 approximation of operating cash flow)
+
+    Audit-based values (acid_ratio_audit, current_liabilities_audit) are preserved
+    if they were already set from an uploaded audit document.
+    """
+    history = get_990_history(ein)
+    if history.empty:
+        return
+
+    rows = history.sort_values("tax_year", ascending=False).to_dict("records")
+
+    for i, row in enumerate(rows):
+        fiscal_year = row.get("tax_year")
+        if not fiscal_year:
+            continue
+
+        cash       = row.get("cash_savings")
+        ap         = row.get("accounts_payable") or 0
+        accrued    = row.get("accrued_expenses") or 0
+        unrest_na  = row.get("unrestricted_net_assets")
+        total_liab = row.get("total_liabilities")
+        net_income = row.get("net_income")
+
+        acid_990 = None
+        if cash is not None and (ap + accrued) > 0:
+            acid_990 = round(cash / (ap + accrued), 3)
+
+        leverage = None
+        if unrest_na is not None and total_liab and total_liab > 0:
+            leverage = round(unrest_na / total_liab, 3)
+
+        # 3-year rolling average using up to 3 consecutive years from current row
+        cf_years = [
+            r.get("net_income")
+            for r in rows[i:i+3]
+            if r.get("net_income") is not None
+        ]
+        avg_cf = round(sum(cf_years) / len(cf_years), 0) if cf_years else None
+
+        # Preserve existing audit-based acid ratio if it was previously set
+        existing = {}
+        try:
+            existing = get_financial_ratios(ein)
+            if not existing.empty:
+                match = existing[existing["fiscal_year"] == fiscal_year]
+                existing = match.iloc[0].to_dict() if not match.empty else {}
+        except Exception:
+            pass
+        acid_audit = existing.get("acid_ratio_audit")
+        cl_audit   = existing.get("current_liabilities_audit")
+        has_audit  = existing.get("has_audit_data", 0)
+
+        record = {
+            "ein":                       ein,
+            "fiscal_year":               fiscal_year,
+            "acid_ratio_990":            acid_990,
+            "acid_ratio_audit":          acid_audit,
+            "leverage_ratio":            leverage,
+            "avg_operating_cash_flow":   avg_cf,
+            "cash_and_equivalents":      cash,
+            "accounts_payable":          ap or None,
+            "accrued_expenses":          accrued or None,
+            "current_liabilities_audit": cl_audit,
+            "unrestricted_net_assets":   unrest_na,
+            "total_liabilities":         total_liab,
+            "total_debt":                row.get("notes_payable"),
+            "has_audit_data":            has_audit,
+            "data_source":               "Audit" if has_audit else "990",
+        }
+        upsert_financial_ratios(record)
+
+
+# ---------------------------------------------------------------------------
+# Org search — by name or EIN across 990 records
+# ---------------------------------------------------------------------------
+
+@_cached(ttl=60)
+def search_org(query_text: str) -> pd.DataFrame:
+    """
+    Search irs_990 by org name or EIN.
+    Returns matching orgs with their most recent financial data.
+    """
+    if not query_text or not query_text.strip():
+        return pd.DataFrame()
+
+    like = f"%{query_text.strip()}%"
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(
+            """SELECT * FROM irs_990
+               WHERE org_name LIKE ? OR ein LIKE ?
+               ORDER BY org_name
+               LIMIT 50""",
+            conn, params=[like, like],
+        )
     except Exception:
         df = pd.DataFrame()
     conn.close()
