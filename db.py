@@ -742,6 +742,24 @@ def get_charter_schools(**kwargs) -> pd.DataFrame:
     return get_schools(**kwargs)
 
 
+def bulk_update_survival_scores(df: pd.DataFrame):
+    """
+    Update survival_score and survival_risk_tier for a batch of charter schools.
+
+    Args:
+        df: DataFrame with columns: nces_id, survival_score, survival_risk_tier
+    """
+    conn = get_connection()
+    cur  = conn.cursor()
+    rows = df[["survival_score", "survival_risk_tier", "nces_id"]].values.tolist()
+    cur.executemany(
+        "UPDATE schools SET survival_score = ?, survival_risk_tier = ? WHERE nces_id = ?",
+        rows,
+    )
+    conn.commit()
+    conn.close()
+
+
 @_cached(ttl=300)
 def get_school_by_id(school_id: int) -> dict:
     """Return a single school by its primary key id."""

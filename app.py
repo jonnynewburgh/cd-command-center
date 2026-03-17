@@ -20,6 +20,7 @@ from utils.maps import make_unified_map
 from utils.export import df_to_csv_bytes
 from utils.geo import geocode_address, filter_by_radius
 from utils.pdf_extractor import extract_from_pdf, build_ratio_updates_from_audit, to_json, from_json
+from models.charter_survival import CharterSurvivalModel
 
 # ---------------------------------------------------------------------------
 # Page config + init
@@ -34,6 +35,24 @@ st.set_page_config(
 
 db.init_db()
 
+# ---------------------------------------------------------------------------
+# Load survival model (trained pkl if present, heuristic fallback otherwise)
+# ---------------------------------------------------------------------------
+_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "models", "charter_survival.pkl")
+
+@st.cache_resource
+def _load_survival_model():
+    m = CharterSurvivalModel()
+    if os.path.exists(_MODEL_PATH):
+        try:
+            m.load(_MODEL_PATH)
+        except Exception:
+            pass  # corrupt pkl — fall back to heuristic silently
+    return m
+
+_survival_model = _load_survival_model()
+
 # Initialize session state for comparison and site detail
 if "compare_items" not in st.session_state:
     st.session_state["compare_items"] = []
@@ -47,6 +66,12 @@ if "bookmarks_refresh" not in st.session_state:
 # ---------------------------------------------------------------------------
 
 st.sidebar.title("CD Command Center")
+
+# --- Survival model status ---
+if _survival_model.pipeline is not None:
+    st.sidebar.caption("🤖 Survival model: trained")
+else:
+    st.sidebar.caption("🤖 Survival model: heuristic — run `python etl/train_survival_model.py` to train")
 
 # --- Bookmarks ---
 bookmarks = db.get_bookmarks()
@@ -271,6 +296,16 @@ if show_schools:
         # Filter traditional-only
         if school_type_filter == "Traditional public only" and "is_charter" in schools_df.columns:
             schools_df = schools_df[schools_df["is_charter"] == 0]
+
+        # Fill missing survival scores for charters using the loaded model
+        # (covers schools added after the last training run)
+        if not schools_df.empty and "is_charter" in schools_df.columns:
+            charter_mask  = schools_df["is_charter"] == 1
+            missing_mask  = schools_df["survival_score"].isna() & charter_mask
+            if missing_mask.any():
+                scored = _survival_model.predict_batch(schools_df[missing_mask])
+                schools_df.loc[missing_mask, "survival_score"]     = scored["survival_score"].values
+                schools_df.loc[missing_mask, "survival_risk_tier"] = scored["survival_risk_tier"].values
 
         # Apply FRL filter
         if frl_threshold > 0 and not schools_df.empty:
