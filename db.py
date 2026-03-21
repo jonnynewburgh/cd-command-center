@@ -1697,6 +1697,18 @@ def update_school_census_tract(nces_id: str, census_tract_id: str):
     conn.close()
 
 
+def update_fqhc_census_tract(bhcmis_id: str, census_tract_id: str):
+    """Update the census_tract_id for a single FQHC site by bhcmis_id."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE fqhc SET census_tract_id = ? WHERE bhcmis_id = ?",
+        (census_tract_id, bhcmis_id),
+    )
+    conn.commit()
+    conn.close()
+
+
 # ---------------------------------------------------------------------------
 # IRS 990 queries
 # ---------------------------------------------------------------------------

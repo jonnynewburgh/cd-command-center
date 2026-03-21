@@ -64,11 +64,16 @@ DOWNLOAD_TIMEOUT = 60
 # ---------------------------------------------------------------------------
 
 COLUMN_MAP = {
-    # Site identification
-    "bhcmisid":                               "bhcmis_id",
+    # Site identification — ONLY ONE source per target to avoid duplicate column conflicts.
+    # Priority: use BPHC Assigned Number (unique per site) for HRSA 2025+ files.
+    # Fall back to older column names for legacy files.
+    "bphc assigned number":                   "bhcmis_id",   # HRSA 2025+, site-unique
+    "bhcmisid":                               "bhcmis_id",   # older format
     "bhcmis id":                              "bhcmis_id",
     "site id":                                "bhcmis_id",
     "health center site id":                  "bhcmis_id",
+    # Note: "bhcmis organization identification number" = org-level, not unique per site; skip
+    # Note: "health center location identification number" = values like 1,1,5 — not globally unique; skip
 
     # Organization / site names
     "health center name":                     "health_center_name",
@@ -90,12 +95,17 @@ COLUMN_MAP = {
     "postal code":                            "zip_code",
     "site county":                            "county",
     "county":                                 "county",
+    # HRSA 2025+ county name columns — only map one to avoid duplicates
+    "complete county name":                   "county",
 
-    # Geography
-    "geocoded latitude":                      "latitude",
-    "latitude":                               "latitude",
-    "geocoded longitude":                     "longitude",
-    "longitude":                              "longitude",
+    # Geography — HRSA 2025+ uses ESRI convention: X=longitude, Y=latitude
+    # Map ONLY the known-present column names to avoid duplicate column conflicts.
+    "geocoding artifact address primary y coordinate": "latitude",   # HRSA 2025+
+    "geocoding artifact address primary x coordinate": "longitude",  # HRSA 2025+
+    "geocoded latitude":                      "latitude",   # older HRSA format
+    "geocoded longitude":                     "longitude",  # older HRSA format
+    "latitude":                               "latitude",   # generic CSV
+    "longitude":                              "longitude",  # generic CSV
     "census tract":                           "census_tract_id",
     "census tract number":                    "census_tract_id",
 
@@ -175,14 +185,29 @@ def map_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
     Rename columns from HRSA names to our schema names.
     Columns not in COLUMN_MAP are dropped.
+    When multiple source columns map to the same target, the first non-null value
+    wins (COLUMN_MAP order determines priority).
     """
-    rename = {col: COLUMN_MAP[col] for col in df.columns if col in COLUMN_MAP}
-    df = df.rename(columns=rename)
+    # Build per-target list of source columns in priority order
+    # (dict iteration order is insertion order in Python 3.7+)
+    target_to_sources: dict[str, list[str]] = {}
+    for src, tgt in COLUMN_MAP.items():
+        if src in df.columns:
+            target_to_sources.setdefault(tgt, []).append(src)
 
-    # Keep only columns that appear as values in the map
-    keep = list(set(COLUMN_MAP.values()))
-    present = [c for c in keep if c in df.columns]
-    return df[present]
+    # For each target, coalesce the source columns (first non-null wins)
+    result = {}
+    for tgt, sources in target_to_sources.items():
+        if len(sources) == 1:
+            result[tgt] = df[sources[0]]
+        else:
+            # Coalesce: for each row take the first non-null value
+            combined = df[sources[0]].copy()
+            for src in sources[1:]:
+                combined = combined.combine_first(df[src])
+            result[tgt] = combined
+
+    return pd.DataFrame(result, index=df.index)
 
 
 def derive_is_active(df: pd.DataFrame) -> pd.DataFrame:
@@ -328,6 +353,11 @@ def main():
     if "data_year" not in df.columns:
         import datetime
         df["data_year"] = datetime.date.today().year
+
+    # Drop helper columns that aren't in the fqhc table schema
+    for drop_col in ["county_fips_raw", "site_status_raw"]:
+        if drop_col in df.columns:
+            df = df.drop(columns=[drop_col])
 
     # Load into database
     db.init_db()

@@ -12,14 +12,16 @@ Relevant for CD finance because:
   for additional grant funding or policy support
 
 Data source:
-  EPA publishes the national EJScreen dataset annually as a CSV.
-  Download from: https://gaftp.epa.gov/EJSCREEN/
-  The most recent version (2023) is:
-    https://gaftp.epa.gov/EJSCREEN/2023/EJSCREEN_2023_Tracts_with_AS_CNMI_GU_VI.csv.zip
+  EPA publishes the national EJScreen dataset annually. As of 2026, the EPA's
+  gaftp.epa.gov FTP server is no longer accessible. Use the Zenodo archive instead:
 
-  Unzip the file, then pass it to this script with --file.
+    https://zenodo.org/records/14767363
+    → Download "2024.zip" (5.2 GB), extract the CSV named something like:
+      EJSCREEN_2024_Tracts_with_AS_CNMI_GU_VI.csv
 
-The file is large (~800MB uncompressed). Use --states to load a subset.
+  Then pass the CSV to this script with --file.
+
+The file is large (~800MB–1GB uncompressed). Use --states to load a subset.
 
 EJScreen variables this script loads (all are national percentile ranks, 0–100):
   EJ_PCTILE_D2_PM25    → pm25_percentile (particulate matter 2.5)
