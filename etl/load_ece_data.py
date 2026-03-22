@@ -16,12 +16,15 @@ AUTO-DOWNLOAD SUPPORT:
         python etl/load_ece_data.py --all-states     # auto-download all supported states
 
     States with confirmed auto-download support (see STATE_SOURCES below):
-        CA, CO, DE, FL, GA, IA, IL, KS, KY, MD, ME, MI, MN, MO, MS, NC,
-        ND, NE, NH, NJ, NM, NV, NY, OH, OK, OR, PA, RI, SC, SD, TN, TX,
-        UT, VA, VT, WA, WI, WY
+        CA, CO, CT, DC, DE, FL, GA, HI, IA, ID, IL, IN, KS, KY, LA, MA,
+        MD, ME, MI, MN, MO, MS, MT, NC, ND, NE, NH, NJ, NM, NV, NY, OH,
+        OK, OR, PA, RI, SC, SD, TN, TX, UT, VA, VT, WA, WI, WY, AZ
+
+        ID: scraped from idahochildcarecheck.org (~208 pages, may take a few minutes)
+        MT: downloaded from DPHHS Tableau dashboard CSV export
 
     States that require manual download (no public bulk download URL found):
-        AK, AL, AR, AZ, CT, DC, HI, ID, IN, LA, MA, MT, WV
+        AK, AL, AR, WV
         For these, download manually and pass --file.
 
 Column mapping:
@@ -47,6 +50,7 @@ Usage:
 """
 
 import argparse
+import re
 import sys
 import os
 import pandas as pd
@@ -385,16 +389,28 @@ STATE_SOURCES = {
         "note": "Massachusetts EEC licensed early education and care programs",
         "local": "data/raw/ece_MA.csv",
     },
+    "MT": {
+        "url": "https://tableau-ext.mt.gov/t/HHS/views/CCPD2/Dashboard2.csv",
+        "format": "tableau_csv",  # multi-line cell format; parsed by load_file_tableau_mt()
+        "source": "MT DPHHS",
+        "note": "Montana DPHHS licensed child care providers via Tableau dashboard CSV export",
+        "local": "data/raw/ece_MT.csv",
+    },
+    "ID": {
+        "url": "https://www.idahochildcarecheck.org/search",
+        "format": "idaho_scrape",  # paginated HTML; fetched by scrape_idaho_providers()
+        "source": "ID DHW",
+        "note": "Idaho DHW licensed child care providers scraped from idahochildcarecheck.org",
+        "local": "data/raw/ece_ID.csv",
+    },
 }
 
 # States where no public bulk download URL is known — require manual file
 MANUAL_DOWNLOAD_STATES = {
     "AK": "https://dhss.alaska.gov/dpa/Pages/ccare/search.aspx",
     "AL": "https://www.alabamaachieves.org/child-care/licensing/",
-    "AR": "https://dhs.arkansas.gov/dccece/child-care-licensing",
-    "ID": "https://healthandwelfare.idaho.gov/services-programs/children-family/child-care-licensing",
-    "MT": "https://dphhs.mt.gov/SLTC/childcarecentral",
-    "WV": "https://dhhr.wv.gov/bcf/services/childcare/Pages/default.aspx",
+    "AR": "https://ardhslicensing.my.site.com/elicensing/s/search-provider/find-providers?tab=CC",
+    "WV": "https://bfa.wv.gov/page/find-childcare-provider",
 }
 
 # ---------------------------------------------------------------------------
@@ -406,6 +422,7 @@ MANUAL_DOWNLOAD_STATES = {
 
 COLUMN_MAP = {
     # Facility / license identifiers
+    "license_id":               "license_id",      # Idaho scraped CSV uses this exact name
     "license number":           "license_id",
     "license id":               "license_id",
     "license no":               "license_id",
@@ -417,6 +434,7 @@ COLUMN_MAP = {
     "operation id":             "license_id",
 
     # Provider / facility names
+    "provider_name":            "provider_name",   # Idaho scraped CSV uses underscore form
     "facility name":            "provider_name",
     "provider name":            "provider_name",
     "operation name":           "provider_name",   # TX
@@ -502,6 +520,7 @@ COLUMN_MAP = {
     "state abbreviation":       "state",
 
     # ZIP
+    "zip_code":                 "zip_code",      # Idaho scraped CSV uses underscore form
     "zip":                      "zip_code",
     "zip code":                 "zip_code",
     "postal code":              "zip_code",
@@ -708,6 +727,174 @@ def load_file_json_ckan(path: str) -> pd.DataFrame:
     return pd.DataFrame(records, dtype=str)
 
 
+def load_file_tableau_mt(path: str) -> pd.DataFrame:
+    """
+    Parse Montana DPHHS Tableau CSV export into a normalized DataFrame.
+
+    The Tableau CSV uses multi-line cells for Location and Provider Info fields:
+      Location: "City:  Missoula\r\r\nCounty:  Missoula\r\r\nZip Code:  59803"
+      Provider Info: "Center\r\r\nCapacity:  45"
+      ExpiredLicense: "No" (active) or "Yes" (expired)
+
+    Returns a DataFrame with our standard column names.
+    """
+    import csv, io
+
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    reader = csv.DictReader(io.StringIO(content))
+    rows = list(reader)
+
+    records = []
+    for i, row in enumerate(rows):
+        loc = row.get("Location", "") or ""
+        pinfo = row.get("Provider Info", "") or ""
+
+        city_m = re.search(r"City:\s+(.+)", loc)
+        county_m = re.search(r"County:\s+(.+)", loc)
+        zip_m = re.search(r"Zip Code:\s+(\d+)", loc)
+        type_m = re.match(r"([^\r\n]+)", pinfo)
+        cap_m = re.search(r"Capacity:\s+(\d+)", pinfo)
+        exp_date = row.get("License Expiration Date1", "").strip()
+
+        is_expired = (row.get("ExpiredLicense", "No") or "No").strip().lower() == "yes"
+        license_status = "Expired" if is_expired else "Active"
+
+        records.append({
+            "license_id": f"MT_{i+1:06d}",   # no stable ID in the source
+            "provider_name": row.get("Provider Name", "").strip(),
+            "city": city_m.group(1).strip() if city_m else None,
+            "county": county_m.group(1).strip() if county_m else None,
+            "zip_code": zip_m.group(1).strip() if zip_m else None,
+            "state": "MT",
+            "facility_type": type_m.group(1).strip() if type_m else None,
+            "capacity": cap_m.group(1) if cap_m else None,
+            "license_status": license_status,
+            # license_expiry is not in the ece_centers schema; drop it here
+        })
+
+    return pd.DataFrame(records, dtype=str)
+
+
+# Common street type abbreviations used to split street address from city name in Idaho data
+_ID_STREET_TYPES = {
+    "rd", "ave", "st", "blvd", "dr", "ln", "ct", "cir", "way", "pl", "hwy",
+    "pkwy", "ter", "trl", "loop", "pass", "run", "xing", "pike", "point",
+    "rte", "route", "ext", "fwy", "expressway", "highway",
+}
+
+
+def scrape_idaho_providers(dest_path: str, force: bool = False) -> None:
+    """
+    Scrape all licensed child care providers from idahochildcarecheck.org.
+
+    The site has a paginated search (page=0 through ~207) with 10 providers per page.
+    Each listing shows: provider name, contact, street address, city, state, zip, phone.
+    Results are saved to dest_path as a CSV for subsequent loading.
+
+    Total: ~2080 providers across ~208 pages.
+    """
+    import requests, csv, time
+
+    if os.path.exists(dest_path) and not force:
+        print(f"  Using cached file: {dest_path}")
+        return
+
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+
+    providers = []
+    page = 0
+    max_pages = 250  # safety cap
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (compatible; CD-CommandCenter/1.0; +https://github.com)"
+    })
+
+    print("  Scraping Idaho child care check (idahochildcarecheck.org)...")
+
+    while page < max_pages:
+        url = f"https://www.idahochildcarecheck.org/search?page={page}"
+        try:
+            resp = session.get(url, timeout=30)
+            resp.raise_for_status()
+        except Exception as e:
+            print(f"  WARNING: Failed to fetch page {page}: {e}. Stopping.")
+            break
+
+        content = resp.text
+
+        # Extract each provider entry: the name link + surrounding context
+        entries = re.findall(
+            r'href="/provider/(\d+)"[^>]*>([^<]+)</a>(.*?)(?=href="/provider/|\Z)',
+            content,
+            re.DOTALL,
+        )
+
+        if not entries:
+            break  # no more pages
+
+        for pid, name, context in entries:
+            # Strip HTML tags from context to get plain text
+            text = re.sub(r"<[^>]+>", " ", context)
+            text = re.sub(r"\s+", " ", text).strip()
+
+            # Parse: "Contact: {name} {street} {city}, Idaho {zip} {phone}"
+            street, city, zip_code = "", "", ""
+            state_m = re.search(r",\s*(?:Idaho|ID)\s+(\d{5})", text)
+            if state_m:
+                zip_code = state_m.group(1)
+                addr_city_str = text[: state_m.start()].strip()
+
+                # Find first digit in addr_city_str (start of street number)
+                digit_m = re.search(r"\d", addr_city_str)
+                if digit_m:
+                    addr_city = addr_city_str[digit_m.start():]
+                    words = addr_city.split()
+                    # Split at the last street-type abbreviation
+                    split_idx = len(words)
+                    for i in range(len(words) - 1, 0, -1):
+                        if words[i].lower().rstrip(".") in _ID_STREET_TYPES:
+                            split_idx = i + 1
+                            break
+                    street = " ".join(words[:split_idx])
+                    city_words = words[split_idx:]
+                    # Strip any leading suite/apt designator and number, e.g. "suite 103 Nampa" → "Nampa"
+                    _unit_words = {"suite", "ste", "apt", "unit", "#"}
+                    while (city_words
+                           and (city_words[0].lower() in _unit_words
+                                or city_words[0].startswith("#")
+                                or (len(city_words) > 1 and city_words[0].isdigit()))):
+                        city_words = city_words[1:]
+                    city = " ".join(city_words)
+
+            providers.append({
+                "license_id": f"ID_{pid}",
+                "provider_name": re.sub(r"&amp;", "&", name).strip(),
+                "address": street,
+                "city": city,
+                "state": "ID",
+                "zip_code": zip_code,
+            })
+
+        if page % 20 == 0:
+            print(f"  Page {page}: {len(providers)} providers collected so far...")
+
+        page += 1
+        time.sleep(0.3)  # be polite to the server
+
+    print(f"  Scraping complete: {len(providers)} providers found across {page} pages.")
+
+    # Save to CSV
+    fieldnames = ["license_id", "provider_name", "address", "city", "state", "zip_code"]
+    with open(dest_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(providers)
+
+    print(f"  Saved to {dest_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Load ECE (early care and education) facility data from state sources"
@@ -779,6 +966,94 @@ def main():
 
     active_only = not args.all_facilities
 
+    def _fetch_state(state_code: str, info: dict, force: bool) -> bool:
+        """
+        Fetch/scrape state data into the local file. Returns True on success.
+        Handles regular download, Idaho scraping, and Tableau CSV formats.
+        """
+        local_path = info["local"]
+        fmt = info.get("format", "csv")
+
+        if fmt == "idaho_scrape":
+            try:
+                scrape_idaho_providers(local_path, force=force)
+                return True
+            except Exception as e:
+                print(f"\n  WARNING: Idaho scraping failed: {e}")
+                return False
+
+        # All other formats: use download_file
+        try:
+            download_file(
+                url=info["url"],
+                dest_path=local_path,
+                description=f"ECE data — {state_code}",
+                force=force,
+            )
+            return True
+        except RuntimeError as e:
+            print(f"\n  WARNING: Could not download {state_code} ECE data: {e}")
+            return False
+
+    def _load_state_from_file(state_code: str, info: dict, active_only: bool,
+                              year: int, columns_only: bool) -> tuple[int, int]:
+        """
+        Load a state's local file into the DB. Dispatches to the right loader
+        based on format (regular CSV, CKAN JSON, Tableau CSV, Idaho scrape CSV).
+        """
+        import datetime
+        local_path = info["local"]
+        source_label = info.get("source", state_code)
+        fmt = info.get("format", "csv")
+
+        print(f"\n--- {state_code} ---")
+        print(f"  File: {local_path}")
+
+        if fmt == "tableau_csv":
+            # Montana: custom multi-line Tableau CSV parser → pre-normalized DataFrame
+            df = load_file_tableau_mt(local_path)
+            df["data_source"] = source_label
+            df["data_year"] = year or datetime.date.today().year
+            print(f"  Raw rows: {len(df):,}")
+
+            if columns_only:
+                print("Columns:", list(df.columns))
+                return 0, 0
+
+            loaded = 0
+            errors = 0
+            for _, row in df.iterrows():
+                record = clean_record(row.to_dict())
+                if not record.get("provider_name"):
+                    errors += 1
+                    continue
+                # Only load active providers if active_only
+                if active_only and record.get("license_status") == "Expired":
+                    continue
+                try:
+                    db.upsert_ece(record)
+                    loaded += 1
+                except Exception as e:
+                    print(f"    DB error: {e}")
+                    errors += 1
+            print(f"  Done: {loaded:,} loaded, {errors} errors")
+            return loaded, errors
+
+        # Regular path: CSV (including Idaho's scraped CSV and CKAN JSON)
+        if fmt == "json":
+            raw_df = load_file_json_ckan(local_path)
+        else:
+            raw_df = load_file(local_path)
+
+        return _load_one_state(
+            state=state_code,
+            filepath=local_path,
+            source=source_label,
+            active_only=active_only,
+            year=year,
+            columns_only=columns_only,
+        )
+
     # --- Mode 1: --all-states — download and load every state with a known URL ---
     if args.all_states:
         db.init_db()
@@ -789,32 +1064,16 @@ def main():
 
         for state_code in sorted(STATE_SOURCES.keys()):
             info = STATE_SOURCES[state_code]
-            local_path = info["local"]
-            source_label = info.get("source", state_code)
 
-            try:
-                download_file(
-                    url=info["url"],
-                    dest_path=local_path,
-                    description=f"ECE data — {state_code}",
-                    force=args.force_download,
-                )
-            except RuntimeError as e:
-                print(f"\n  WARNING: Could not download {state_code} ECE data: {e}")
-                print(f"  Skipping {state_code}. Manual download: {info.get('url')}")
+            ok = _fetch_state(state_code, info, args.force_download)
+            if not ok:
+                print(f"  Skipping {state_code}.")
                 failed_states.append(state_code)
                 continue
 
-            # Handle CA CKAN JSON separately
-            if info.get("format") == "json":
-                raw_df = load_file_json_ckan(local_path)
-            else:
-                raw_df = load_file(local_path)
-
-            loaded, errors = _load_one_state(
-                state=state_code,
-                filepath=local_path,
-                source=source_label,
+            loaded, errors = _load_state_from_file(
+                state_code=state_code,
+                info=info,
                 active_only=active_only,
                 year=args.year,
                 columns_only=False,
@@ -849,28 +1108,20 @@ def main():
             sys.exit(1)
 
         info = STATE_SOURCES[state_upper]
-        local_path = info["local"]
         source_label = args.source or info.get("source", state_upper)
 
-        try:
-            download_file(
-                url=info["url"],
-                dest_path=local_path,
-                description=f"ECE data — {state_upper}",
-                force=args.force_download,
-            )
-        except RuntimeError as e:
-            print(f"\nError: Could not auto-download ECE data for {state_upper}.\n{e}")
+        ok = _fetch_state(state_upper, info, args.force_download)
+        if not ok:
+            local_path = info["local"]
             print(f"\nManual download: {info.get('url')}")
             print(f"Save to: {local_path}")
             print(f"Then re-run: python etl/load_ece_data.py --state {state_upper} --file {local_path}")
             sys.exit(1)
 
         db.init_db()
-        _load_one_state(
-            state=state_upper,
-            filepath=local_path,
-            source=source_label,
+        _load_state_from_file(
+            state_code=state_upper,
+            info=info,
             active_only=active_only,
             year=args.year,
             columns_only=args.columns_only,
