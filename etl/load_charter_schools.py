@@ -136,6 +136,14 @@ def load_to_db(df: pd.DataFrame):
 
 
 def main():
+    # DEPRECATED: This script required a manually downloaded CSV file.
+    # Use fetch_nces_schools.py instead, which auto-downloads from the Urban Institute API.
+    # Example: python etl/fetch_nces_schools.py --states CA TX NY
+    print("DEPRECATED: load_charter_schools.py is superseded by fetch_nces_schools.py")
+    print("  fetch_nces_schools.py auto-downloads all public schools (charter + traditional)")
+    print("  Run: python etl/fetch_nces_schools.py --states <STATE> [--charter-only]")
+    sys.exit(0)
+
     parser = argparse.ArgumentParser(description="Load charter school CSV into SQLite")
     parser.add_argument("--file", required=True, help="Path to charter schools CSV file")
     parser.add_argument("--year", type=int, help="Override data_year for all rows")

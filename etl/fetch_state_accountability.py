@@ -61,6 +61,13 @@ from utils.downloader import download_file
 # NOTE: These URLs are year-dependent and may shift by a year in the path vs. the
 # school year being described. If auto-download fails, check the state DOE site for
 # the current year's link and update url_template here.
+#
+# COVERAGE: This dict covers 18 states with state-native accountability data.
+# The remaining 32 states are covered by federal EDFacts data via fetch_edfacts.py,
+# which provides math/ELA proficiency and graduation rates for all 50 states.
+# Run both scripts for the most complete LEA accountability coverage:
+#   python etl/fetch_edfacts.py --year 2023           # all 50 states (federal)
+#   python etl/fetch_state_accountability.py --all-states --year 2023  # 18 states (native)
 # ---------------------------------------------------------------------------
 
 STATE_DOWNLOAD_INFO = {

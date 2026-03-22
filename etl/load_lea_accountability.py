@@ -32,6 +32,16 @@ NUMERIC_COLS = [
 
 
 def main():
+    # DEPRECATED: This script required a manually downloaded CSV file.
+    # Use fetch_edfacts.py instead, which auto-downloads federal EDFacts data for all 50 states.
+    # For state-specific accountability data, use fetch_state_accountability.py.
+    # Example: python etl/fetch_edfacts.py --year 2023
+    print("DEPRECATED: load_lea_accountability.py is superseded by fetch_edfacts.py")
+    print("  fetch_edfacts.py auto-downloads federal LEA accountability data (all 50 states)")
+    print("  Run: python etl/fetch_edfacts.py --year 2023")
+    print("  For state-specific data: python etl/fetch_state_accountability.py --state TX --year 2023")
+    sys.exit(0)
+
     parser = argparse.ArgumentParser(description="Load LEA accountability CSV into SQLite")
     parser.add_argument("--file", required=True, help="Path to LEA accountability CSV")
     parser.add_argument("--year", type=int, help="Override data_year for all rows")
