@@ -9,39 +9,39 @@ Three files are used:
   2. Reading/ELA proficiency by LEA
   3. Cohort graduation rate by LEA
 
+AUTO-DOWNLOAD:
+  Run without file arguments to auto-download from the US Dept of Education:
+
+    python etl/fetch_edfacts.py --year 2023         # auto-download all three files
+    python etl/fetch_edfacts.py --year 2023 --states CA TX NY  # auto-download, filter states
+
+  EDFacts covers all 50 states — this is the best single-source approach for
+  full national coverage of math/reading proficiency and graduation rates.
+
+  EDFacts file URL pattern (school year ending in {year}):
+    Math:  https://www2.ed.gov/about/inits/ed/edfacts/data-files/math-achievement-lea-sy{YY1}{YY2}.csv
+    RLA:   https://www2.ed.gov/about/inits/ed/edfacts/data-files/rla-achievement-lea-sy{YY1}{YY2}.csv
+    Grad:  https://www2.ed.gov/about/inits/ed/edfacts/data-files/acgr-lea-sy{YY1}{YY2}.csv
+    (e.g. 2022-23 school year → sy2223)
+
+  Note: The US DOE sometimes packages these as zip files. This script handles both.
+
 The key parsing challenge: EDFacts uses range codes instead of exact percentages.
   e.g., "GE50LE75" means "at least 50% and at most 75%"
   We convert these to the midpoint: (50 + 75) / 2 = 62.5
 
-The lea_id used is the NCES LEA ID (7-digit), which directly matches
-the lea_id column in our schools table and lea_accountability table.
-
-Because EDFacts file URLs and column names change each year, this script
-accepts local file paths. See instructions below for where to download.
-
 Usage:
-    # Provide all three files
+    # Auto-download all three files:
+    python etl/fetch_edfacts.py --year 2023
+
+    # Use local files:
     python etl/fetch_edfacts.py --year 2023 \\
         --math-file data/raw/edfacts_math_2023.csv \\
         --rla-file  data/raw/edfacts_rla_2023.csv \\
         --grad-file data/raw/edfacts_grad_2023.csv
 
-    # Only math and reading (graduation optional)
-    python etl/fetch_edfacts.py --year 2023 \\
-        --math-file data/raw/edfacts_math_2023.csv \\
-        --rla-file  data/raw/edfacts_rla_2023.csv
-
-    # Filter to specific states
-    python etl/fetch_edfacts.py --year 2023 --states CA TX NY \\
-        --math-file data/raw/edfacts_math_2023.csv
-
-Where to download:
-    Go to: https://www2.ed.gov/about/inits/ed/edfacts/data-files/index.html
-    Look for:
-      - "Math achievement, LEA level" → math proficiency CSV
-      - "Reading/language arts achievement, LEA level" → RLA proficiency CSV
-      - "Adjusted cohort graduation rate, LEA level" → graduation rate CSV
-    Download the most recent school year. Save to data/raw/.
+    # Filter to specific states:
+    python etl/fetch_edfacts.py --year 2023 --states CA TX NY
 """
 
 import argparse
@@ -54,6 +54,73 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import db
+from utils.downloader import download_file, download_and_extract_zip
+
+
+def _edfacts_urls(year: int) -> dict:
+    """
+    Build EDFacts file download URLs for a given school year ending.
+    year=2023 means the 2022-23 school year (sy2223).
+    """
+    yy1 = str(year - 1)[-2:]   # e.g. 2023 → "22"
+    yy2 = str(year)[-2:]        # e.g. 2023 → "23"
+    sy = f"sy{yy1}{yy2}"        # e.g. "sy2223"
+    base = "https://www2.ed.gov/about/inits/ed/edfacts/data-files"
+    return {
+        "math": f"{base}/math-achievement-lea-{sy}.csv",
+        "rla":  f"{base}/rla-achievement-lea-{sy}.csv",
+        "grad": f"{base}/acgr-lea-{sy}.csv",
+        # Some years are published as zip files
+        "math_zip": f"{base}/math-achievement-lea-{sy}.zip",
+        "rla_zip":  f"{base}/rla-achievement-lea-{sy}.zip",
+        "grad_zip": f"{base}/acgr-lea-{sy}.zip",
+    }
+
+
+def _local_edfacts_paths(year: int) -> dict:
+    return {
+        "math": f"data/raw/edfacts_math_{year}.csv",
+        "rla":  f"data/raw/edfacts_rla_{year}.csv",
+        "grad": f"data/raw/edfacts_grad_{year}.csv",
+    }
+
+
+def _download_edfacts_file(year: int, file_type: str, force: bool = False) -> str | None:
+    """
+    Download one EDFacts file (math, rla, or grad). Tries the CSV URL first,
+    then the zip URL. Returns local path on success, or None on failure.
+    """
+    urls = _edfacts_urls(year)
+    locals_ = _local_edfacts_paths(year)
+    local = locals_[file_type]
+    labels = {"math": "Math proficiency", "rla": "Reading/ELA proficiency", "grad": "Graduation rate"}
+    label = labels.get(file_type, file_type)
+
+    # Try CSV URL first
+    try:
+        return download_file(
+            url=urls[file_type],
+            dest_path=local,
+            description=f"EDFacts {label} (LEA, {year})",
+            force=force,
+        )
+    except RuntimeError:
+        pass
+
+    # Fall back to zip URL
+    try:
+        zip_local = local.replace(".csv", ".zip")
+        return download_and_extract_zip(
+            url=urls[f"{file_type}_zip"],
+            zip_dest=zip_local,
+            extract_pattern="*.csv",
+            extract_dest=local,
+            description=f"EDFacts {label} zip (LEA, {year})",
+            force=force,
+        )
+    except RuntimeError as e:
+        print(f"  Could not download EDFacts {label} for {year}: {e}")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -378,53 +445,86 @@ def main():
     )
     parser.add_argument(
         "--math-file",
-        help="Path to local EDFacts math proficiency CSV (required if not using --rla-file alone)",
+        help="Path to local EDFacts math proficiency CSV. If omitted, auto-downloads.",
     )
     parser.add_argument(
         "--rla-file",
-        help="Path to local EDFacts reading/language arts proficiency CSV",
+        help="Path to local EDFacts reading/language arts proficiency CSV. If omitted, auto-downloads.",
     )
     parser.add_argument(
         "--grad-file",
-        help="Path to local EDFacts graduation rate CSV",
+        help="Path to local EDFacts graduation rate CSV. If omitted, auto-downloads.",
+    )
+    parser.add_argument(
+        "--force-download",
+        action="store_true",
+        help="Re-download files even if recent local copies exist.",
     )
     args = parser.parse_args()
 
-    if not args.math_file and not args.rla_file and not args.grad_file:
-        print("Error: provide at least one of --math-file, --rla-file, or --grad-file.")
-        print()
-        print("Download EDFacts data files from:")
-        print("  https://www2.ed.gov/about/inits/ed/edfacts/data-files/index.html")
-        print()
-        print("Look for:")
-        print("  'Math achievement, LEA level'              → use as --math-file")
-        print("  'Reading/language arts achievement, LEA'  → use as --rla-file")
-        print("  'Adjusted cohort graduation rate, LEA'    → use as --grad-file")
+    db.init_db()
+
+    locals_ = _local_edfacts_paths(args.year)
+
+    # Resolve math file — auto-download if not provided
+    math_file = args.math_file
+    if not math_file:
+        print("Auto-downloading EDFacts math proficiency file...")
+        math_file = _download_edfacts_file(args.year, "math", force=args.force_download)
+        if not math_file:
+            math_file = locals_["math"] if os.path.exists(locals_["math"]) else None
+    elif not os.path.exists(math_file):
+        print(f"Error: math file not found: {math_file}")
         sys.exit(1)
 
-    db.init_db()
+    # Resolve RLA file
+    rla_file = args.rla_file
+    if not rla_file:
+        print("Auto-downloading EDFacts reading/ELA proficiency file...")
+        rla_file = _download_edfacts_file(args.year, "rla", force=args.force_download)
+        if not rla_file:
+            rla_file = locals_["rla"] if os.path.exists(locals_["rla"]) else None
+    elif not os.path.exists(rla_file):
+        print(f"Error: RLA file not found: {rla_file}")
+        sys.exit(1)
+
+    # Resolve grad file
+    grad_file = args.grad_file
+    if not grad_file:
+        print("Auto-downloading EDFacts graduation rate file...")
+        grad_file = _download_edfacts_file(args.year, "grad", force=args.force_download)
+        if not grad_file:
+            grad_file = locals_["grad"] if os.path.exists(locals_["grad"]) else None
+    elif not os.path.exists(grad_file):
+        print(f"Error: graduation file not found: {grad_file}")
+        sys.exit(1)
+
+    if not math_file and not rla_file and not grad_file:
+        print("Error: could not download or find any EDFacts files.")
+        print()
+        print("Download manually from:")
+        print("  https://www2.ed.gov/about/inits/ed/edfacts/data-files/index.html")
+        print()
+        yy1 = str(args.year - 1)[-2:]
+        yy2 = str(args.year)[-2:]
+        sy = f"sy{yy1}{yy2}"
+        print(f"  Math: math-achievement-lea-{sy}.csv")
+        print(f"  RLA:  rla-achievement-lea-{sy}.csv")
+        print(f"  Grad: acgr-lea-{sy}.csv")
+        sys.exit(1)
 
     math_df = pd.DataFrame()
     rla_df = pd.DataFrame()
     grad_df = pd.DataFrame()
 
-    if args.math_file:
-        if not os.path.exists(args.math_file):
-            print(f"Error: math file not found: {args.math_file}")
-            sys.exit(1)
-        math_df = load_math_file(args.math_file, args.year, states=args.states)
+    if math_file:
+        math_df = load_math_file(math_file, args.year, states=args.states)
 
-    if args.rla_file:
-        if not os.path.exists(args.rla_file):
-            print(f"Error: RLA file not found: {args.rla_file}")
-            sys.exit(1)
-        rla_df = load_rla_file(args.rla_file, args.year, states=args.states)
+    if rla_file:
+        rla_df = load_rla_file(rla_file, args.year, states=args.states)
 
-    if args.grad_file:
-        if not os.path.exists(args.grad_file):
-            print(f"Error: graduation file not found: {args.grad_file}")
-            sys.exit(1)
-        grad_df = load_grad_file(args.grad_file, args.year, states=args.states)
+    if grad_file:
+        grad_df = load_grad_file(grad_file, args.year, states=args.states)
 
     merge_and_load(math_df, rla_df, grad_df, args.year)
 

@@ -9,8 +9,8 @@ DATA SOURCE:
   The CDFI Fund publishes award data through the CDFI Fund Awards Database:
   https://www.cdfifund.gov/research-and-resources/data-resources
 
-  Download the "Awards" dataset as an Excel or CSV file. The file typically has
-  one row per award, with columns for awardee name, state, program, year, amount.
+  Auto-downloaded when --file is not provided. The file has one row per award,
+  with columns for awardee name, state, program, year, amount.
 
   Programs covered:
   - FA  = Financial Assistance (grants and loans to CDFIs for capitalization)
@@ -21,7 +21,8 @@ DATA SOURCE:
   - Bond = CDFI Bond Guarantee Program
 
 Usage:
-    python etl/fetch_cdfi_awards.py --file data/raw/cdfi_awards.xlsx
+    python etl/fetch_cdfi_awards.py                                        # auto-download
+    python etl/fetch_cdfi_awards.py --file data/raw/cdfi_awards.xlsx       # use local file
     python etl/fetch_cdfi_awards.py --file data/raw/cdfi_awards.csv --states CA TX
     python etl/fetch_cdfi_awards.py --file data/raw/cdfi_awards.xlsx --columns-only
     python etl/fetch_cdfi_awards.py --file data/raw/cdfi_awards.xlsx --sheet "FA Awards"
@@ -35,6 +36,16 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import db
+from utils.downloader import download_file
+
+# Direct download URL for the CDFI Fund awards data.
+# If this URL changes, find the updated link at:
+#   https://www.cdfifund.gov/research-and-resources/data-resources
+# Look for "Awards Data" or "CDFI Fund Awards" and copy the Excel download link.
+CDFI_AWARDS_DOWNLOAD_URL = (
+    "https://www.cdfifund.gov/Documents/Awards/CDFIFund_Awards.xlsx"
+)
+CDFI_AWARDS_DEFAULT_LOCAL = "data/raw/cdfi_awards.xlsx"
 
 
 # ---------------------------------------------------------------------------
@@ -184,29 +195,55 @@ def main():
     parser = argparse.ArgumentParser(
         description="Load CDFI Fund award data into the CD Command Center database"
     )
-    parser.add_argument("--file",         required=True, help="Path to CDFI awards Excel or CSV file")
+    parser.add_argument("--file",         default=None,
+                        help=(
+                            "Path to CDFI awards Excel or CSV file. "
+                            f"If omitted, auto-downloads to {CDFI_AWARDS_DEFAULT_LOCAL}."
+                        ))
     parser.add_argument("--sheet",        help="Sheet name (Excel only; default = first sheet)")
     parser.add_argument("--states",       nargs="+", metavar="ST",
                         help="Only load awards for these states (e.g. CA TX NY)")
     parser.add_argument("--columns-only", action="store_true",
                         help="Print column names from file and exit — use to inspect before loading")
     parser.add_argument("--verbose",      action="store_true", help="Print progress")
+    parser.add_argument("--force-download", action="store_true",
+                        help="Re-download even if a recent local copy already exists.")
     args = parser.parse_args()
 
-    if not os.path.exists(args.file):
+    # Resolve local file path — auto-download if --file not provided
+    local_file = args.file or CDFI_AWARDS_DEFAULT_LOCAL
+
+    if args.file and not os.path.exists(args.file):
         print(f"ERROR: File not found: {args.file}")
         sys.exit(1)
+
+    if not args.file:
+        try:
+            local_file = download_file(
+                url=CDFI_AWARDS_DOWNLOAD_URL,
+                dest_path=CDFI_AWARDS_DEFAULT_LOCAL,
+                description="CDFI Fund awards data",
+                force=args.force_download,
+            )
+        except RuntimeError as e:
+            print(f"\nError: Could not auto-download CDFI awards data.\n{e}")
+            print("\nManual download instructions:")
+            print("  1. Go to: https://www.cdfifund.gov/research-and-resources/data-resources")
+            print("  2. Download the CDFI Fund Awards dataset (Excel or CSV)")
+            print(f"  3. Save to: {CDFI_AWARDS_DEFAULT_LOCAL}")
+            print(f"  4. Re-run: python etl/fetch_cdfi_awards.py --file {CDFI_AWARDS_DEFAULT_LOCAL}")
+            sys.exit(1)
 
     db.init_db()
 
     print("CD Command Center — CDFI Awards Loader")
-    print(f"  File: {args.file}")
+    print(f"  File: {local_file}")
     if args.states:
         print(f"  States: {args.states}")
     print()
 
     load_awards(
-        filepath=args.file,
+        filepath=local_file,
         sheet=args.sheet,
         states=args.states,
         columns_only=args.columns_only,

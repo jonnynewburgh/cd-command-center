@@ -13,15 +13,13 @@ Relevant for CD finance because:
 
 Data source:
   EPA publishes the national EJScreen dataset annually. As of 2026, the EPA's
-  gaftp.epa.gov FTP server is no longer accessible. Use the Zenodo archive instead:
+  gaftp.epa.gov FTP server is no longer accessible. The Zenodo archive is used:
 
     https://zenodo.org/records/14767363
-    → Download "2024.zip" (5.2 GB), extract the CSV named something like:
-      EJSCREEN_2024_Tracts_with_AS_CNMI_GU_VI.csv
+    → Auto-downloads the 2024 zip (~5.2 GB) and extracts the tract-level CSV.
 
-  Then pass the CSV to this script with --file.
-
-The file is large (~800MB–1GB uncompressed). Use --states to load a subset.
+  The file is large (~800MB–1GB uncompressed). Use --states to load a subset.
+  Use --file to pass a pre-downloaded CSV and skip the download entirely.
 
 EJScreen variables this script loads (all are national percentile ranks, 0–100):
   EJ_PCTILE_D2_PM25    → pm25_percentile (particulate matter 2.5)
@@ -37,9 +35,10 @@ Column names vary slightly between EJScreen versions. This script tries
 several known column naming patterns.
 
 Usage:
-    python etl/load_ejscreen.py --file data/raw/EJSCREEN_2023_Tracts.csv
-    python etl/load_ejscreen.py --file data/raw/EJSCREEN_2023_Tracts.csv --states CA TX NY
-    python etl/load_ejscreen.py --file data/raw/EJSCREEN_2023_Tracts.csv --columns-only
+    python etl/load_ejscreen.py                                                     # auto-download
+    python etl/load_ejscreen.py --states CA TX NY                                   # auto-download, filter states
+    python etl/load_ejscreen.py --file data/raw/EJSCREEN_2024_Tracts.csv            # use local CSV
+    python etl/load_ejscreen.py --file data/raw/EJSCREEN_2024_Tracts.csv --columns-only
 """
 
 import argparse
@@ -51,6 +50,15 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import db
+from utils.downloader import download_and_extract_zip
+
+# Zenodo archive for EJScreen 2024 tract-level data.
+# The zip contains a large CSV with all tracts nationally.
+# If this URL changes, find the new one at: https://zenodo.org/records/14767363
+EJSCREEN_ZIP_URL = "https://zenodo.org/records/14767363/files/2024.zip"
+EJSCREEN_ZIP_LOCAL = "data/raw/ejscreen_2024.zip"
+EJSCREEN_CSV_LOCAL = "data/raw/EJSCREEN_2024_Tracts.csv"
+EJSCREEN_CSV_PATTERN = "EJSCREEN_2024_Tracts*.csv"
 
 # Column name candidates for each indicator.
 # EJScreen has changed column names across releases; we try all known names.
@@ -93,8 +101,12 @@ def main():
     )
     parser.add_argument(
         "--file",
-        required=True,
-        help="Path to the EJScreen CSV (download from EPA EJSCREEN portal).",
+        default=None,
+        help=(
+            "Path to a pre-downloaded EJScreen tract CSV. "
+            f"If omitted, auto-downloads the 2024 zip from Zenodo to {EJSCREEN_CSV_LOCAL}. "
+            "WARNING: The zip is ~5 GB. Use --states to limit what gets loaded into the DB."
+        ),
     )
     parser.add_argument(
         "--states",
@@ -108,18 +120,50 @@ def main():
         action="store_true",
         help="Print column names from the file and exit (useful for debugging).",
     )
+    parser.add_argument(
+        "--force-download",
+        action="store_true",
+        help="Re-download even if a recent local copy already exists.",
+    )
     args = parser.parse_args()
 
-    if not os.path.exists(args.file):
+    # Resolve local CSV path — auto-download if --file not provided
+    local_csv = args.file or EJSCREEN_CSV_LOCAL
+
+    if args.file and not os.path.exists(args.file):
         print(f"Error: file not found: {args.file}")
         sys.exit(1)
 
+    if not args.file:
+        print("CD Command Center — EJScreen Auto-Download")
+        print("  Note: The EJScreen zip is ~5 GB. This may take a while on slow connections.")
+        if args.states:
+            print(f"  States to load after download: {args.states}")
+        try:
+            local_csv = download_and_extract_zip(
+                url=EJSCREEN_ZIP_URL,
+                zip_dest=EJSCREEN_ZIP_LOCAL,
+                extract_pattern=EJSCREEN_CSV_PATTERN,
+                extract_dest=EJSCREEN_CSV_LOCAL,
+                description="EPA EJScreen 2024 (national tract data)",
+                force=args.force_download,
+            )
+        except RuntimeError as e:
+            print(f"\nError: Could not auto-download EJScreen data.\n{e}")
+            print("\nManual download instructions:")
+            print("  1. Go to: https://zenodo.org/records/14767363")
+            print("  2. Download '2024.zip'")
+            print("  3. Extract the CSV named EJSCREEN_2024_Tracts_*.csv")
+            print(f"  4. Save it to: {EJSCREEN_CSV_LOCAL}")
+            print(f"  5. Re-run: python etl/load_ejscreen.py --file {EJSCREEN_CSV_LOCAL}")
+            sys.exit(1)
+
     print(f"CD Command Center — EJScreen Load")
-    print(f"  File: {args.file}")
+    print(f"  File: {local_csv}")
     print(f"  Reading file (may take a moment for the full national file)...")
 
     # Read with low_memory=False to avoid dtype inference issues on large file
-    df = pd.read_csv(args.file, dtype=str, low_memory=False)
+    df = pd.read_csv(local_csv, dtype=str, low_memory=False)
     print(f"  Rows: {len(df):,}  |  Columns: {len(df.columns)}")
 
     if args.columns_only:

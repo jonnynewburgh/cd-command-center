@@ -164,6 +164,35 @@ These features apply across all data sources once built:
 # Run the app locally
 streamlit run app.py
 
+# ─────────────────────────────────────────────────────────────────────
+# ZERO-TOUCH FULL ETL: Run everything with no manual downloads required
+# ─────────────────────────────────────────────────────────────────────
+
+# Full national build (all states, all sources — may take hours + requires ~10 GB disk for EJScreen):
+python etl/run_all.py
+
+# Specific states only (much faster for development):
+python etl/run_all.py --states CA TX NY IL
+
+# Skip the large EJScreen download (~5 GB):
+python etl/run_all.py --states CA TX --skip ejscreen
+
+# See what would run without executing:
+python etl/run_all.py --dry-run
+
+# Re-run only failed steps:
+python etl/run_all.py --only schools census
+
+# Re-download all cached files:
+python etl/run_all.py --force-download
+
+# List all available step names:
+python etl/run_all.py --list-steps
+
+# ─────────────────────────────────────────────────────────────────────
+# Individual script commands (if you need to run one step at a time):
+# ─────────────────────────────────────────────────────────────────────
+
 # Fetch school data (all public schools, all states)
 python etl/fetch_nces_schools.py
 python etl/fetch_nces_schools.py --states CA TX NY    # specific states
@@ -179,10 +208,10 @@ python etl/load_census_tracts.py --states CA TX NY
 python etl/load_census_tracts.py --all
 python etl/load_census_tracts.py --states CA --historical   # also load 5yr-ago data for trend columns
 
-# Load NMTC project + CDE data from CDFI Fund Excel
-python etl/load_nmtc_data.py --file data/raw/nmtc_public_data_2024.xlsx
-python etl/load_nmtc_data.py --file data/raw/nmtc_public_data_2024.xlsx --sheet-names
-python etl/load_nmtc_data.py --file data/raw/nmtc_public_data_2024.xlsx --project-sheet "QLICI" --cde-sheet "CDE"
+# Load NMTC project + CDE data from CDFI Fund (now auto-downloads)
+python etl/load_nmtc_data.py                               # auto-download from CDFI Fund
+python etl/load_nmtc_data.py --file data/raw/nmtc_public_data.xlsx  # use local file
+python etl/load_nmtc_data.py --file data/raw/nmtc_public_data.xlsx --sheet-names
 
 # Load FQHC / health center data from HRSA (auto-downloads latest file)
 python etl/fetch_fqhc.py
@@ -190,32 +219,31 @@ python etl/fetch_fqhc.py --states CA TX NY    # specific states only
 python etl/fetch_fqhc.py --all-sites          # include inactive sites
 python etl/fetch_fqhc.py --file data/raw/hrsa_health_centers.csv  # use local file
 
-# Load ECE / child care data from a state licensing CSV or Excel file
-# (Download source varies by state — see docstring at top of the script)
-python etl/load_ece_data.py --file data/raw/ca_licensed_facilities.csv --state CA
-python etl/load_ece_data.py --file data/raw/tx_childcare.xlsx --state TX --source "TX HHSC"
-python etl/load_ece_data.py --file data/raw/ny_childcare.csv --state NY --all-facilities
-python etl/load_ece_data.py --file data/raw/ca_licensed_facilities.csv --columns-only  # inspect columns
+# Load ECE / child care data (now auto-downloads from state open data portals)
+python etl/load_ece_data.py --all-states                        # auto-download all supported states
+python etl/load_ece_data.py --state CA                          # auto-download California only
+python etl/load_ece_data.py --state TX                          # auto-download Texas only
+python etl/load_ece_data.py --file data/raw/ca.csv --state CA   # use local file
+python etl/load_ece_data.py --file data/raw/tx.xlsx --columns-only  # inspect columns
 
 # Load IRS 990 data (Phase 5)
 python etl/fetch_990_data.py --schools --states CA TX    # charter schools only
 python etl/fetch_990_data.py --fqhc --states CA          # health centers only
 python etl/fetch_990_data.py --years 3                    # load 3 years of history per org
 
-# Load Opportunity Zone designations (Phase 5.5)
-# Download from: https://www.irs.gov/pub/irs-utl/Designated_QOZ_8996.xlsx
-python etl/load_opportunity_zones.py --file data/raw/opportunity_zones.csv
-python etl/load_opportunity_zones.py --file data/raw/opportunity_zones.csv --columns-only
+# Load Opportunity Zone designations (now auto-downloads from IRS)
+python etl/load_opportunity_zones.py                            # auto-download from IRS
+python etl/load_opportunity_zones.py --file data/raw/oz.xlsx   # use local file
 
-# Load EPA EJScreen environmental justice indicators (Phase 5.5)
-# Download national CSV from: https://gaftp.epa.gov/EJSCREEN/2023/
-python etl/load_ejscreen.py --file data/raw/EJSCREEN_2023_Tracts.csv --states CA TX
-python etl/load_ejscreen.py --file data/raw/EJSCREEN_2023_Tracts.csv --columns-only
+# Load EPA EJScreen environmental justice indicators (now auto-downloads from Zenodo)
+# WARNING: downloads a ~5 GB zip file. Use --states to limit what gets loaded.
+python etl/load_ejscreen.py                                     # auto-download (national, ~5 GB)
+python etl/load_ejscreen.py --states CA TX NY                   # auto-download, load only these states
+python etl/load_ejscreen.py --file data/raw/EJSCREEN.csv --states CA TX  # use local file
 
-# Load CDFI directory from CDFI Fund (Phase 5.5)
-# Download certified CDFI list from: https://www.cdfifund.gov/research-and-resources/data-resources
-python etl/load_cdfi_directory.py --file data/raw/cdfi_certified_list.xlsx
-python etl/load_cdfi_directory.py --file data/raw/cdfi_certified_list.xlsx --columns-only
+# Load CDFI directory from CDFI Fund (now auto-downloads)
+python etl/load_cdfi_directory.py                               # auto-download from CDFI Fund
+python etl/load_cdfi_directory.py --file data/raw/cdfi.xlsx     # use local file
 
 # Load state incentive programs from seed file (Phase 5.5)
 python etl/load_state_programs.py                          # uses data/raw/state_programs_seed.csv
@@ -227,11 +255,17 @@ python etl/fetch_enrollment_trends.py --states CA TX       # specific states
 python etl/fetch_enrollment_trends.py --years 8            # up to 8 years
 python etl/fetch_enrollment_trends.py --charter-only       # charter schools only
 
-# Load CDFI Fund award data (Phase 5.6)
-# Download from: https://www.cdfifund.gov/research-and-resources/data-resources
-python etl/fetch_cdfi_awards.py --file data/raw/cdfi_awards.xlsx
-python etl/fetch_cdfi_awards.py --file data/raw/cdfi_awards.csv --states CA TX
-python etl/fetch_cdfi_awards.py --file data/raw/cdfi_awards.xlsx --columns-only
+# Load CDFI Fund award data (now auto-downloads)
+python etl/fetch_cdfi_awards.py                                 # auto-download from CDFI Fund
+python etl/fetch_cdfi_awards.py --file data/raw/cdfi_awards.xlsx --states CA TX  # use local file
+
+# Load EDFacts federal LEA accountability (all 50 states, now auto-downloads)
+python etl/fetch_edfacts.py --year 2023                         # auto-download math/RLA/grad
+python etl/fetch_edfacts.py --year 2023 --states CA TX          # auto-download, filter states
+
+# Load state-specific accountability data (now auto-downloads for TX, CA, NY, FL, etc.)
+python etl/fetch_state_accountability.py --state TX --year 2023  # auto-download TX
+python etl/fetch_state_accountability.py --all-states --year 2023  # all supported states
 
 # Run tests (when they exist)
 pytest tests/

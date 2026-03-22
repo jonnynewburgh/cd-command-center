@@ -2,17 +2,19 @@
 etl/load_nmtc_data.py — Load NMTC project and CDE allocation data from CDFI Fund Excel.
 
 Data source: CDFI Fund NMTC Public Data Release
-  Download the Excel file from: https://www.cdfifund.gov/documents/data-releases
+  Auto-downloaded from the CDFI Fund website when --file is not provided.
+  Alternatively, download manually from: https://www.cdfifund.gov/documents/data-releases
   (Look for "FY 2024 NMTC Public Data Release: 2003–2022 Data File")
-  Save it to: data/raw/nmtc_public_data_2024.xlsx
+  Save it to: data/raw/nmtc_public_data.xlsx
 
 The Excel file has multiple sheets. This script reads two key sheets:
   - QLICI (project-level investments) → nmtc_projects table
   - CDE (CDE-level allocation awards) → cde_allocations table
 
 Usage:
-    python etl/load_nmtc_data.py --file data/raw/nmtc_public_data_2024.xlsx
-    python etl/load_nmtc_data.py --file data/raw/nmtc_public_data_2024.xlsx --sheet-names
+    python etl/load_nmtc_data.py                                        # auto-download
+    python etl/load_nmtc_data.py --file data/raw/nmtc_public_data.xlsx  # use local file
+    python etl/load_nmtc_data.py --file data/raw/nmtc_public_data.xlsx --sheet-names
 """
 
 import argparse
@@ -24,6 +26,16 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import db
+from utils.downloader import download_file
+
+# Direct download URL for the CDFI Fund NMTC Public Data Release Excel file.
+# If this URL stops working, find the updated link at:
+#   https://www.cdfifund.gov/documents/data-releases
+# Look for "NMTC Public Data Release" and copy the direct Excel link.
+NMTC_DOWNLOAD_URL = (
+    "https://www.cdfifund.gov/Documents/NMTC%20Public%20Data.xlsx"
+)
+NMTC_DEFAULT_LOCAL = "data/raw/nmtc_public_data.xlsx"
 
 # ---------------------------------------------------------------------------
 # Column mapping: CDFI Fund Excel column names → our database columns
@@ -279,8 +291,16 @@ def main():
     )
     parser.add_argument(
         "--file",
-        required=True,
-        help="Path to CDFI Fund NMTC public data Excel file",
+        default=None,
+        help=(
+            "Path to CDFI Fund NMTC public data Excel file. "
+            f"If omitted, auto-downloads to {NMTC_DEFAULT_LOCAL}."
+        ),
+    )
+    parser.add_argument(
+        "--force-download",
+        action="store_true",
+        help="Re-download even if a recent local copy already exists.",
     )
     parser.add_argument(
         "--sheet-names",
@@ -299,14 +319,35 @@ def main():
     )
     args = parser.parse_args()
 
-    if not os.path.exists(args.file):
+    # Resolve the local file path — auto-download if --file not provided
+    local_file = args.file or NMTC_DEFAULT_LOCAL
+
+    if args.file and not os.path.exists(args.file):
         print(f"Error: file not found: {args.file}")
         print("Download the NMTC Public Data Release Excel file from:")
         print("  https://www.cdfifund.gov/documents/data-releases")
         sys.exit(1)
 
-    print(f"Opening {args.file}...")
-    xl = pd.ExcelFile(args.file)
+    if not args.file:
+        # Auto-download from CDFI Fund
+        try:
+            local_file = download_file(
+                url=NMTC_DOWNLOAD_URL,
+                dest_path=NMTC_DEFAULT_LOCAL,
+                description="CDFI Fund NMTC Public Data Release",
+                force=args.force_download,
+            )
+        except RuntimeError as e:
+            print(f"\nError: Could not auto-download NMTC data.\n{e}")
+            print("\nManual download instructions:")
+            print("  1. Go to: https://www.cdfifund.gov/documents/data-releases")
+            print("  2. Download the NMTC Public Data Release Excel file")
+            print(f"  3. Save it to: {NMTC_DEFAULT_LOCAL}")
+            print(f"  4. Re-run: python etl/load_nmtc_data.py --file {NMTC_DEFAULT_LOCAL}")
+            sys.exit(1)
+
+    print(f"Opening {local_file}...")
+    xl = pd.ExcelFile(local_file)
 
     if args.sheet_names:
         print("Sheets in this file:")

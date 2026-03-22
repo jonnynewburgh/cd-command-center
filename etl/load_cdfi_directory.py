@@ -7,7 +7,7 @@ Knowing which CDFIs operate in a given market helps identify deal partners.
 
 Data source:
   CDFI Fund: https://www.cdfifund.gov/research-and-resources/data-resources
-  → "CDFI Certification" → Download the certified CDFI list (Excel or CSV)
+  Auto-downloaded when --file is not provided.
 
 File format (as of 2024 release):
   One row per certified CDFI. Key columns:
@@ -24,8 +24,8 @@ known column names and reports which it found. Use --columns-only to inspect
 the file before loading.
 
 Usage:
-    python etl/load_cdfi_directory.py --file data/raw/cdfi_certified_list.xlsx
-    python etl/load_cdfi_directory.py --file data/raw/cdfi_certified_list.csv
+    python etl/load_cdfi_directory.py                                              # auto-download
+    python etl/load_cdfi_directory.py --file data/raw/cdfi_certified_list.xlsx     # use local file
     python etl/load_cdfi_directory.py --file data/raw/cdfi_certified_list.xlsx --states CA TX NY
     python etl/load_cdfi_directory.py --file data/raw/cdfi_certified_list.xlsx --columns-only
 """
@@ -39,6 +39,16 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import db
+from utils.downloader import download_file
+
+# Direct download URL for the CDFI Fund certified CDFI list.
+# If this URL changes, find the updated link at:
+#   https://www.cdfifund.gov/research-and-resources/data-resources
+# Look for "CDFI Certification" and copy the Excel download link.
+CDFI_DIR_DOWNLOAD_URL = (
+    "https://www.cdfifund.gov/Documents/CDFI%20Certification/CDFIs%20Certified%20as%20of%20Today.xlsx"
+)
+CDFI_DIR_DEFAULT_LOCAL = "data/raw/cdfi_certified_list.xlsx"
 
 # Known column name candidates for each schema field
 # Format: {our_field: [candidate column names in source file]}
@@ -69,8 +79,11 @@ def main():
     )
     parser.add_argument(
         "--file",
-        required=True,
-        help="Path to the CDFI certified list (CSV or Excel). Download from CDFI Fund.",
+        default=None,
+        help=(
+            "Path to the CDFI certified list (CSV or Excel). "
+            f"If omitted, auto-downloads to {CDFI_DIR_DEFAULT_LOCAL}."
+        ),
     )
     parser.add_argument(
         "--states",
@@ -88,20 +101,45 @@ def main():
         default=None,
         help="Excel sheet name (if the file has multiple sheets).",
     )
+    parser.add_argument(
+        "--force-download",
+        action="store_true",
+        help="Re-download even if a recent local copy already exists.",
+    )
     args = parser.parse_args()
 
-    if not os.path.exists(args.file):
+    # Resolve local file path — auto-download if --file not provided
+    local_file = args.file or CDFI_DIR_DEFAULT_LOCAL
+
+    if args.file and not os.path.exists(args.file):
         print(f"Error: file not found: {args.file}")
         sys.exit(1)
 
+    if not args.file:
+        try:
+            local_file = download_file(
+                url=CDFI_DIR_DOWNLOAD_URL,
+                dest_path=CDFI_DIR_DEFAULT_LOCAL,
+                description="CDFI Fund certified CDFI directory",
+                force=args.force_download,
+            )
+        except RuntimeError as e:
+            print(f"\nError: Could not auto-download CDFI directory.\n{e}")
+            print("\nManual download instructions:")
+            print("  1. Go to: https://www.cdfifund.gov/research-and-resources/data-resources")
+            print("  2. Find 'CDFI Certification' and download the certified CDFI list")
+            print(f"  3. Save to: {CDFI_DIR_DEFAULT_LOCAL}")
+            print(f"  4. Re-run: python etl/load_cdfi_directory.py --file {CDFI_DIR_DEFAULT_LOCAL}")
+            sys.exit(1)
+
     print(f"CD Command Center — CDFI Directory Load")
-    print(f"  File: {args.file}")
+    print(f"  File: {local_file}")
 
     # Load file
-    if args.file.endswith((".xlsx", ".xls")):
-        df = pd.read_excel(args.file, sheet_name=args.sheet, dtype=str)
+    if local_file.endswith((".xlsx", ".xls")):
+        df = pd.read_excel(local_file, sheet_name=args.sheet, dtype=str)
     else:
-        df = pd.read_csv(args.file, dtype=str)
+        df = pd.read_csv(local_file, dtype=str)
 
     print(f"  Rows: {len(df):,}")
 

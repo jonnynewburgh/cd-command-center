@@ -8,8 +8,8 @@ capital gains taxes — a complementary financing tool to NMTC.
 
 Data source:
   Treasury/IRS publishes the OZ tract list as a spreadsheet.
-  Download from: https://www.irs.gov/pub/irs-utl/Designated_QOZ_8996.xlsx
-  Or from CDFI Fund: https://www.cdfifund.gov/opportunity-zones
+  Auto-downloaded from: https://www.irs.gov/pub/irs-utl/Designated_QOZ_8996.xlsx
+  Also available at: https://www.cdfifund.gov/opportunity-zones
 
 The file has one row per designated OZ census tract. The key column is
 the 11-digit FIPS census tract ID (same format used in our census_tracts table).
@@ -19,8 +19,8 @@ common column names: 'census_tract', 'Census Tract Number', 'Tract Number',
 'GEOID', 'FIPS'. Pass --column if your file uses a different column name.
 
 Usage:
-    python etl/load_opportunity_zones.py --file data/raw/opportunity_zones.csv
-    python etl/load_opportunity_zones.py --file data/raw/Designated_QOZ_8996.xlsx
+    python etl/load_opportunity_zones.py                                       # auto-download
+    python etl/load_opportunity_zones.py --file data/raw/opportunity_zones.csv # use local file
     python etl/load_opportunity_zones.py --file data/raw/opportunity_zones.csv --column GEOID
     python etl/load_opportunity_zones.py --file data/raw/opportunity_zones.csv --columns-only
 """
@@ -34,6 +34,12 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import db
+from utils.downloader import download_file
+
+# Direct download URL for the IRS Opportunity Zone tract list.
+# Published by the IRS at a stable pub URL.
+OZ_DOWNLOAD_URL = "https://www.irs.gov/pub/irs-utl/Designated_QOZ_8996.xlsx"
+OZ_DEFAULT_LOCAL = "data/raw/opportunity_zones.xlsx"
 
 # Common column names used for the census tract FIPS across different OZ file editions
 CANDIDATE_COLUMNS = [
@@ -100,8 +106,11 @@ def main():
     )
     parser.add_argument(
         "--file",
-        required=True,
-        help="Path to the OZ tract file (CSV or Excel). Download from IRS or CDFI Fund.",
+        default=None,
+        help=(
+            "Path to the OZ tract file (CSV or Excel). "
+            f"If omitted, auto-downloads to {OZ_DEFAULT_LOCAL}."
+        ),
     )
     parser.add_argument(
         "--column",
@@ -114,20 +123,44 @@ def main():
         action="store_true",
         help="Print column names from the file and exit (useful for identifying the tract column).",
     )
+    parser.add_argument(
+        "--force-download",
+        action="store_true",
+        help="Re-download even if a recent local copy already exists.",
+    )
     args = parser.parse_args()
 
-    if not os.path.exists(args.file):
+    # Resolve local file path — auto-download if --file not provided
+    local_file = args.file or OZ_DEFAULT_LOCAL
+
+    if args.file and not os.path.exists(args.file):
         print(f"Error: file not found: {args.file}")
         sys.exit(1)
 
+    if not args.file:
+        try:
+            local_file = download_file(
+                url=OZ_DOWNLOAD_URL,
+                dest_path=OZ_DEFAULT_LOCAL,
+                description="IRS Opportunity Zone tract list",
+                force=args.force_download,
+            )
+        except RuntimeError as e:
+            print(f"\nError: Could not auto-download Opportunity Zone data.\n{e}")
+            print("\nManual download instructions:")
+            print(f"  1. Download: {OZ_DOWNLOAD_URL}")
+            print(f"  2. Save to: {OZ_DEFAULT_LOCAL}")
+            print(f"  3. Re-run: python etl/load_opportunity_zones.py --file {OZ_DEFAULT_LOCAL}")
+            sys.exit(1)
+
     # Load the file
     print(f"CD Command Center — Opportunity Zone Load")
-    print(f"  File: {args.file}")
+    print(f"  File: {local_file}")
 
-    if args.file.endswith((".xlsx", ".xls")):
-        df = pd.read_excel(args.file, dtype=str)
+    if local_file.endswith((".xlsx", ".xls")):
+        df = pd.read_excel(local_file, dtype=str)
     else:
-        df = pd.read_csv(args.file, dtype=str)
+        df = pd.read_csv(local_file, dtype=str)
 
     print(f"  Rows: {len(df):,}")
 
