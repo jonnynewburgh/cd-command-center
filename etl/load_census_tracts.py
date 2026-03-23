@@ -473,7 +473,7 @@ def main():
 
         total_loaded += loaded
         total_errors += errors
-        print(f" → {loaded:,} loaded" + (f", {errors} errors" if errors else ""))
+        print(f" -> {loaded:,} loaded" + (f", {errors} errors" if errors else ""))
         time.sleep(PAGE_SLEEP)
 
     print()
