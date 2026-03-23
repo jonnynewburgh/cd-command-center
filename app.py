@@ -1377,19 +1377,49 @@ with tab_dashboard:
     map_lon = geocoded["lon"] if geocoded else None
     map_zoom = 10 if geocoded else (7 if selected_states and len(selected_states) == 1 else 5)
 
+    # When search is active, auto-center map on the results centroid
+    if search_active:
+        _lats, _lons = [], []
+        for _df in [schools_df, fqhc_df, ece_df, projects_df]:
+            if not _df.empty:
+                if "latitude" in _df.columns:
+                    _lats.extend(_df["latitude"].dropna().tolist())
+                if "longitude" in _df.columns:
+                    _lons.extend(_df["longitude"].dropna().tolist())
+        if _lats and _lons:
+            map_lat = sum(_lats) / len(_lats)
+            map_lon = sum(_lons) / len(_lons)
+            map_zoom = 10
+
+    # Cap records sent to the map to prevent browser slowdown.
+    # Tables still show full results; only the map layer is capped.
+    MAP_RECORD_LIMIT = 2000
+    schools_map_df = schools_df.head(MAP_RECORD_LIMIT) if len(schools_df) > MAP_RECORD_LIMIT else schools_df
+    fqhc_map_df = fqhc_df.head(MAP_RECORD_LIMIT) if len(fqhc_df) > MAP_RECORD_LIMIT else fqhc_df
+    ece_map_df = ece_df.head(MAP_RECORD_LIMIT) if len(ece_df) > MAP_RECORD_LIMIT else ece_df
+    projects_map_df = projects_df.head(MAP_RECORD_LIMIT) if len(projects_df) > MAP_RECORD_LIMIT else projects_df
+
+    _map_cap_notices = []
+    if len(schools_df) > MAP_RECORD_LIMIT:
+        _map_cap_notices.append(f"schools ({len(schools_df):,} → showing {MAP_RECORD_LIMIT:,})")
+    if len(fqhc_df) > MAP_RECORD_LIMIT:
+        _map_cap_notices.append(f"health centers ({len(fqhc_df):,} → showing {MAP_RECORD_LIMIT:,})")
+    if _map_cap_notices:
+        st.caption(f"Map capped for performance: {', '.join(_map_cap_notices)}. Use the State filter to see a full view.")
+
     has_map_data = (
-        (not schools_df.empty and show_schools) or
-        (not projects_df.empty and show_nmtc_projects) or
-        (not fqhc_df.empty and show_fqhc) or
-        (not ece_df.empty and show_ece)
+        (not schools_map_df.empty and show_schools) or
+        (not projects_map_df.empty and show_nmtc_projects) or
+        (not fqhc_map_df.empty and show_fqhc) or
+        (not ece_map_df.empty and show_ece)
     )
 
     if has_map_data:
         unified_map = make_unified_map(
-            schools_df=schools_df if show_schools else None,
-            projects_df=projects_df if show_nmtc_projects else None,
-            fqhc_df=fqhc_df if show_fqhc else None,
-            ece_df=ece_df if show_ece else None,
+            schools_df=schools_map_df if show_schools else None,
+            projects_df=projects_map_df if show_nmtc_projects else None,
+            fqhc_df=fqhc_map_df if show_fqhc else None,
+            ece_df=ece_map_df if show_ece else None,
             tracts_df=tracts_df,
             center_lat=map_lat,
             center_lon=map_lon,

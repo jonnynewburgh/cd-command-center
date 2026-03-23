@@ -314,6 +314,8 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_schools_status     ON schools(school_status)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_schools_risk_tier  ON schools(survival_risk_tier)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_schools_lea_id     ON schools(lea_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_schools_name       ON schools(school_name)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_schools_city       ON schools(city)")
 
     # lea_accountability: JOIN key — without this, every LEA lookup is a full scan
     cur.execute("CREATE INDEX IF NOT EXISTS idx_lea_id ON lea_accountability(lea_id)")
@@ -330,6 +332,8 @@ def init_db():
     # fqhc
     cur.execute("CREATE INDEX IF NOT EXISTS idx_fqhc_state         ON fqhc(state)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_fqhc_active        ON fqhc(is_active)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_fqhc_name          ON fqhc(health_center_name)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_fqhc_city          ON fqhc(city)")
 
     # ece_centers
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ece_state          ON ece_centers(state)")
