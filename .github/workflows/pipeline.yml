@@ -1,0 +1,121 @@
+name: Data Pipeline
+
+on:
+  # Run automatically every Sunday at 6am ET (11:00 UTC)
+  schedule:
+    - cron: "0 11 * * 0"
+
+  # Also allow manual trigger from the GitHub UI, with optional pipeline selection
+  workflow_dispatch:
+    inputs:
+      pipeline:
+        description: "Which pipeline to run (leave blank for all)"
+        required: false
+        default: ""
+        type: choice
+        options:
+          - ""
+          - census
+          - fqhc
+          - schools
+          - nmtc
+          - ece
+          - 990
+          - lea
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    env:
+      # Set in GitHub repo Settings → Secrets and variables → Actions
+      # Format: postgresql://user:password@host:5432/dbname
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Initialize database schema
+        run: python -c "import db; db.init_db(); print('Schema initialized.')"
+
+      # ---------------------------------------------------------------------------
+      # Run pipelines — census first (everything else joins to it)
+      # If a specific pipeline was requested via workflow_dispatch, skip the others.
+      # ---------------------------------------------------------------------------
+
+      - name: Run census pipeline
+        if: ${{ github.event.inputs.pipeline == '' || github.event.inputs.pipeline == 'census' }}
+        run: python etl/load_census_tracts.py --all
+
+      - name: Run FQHC pipeline
+        if: ${{ github.event.inputs.pipeline == '' || github.event.inputs.pipeline == 'fqhc' }}
+        run: python etl/fetch_fqhc.py
+
+      - name: Run schools pipeline
+        if: ${{ github.event.inputs.pipeline == '' || github.event.inputs.pipeline == 'schools' }}
+        run: |
+          python etl/fetch_nces_schools.py
+          python etl/assign_census_tracts.py
+
+      - name: Run NMTC pipeline
+        if: ${{ github.event.inputs.pipeline == '' || github.event.inputs.pipeline == 'nmtc' }}
+        env:
+          # NMTC data requires a local file — skip in CI unless file is available
+          NMTC_FILE: ${{ secrets.NMTC_FILE_PATH }}
+        run: |
+          if [ -n "$NMTC_FILE" ]; then
+            python etl/load_nmtc_data.py --file "$NMTC_FILE"
+            python etl/geocode_nmtc.py
+          else
+            echo "NMTC_FILE_PATH secret not set — skipping NMTC pipeline"
+          fi
+
+      - name: Run ECE pipeline
+        if: ${{ github.event.inputs.pipeline == '' || github.event.inputs.pipeline == 'ece' }}
+        run: echo "ECE pipeline requires state-specific files — run locally. Skipping in CI."
+
+      - name: Run 990 pipeline
+        if: ${{ github.event.inputs.pipeline == '' || github.event.inputs.pipeline == '990' }}
+        run: python etl/fetch_990_data.py --schools --fqhc --years 3
+
+      - name: Run LEA accountability pipeline
+        if: ${{ github.event.inputs.pipeline == '' || github.event.inputs.pipeline == 'lea' }}
+        run: echo "LEA pipeline requires state DOE files — run locally. Skipping in CI."
+
+      # ---------------------------------------------------------------------------
+      # Validate output — runs in strict mode so the Action fails if data looks wrong
+      # ---------------------------------------------------------------------------
+
+      - name: Validate data
+        run: python validate.py --strict
+
+      - name: Report pipeline summary
+        if: always()
+        run: |
+          python -c "
+          import db
+          conn = db.get_connection()
+          cur = conn.cursor()
+          cur.execute('''
+            SELECT pipeline, status, rows_loaded, started_at, finished_at
+            FROM data_loads
+            ORDER BY id DESC
+            LIMIT 20
+          ''')
+          rows = cur.fetchall()
+          conn.close()
+          print('\\nRecent pipeline runs:')
+          for r in rows:
+              print(f'  {r[0]:20s}  {r[1]:10s}  {str(r[2] or \"-\"):>10s} rows  {r[3]}')
+          "

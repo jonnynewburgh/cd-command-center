@@ -64,11 +64,16 @@ DOWNLOAD_TIMEOUT = 60
 # ---------------------------------------------------------------------------
 
 COLUMN_MAP = {
-    # Site identification
+    # Site identification — only ONE of these will exist in any given HRSA file
+    # Current HRSA file (2024/2025): site-level unique key
+    "bphc assigned number":                   "bhcmis_id",
+    # Older HRSA file formats
     "bhcmisid":                               "bhcmis_id",
     "bhcmis id":                              "bhcmis_id",
     "site id":                                "bhcmis_id",
     "health center site id":                  "bhcmis_id",
+    # NOTE: "bhcmis organization identification number" is an ORG-level ID (not site-level).
+    # Do NOT map it to bhcmis_id — it would collapse all sites of one org into one row.
 
     # Organization / site names
     "health center name":                     "health_center_name",
@@ -91,21 +96,35 @@ COLUMN_MAP = {
     "site county":                            "county",
     "county":                                 "county",
 
-    # Geography
+    # Geography — lat/lon (only ONE of these will exist per file vintage)
     "geocoded latitude":                      "latitude",
     "latitude":                               "latitude",
+    # Current HRSA file (2024/2025)
+    "geocoding artifact address primary y coordinate": "latitude",
     "geocoded longitude":                     "longitude",
     "longitude":                              "longitude",
+    # Current HRSA file (2024/2025)
+    "geocoding artifact address primary x coordinate": "longitude",
+    # Census tract (not in current HRSA file; assigned separately via assign_census_tracts.py)
     "census tract":                           "census_tract_id",
     "census tract number":                    "census_tract_id",
+    # County (prefer the verbose full name in current file)
+    "complete county name":                   "county",
+    "site county":                            "county",
+    "county":                                 "county",
 
-    # Classification
+    # Classification (only ONE site-type column will exist per vintage)
     "site type description":                  "site_type",
     "site type":                              "site_type",
+    # Current HRSA file (2024/2025)
+    "health center service delivery site location setting description": "site_type",
     "site status description":               "site_status_raw",  # used to derive is_active
     "site status":                            "site_status_raw",
+    # Health center type (only ONE will exist per vintage)
     "health center type":                     "health_center_type",
     "health center program grantee type":     "health_center_type",
+    # Current HRSA file (2024/2025)
+    "grantee organization type description":  "health_center_type",
 
     # Patient data (UDS)
     "total patients":                         "total_patients",
@@ -175,14 +194,24 @@ def map_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
     Rename columns from HRSA names to our schema names.
     Columns not in COLUMN_MAP are dropped.
+
+    When multiple source columns map to the same target (different-vintage
+    names for the same field), keep only the first occurrence.
     """
     rename = {col: COLUMN_MAP[col] for col in df.columns if col in COLUMN_MAP}
     df = df.rename(columns=rename)
 
-    # Keep only columns that appear as values in the map
-    keep = list(set(COLUMN_MAP.values()))
-    present = [c for c in keep if c in df.columns]
-    return df[present]
+    # Keep only schema columns; when duplicates exist, keep the first occurrence.
+    schema_cols = set(COLUMN_MAP.values())
+    seen = set()
+    final_cols = []
+    for col in df.columns:
+        if col in seen:
+            continue
+        seen.add(col)
+        if col in schema_cols:
+            final_cols.append(col)
+    return df[final_cols]
 
 
 def derive_is_active(df: pd.DataFrame) -> pd.DataFrame:

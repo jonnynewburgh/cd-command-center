@@ -13,28 +13,44 @@ import sqlite3
 import os
 import pandas as pd
 
-# Streamlit caching — imported conditionally so ETL scripts don't need Streamlit
-try:
-    import streamlit as st
-    _HAS_STREAMLIT = True
-except ImportError:
-    _HAS_STREAMLIT = False
-
-# Path to the SQLite database file.
-# Override with DATABASE_URL env var for deployments (e.g. Render persistent disk).
-# Example: export DATABASE_URL=/data/cd_command_center.sqlite
-DB_PATH = os.environ.get(
+# DATABASE_URL controls which backend is used:
+#   - Not set (default): SQLite at data/cd_command_center.sqlite
+#   - postgres://...    : PostgreSQL via psycopg2 (production / GitHub Actions)
+DATABASE_URL = os.environ.get(
     "DATABASE_URL",
     os.path.join(os.path.dirname(__file__), "data", "cd_command_center.sqlite"),
 )
 
+# True when DATABASE_URL is a Postgres connection string
+_IS_POSTGRES = DATABASE_URL.startswith("postgres://") or DATABASE_URL.startswith("postgresql://")
+
 
 def get_connection():
-    """Return a connection to the SQLite database."""
-    conn = sqlite3.connect(DB_PATH)
-    # Return rows as dicts so we can use column names (like a Postgres cursor)
-    conn.row_factory = sqlite3.Row
-    return conn
+    """
+    Return a database connection.
+
+    SQLite (default): used locally for development.
+    PostgreSQL: used in production when DATABASE_URL is a postgres:// URL.
+
+    NOTE: All queries in this file use ? as the parameter placeholder (SQLite style).
+    When Postgres is active, _placeholder() and _adapt_sql() convert ? → %s automatically.
+    """
+    if _IS_POSTGRES:
+        import psycopg2
+        import psycopg2.extras
+        conn = psycopg2.connect(DATABASE_URL)
+        return conn
+    else:
+        conn = sqlite3.connect(DATABASE_URL)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+
+def _adapt_sql(sql: str) -> str:
+    """Convert SQLite-style ? placeholders to %s for PostgreSQL."""
+    if _IS_POSTGRES:
+        return sql.replace("?", "%s")
+    return sql
 
 
 def init_db():
@@ -579,21 +595,134 @@ def init_db():
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ratios_ein ON financial_ratios(ein)")
 
+    # ETL run log — one row per pipeline execution, written by log_load_start/finish()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS data_loads (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pipeline TEXT NOT NULL,        -- e.g. 'census', 'fqhc', 'nmtc'
+            status TEXT NOT NULL,          -- 'running', 'success', 'error'
+            rows_loaded INTEGER,           -- count of rows upserted in this run
+            error_message TEXT,            -- populated if status = 'error'
+            started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            finished_at TIMESTAMP
+        )
+    """)
+
     conn.commit()
     conn.close()
 
 
 # ---------------------------------------------------------------------------
-# Caching helper — wraps @st.cache_data when Streamlit is available
+# Caching helper — no-op; kept so all @_cached decorators still work without
+# change. If a caching layer is added later (e.g. functools.lru_cache or
+# Redis), swap the implementation here.
 # ---------------------------------------------------------------------------
 
 def _cached(ttl=300):
-    """Decorator: applies @st.cache_data(ttl=ttl) if Streamlit is loaded."""
+    """No-op decorator. Preserves the @_cached(ttl=...) call signature."""
     def decorator(func):
-        if _HAS_STREAMLIT:
-            return st.cache_data(ttl=ttl, show_spinner=False)(func)
         return func
     return decorator
+
+
+# ---------------------------------------------------------------------------
+# ETL helpers — used by all pipeline scripts
+# ---------------------------------------------------------------------------
+
+def upsert_rows(table: str, rows: list[dict], unique_cols: list[str]) -> int:
+    """
+    Insert or update rows in a table. Returns the number of rows processed.
+
+    How it works:
+    - For each row, attempt an INSERT.
+    - If a row already exists (based on unique_cols), UPDATE the non-unique columns.
+    - This makes every pipeline script idempotent: safe to re-run without duplicating data.
+
+    Args:
+        table:       Table name, e.g. 'schools' or 'census_tracts'
+        rows:        List of dicts, where each dict is one row (keys = column names)
+        unique_cols: List of column names that uniquely identify a row, e.g. ['nces_id']
+
+    Example:
+        upsert_rows('schools', school_records, unique_cols=['nces_id'])
+    """
+    if not rows:
+        return 0
+
+    conn = get_connection()
+    cur = conn.cursor()
+    count = 0
+
+    for row in rows:
+        cols = list(row.keys())
+        vals = list(row.values())
+        placeholders = ", ".join(["?"] * len(cols))
+        col_names = ", ".join(cols)
+
+        # Build the UPDATE clause for non-unique columns
+        update_cols = [c for c in cols if c not in unique_cols]
+        if update_cols:
+            update_clause = ", ".join(f"{c} = excluded.{c}" for c in update_cols)
+            conflict_clause = f"ON CONFLICT ({', '.join(unique_cols)}) DO UPDATE SET {update_clause}"
+        else:
+            conflict_clause = f"ON CONFLICT ({', '.join(unique_cols)}) DO NOTHING"
+
+        sql = _adapt_sql(
+            f"INSERT INTO {table} ({col_names}) VALUES ({placeholders}) {conflict_clause}"
+        )
+        cur.execute(sql, vals)
+        count += 1
+
+    conn.commit()
+    conn.close()
+    return count
+
+
+def log_load_start(pipeline: str) -> int:
+    """
+    Record the start of a pipeline run. Returns the run ID.
+    Call this at the top of every ETL script, then pass the ID to log_load_finish().
+
+    Example:
+        run_id = db.log_load_start('census')
+        ... do work ...
+        db.log_load_finish(run_id, rows_loaded=n)
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        _adapt_sql("INSERT INTO data_loads (pipeline, status) VALUES (?, 'running')"),
+        [pipeline],
+    )
+    run_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return run_id
+
+
+def log_load_finish(run_id: int, rows_loaded: int = 0, error: str = None):
+    """
+    Update a pipeline run log with the result.
+
+    Args:
+        run_id:      ID returned by log_load_start()
+        rows_loaded: How many rows were inserted/updated
+        error:       If the pipeline failed, pass the error message here
+    """
+    status = "error" if error else "success"
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        _adapt_sql("""
+            UPDATE data_loads
+            SET status = ?, rows_loaded = ?, error_message = ?,
+                finished_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """),
+        [status, rows_loaded, error, run_id],
+    )
+    conn.commit()
+    conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1537,6 +1666,31 @@ def upsert_ece(record: dict):
     conn.close()
 
 
+def batch_update_ece_geo(records: list[dict]):
+    """
+    Update latitude, longitude, and census_tract_id for many ECE centers at once.
+
+    Args:
+        records: list of dicts, each with 'license_id', 'latitude', 'longitude',
+                 and optionally 'census_tract_id'
+    """
+    if not records:
+        return
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.executemany(
+        _adapt_sql("""
+            UPDATE ece_centers
+            SET latitude = ?, longitude = ?, census_tract_id = ?
+            WHERE license_id = ?
+        """),
+        [(r["latitude"], r["longitude"], r.get("census_tract_id"), r["license_id"])
+         for r in records],
+    )
+    conn.commit()
+    conn.close()
+
+
 def upsert_fqhc(record: dict):
     """Insert or update a FQHC site record (keyed on bhcmis_id)."""
     conn = get_connection()
@@ -1555,6 +1709,31 @@ def upsert_fqhc(record: dict):
         ON CONFLICT(bhcmis_id) DO UPDATE SET {update_clause}
     """
     cur.execute(sql, values)
+    conn.commit()
+    conn.close()
+
+
+def batch_update_fqhc_geo(records: list[dict]):
+    """
+    Update latitude, longitude, and census_tract_id for many FQHC sites at once.
+
+    Args:
+        records: list of dicts, each with 'bhcmis_id', 'latitude', 'longitude',
+                 and optionally 'census_tract_id'
+    """
+    if not records:
+        return
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.executemany(
+        _adapt_sql("""
+            UPDATE fqhc
+            SET latitude = ?, longitude = ?, census_tract_id = ?
+            WHERE bhcmis_id = ?
+        """),
+        [(r["latitude"], r["longitude"], r.get("census_tract_id"), r["bhcmis_id"])
+         for r in records],
+    )
     conn.commit()
     conn.close()
 
@@ -1671,13 +1850,34 @@ def get_nearby_facilities(lat: float, lon: float, radius_miles: float = 1.0) -> 
 
 def update_school_census_tract(nces_id: str, census_tract_id: str):
     """Update the census_tract_id for a single school by nces_id."""
+    batch_update_school_census_tracts([{"nces_id": nces_id, "census_tract_id": census_tract_id}])
+
+
+def batch_update_school_census_tracts(records: list[dict]):
+    """
+    Update census_tract_id for many schools in a single transaction.
+    Much faster than calling update_school_census_tract() in a loop.
+
+    Args:
+        records: list of dicts, each with 'nces_id' and 'census_tract_id' keys
+
+    Example:
+        batch_update_school_census_tracts([
+            {"nces_id": "123456", "census_tract_id": "06037201300"},
+            {"nces_id": "789012", "census_tract_id": "06037202000"},
+        ])
+    """
+    if not records:
+        return
     conn = get_connection()
     cur = conn.cursor()
     for table in ["schools", "charter_schools"]:
         try:
-            cur.execute(
-                f"UPDATE {table} SET census_tract_id = ?, updated_at = CURRENT_TIMESTAMP WHERE nces_id = ?",
-                (census_tract_id, nces_id),
+            cur.executemany(
+                _adapt_sql(
+                    f"UPDATE {table} SET census_tract_id = ?, updated_at = CURRENT_TIMESTAMP WHERE nces_id = ?"
+                ),
+                [(r["census_tract_id"], r["nces_id"]) for r in records],
             )
             conn.commit()
             conn.close()
