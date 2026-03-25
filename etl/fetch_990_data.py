@@ -563,16 +563,110 @@ def fetch_990_for_fqhc(states=None, limit=None, overwrite=False, verbose=False, 
     return linked
 
 
+def fetch_990_for_cde(states=None, limit=None, overwrite=False, verbose=False, years=1):
+    """
+    For each CDE in cde_allocations, search ProPublica using the CDE name,
+    link the EIN, and store the financial data.
+    """
+    conn = db.get_connection()
+    cur = conn.cursor()
+
+    conditions = []
+    params = []
+
+    if not overwrite:
+        conditions.append("(ein IS NULL OR ein = '')")
+    if states:
+        placeholders = ",".join("?" * len(states))
+        conditions.append(f"state IN ({placeholders})")
+        params.extend(states)
+
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    cur.execute(
+        db._adapt_sql(f"SELECT DISTINCT cde_name, state FROM cde_allocations {where} ORDER BY state, cde_name"),
+        params,
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    if limit:
+        rows = rows[:limit]
+
+    total = len(rows)
+    print(f"  Searching 990s for {total:,} CDEs...")
+
+    linked = 0
+    failed = 0
+
+    for i, (cde_name, state) in enumerate(rows, 1):
+        if not cde_name:
+            failed += 1
+            continue
+
+        results = search_propublica(cde_name, state or "")
+        time.sleep(API_SLEEP)
+
+        if verbose:
+            print(f"\n  [{i}] Search: '{cde_name}' ({state})")
+            print(f"       API returned {len(results)} results")
+            for r in results[:3]:
+                score = _match_score(cde_name, r.get("name", ""))
+                print(f"       • {r.get('name')} — score={score:.2f}")
+
+        match = best_match(cde_name, results)
+        if not match:
+            if verbose:
+                print(f"       → NO MATCH (threshold={MIN_MATCH_SCORE})")
+            failed += 1
+            continue
+
+        ein = str(match.get("ein", "")).zfill(9)
+
+        detail = fetch_org_detail(ein)
+        time.sleep(API_SLEEP)
+
+        if not detail:
+            failed += 1
+            continue
+
+        financials, history = extract_financials(detail, max_years=years)
+        if not financials.get("ein"):
+            failed += 1
+            continue
+
+        db.upsert_990(financials)
+        for hist_rec in history:
+            db.upsert_990_history(hist_rec)
+
+        # Link EIN back to the CDE record
+        conn = db.get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            db._adapt_sql("UPDATE cde_allocations SET ein = ? WHERE cde_name = ?"),
+            (ein, cde_name),
+        )
+        conn.commit()
+        conn.close()
+        linked += 1
+
+        if i % 50 == 0 or i == total:
+            print(f"  [{i:,}/{total:,}] {linked:,} linked, {failed} not matched")
+
+    print(f"  CDEs: {linked:,} linked, {failed} not matched")
+    return linked
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Fetch IRS 990 data for charter schools and FQHCs via ProPublica"
+        description="Fetch IRS 990 data for charter schools, FQHCs, and CDEs via ProPublica"
     )
     parser.add_argument("--schools",   action="store_true", help="Process charter schools only")
     parser.add_argument("--fqhc",      action="store_true", help="Process health centers only")
+    parser.add_argument("--cde",       action="store_true", help="Process CDEs (from cde_allocations table)")
     parser.add_argument("--states",    nargs="+", metavar="ST", help="Limit to specific states (e.g. CA TX)")
     parser.add_argument("--limit",     type=int, help="Max organizations to process per facility type")
     parser.add_argument("--overwrite", action="store_true", help="Re-fetch even already-linked facilities")
@@ -587,13 +681,20 @@ def main():
     # Ensure all tables and columns exist (adds ein column to schools/fqhc if missing)
     db.init_db()
 
-    # If neither flag is set, do both
-    do_schools = args.schools or (not args.schools and not args.fqhc)
-    do_fqhc    = args.fqhc    or (not args.schools and not args.fqhc)
+    # If no specific flag is set, do all three
+    any_flag   = args.schools or args.fqhc or args.cde
+    do_schools = args.schools or not any_flag
+    do_fqhc    = args.fqhc    or not any_flag
+    do_cde     = args.cde     or not any_flag
+
+    targets = []
+    if do_schools: targets.append("Charter schools")
+    if do_fqhc:    targets.append("FQHCs")
+    if do_cde:     targets.append("CDEs")
 
     print("CD Command Center — IRS 990 Data Fetch")
     print(f"  Source:   ProPublica Nonprofit Explorer API")
-    print(f"  Targets:  {'Charter schools' if do_schools else ''} {'FQHCs' if do_fqhc else ''}".strip())
+    print(f"  Targets:  {', '.join(targets)}")
     if args.states:
         print(f"  States:   {args.states}")
     if args.limit:
@@ -624,11 +725,26 @@ def main():
         )
         print()
 
+    if do_cde:
+        print("CDEs:")
+        fetch_990_for_cde(
+            states=args.states,
+            limit=args.limit,
+            overwrite=args.overwrite,
+            verbose=args.verbose,
+            years=args.years,
+        )
+        print()
+
     summary = db.get_990_summary()
+    _conn = db.get_connection(); _cur = _conn.cursor()
+    cde_linked = (_cur.execute("SELECT COUNT(*) FROM cde_allocations WHERE ein IS NOT NULL").fetchone() or [0])[0]
+    _conn.close()
     print("Database now contains:")
     print(f"  Total 990 records:          {summary['total_990_records']:,}")
     print(f"  Charter schools linked:     {summary['linked_charter_schools']:,}")
     print(f"  FQHC sites linked:          {summary['linked_fqhc_sites']:,}")
+    print(f"  CDEs linked:                {cde_linked:,}")
     print()
     print("Done.")
 

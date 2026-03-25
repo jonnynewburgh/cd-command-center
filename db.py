@@ -450,7 +450,7 @@ def init_db():
     # Add ein column to schools and fqhc tables if it doesn't exist yet.
     # ALTER TABLE only runs on existing DBs — new DBs get the column from init.
     # We use try/except because SQLite has no "ADD COLUMN IF NOT EXISTS".
-    for table, col in [("schools", "ein"), ("fqhc", "ein")]:
+    for table, col in [("schools", "ein"), ("fqhc", "ein"), ("cde_allocations", "ein")]:
         try:
             cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
         except Exception:
