@@ -161,7 +161,7 @@ def main():
     obs_end = end_date.isoformat()
 
     print("CD Command Center — FRED Rate Fetch")
-    print(f"  Date range: {obs_start} → {obs_end}")
+    print(f"  Date range: {obs_start} to {obs_end}")
     print(f"  Series: {', '.join(sid for sid, _ in series_to_fetch)}")
     print()
 
