@@ -233,6 +233,73 @@ python etl/fetch_cdfi_awards.py --file data/raw/cdfi_awards.xlsx
 python etl/fetch_cdfi_awards.py --file data/raw/cdfi_awards.csv --states CA TX
 python etl/fetch_cdfi_awards.py --file data/raw/cdfi_awards.xlsx --columns-only
 
+# Fetch FRED market rates (SOFR, 5/10/30yr Treasuries, Fed Funds)
+# Get a free API key at: https://fred.stlouisfed.org/docs/api/api_key.html
+python etl/fetch_fred_rates.py --api-key YOUR_KEY
+python etl/fetch_fred_rates.py --api-key YOUR_KEY --days 730   # 2 years of history
+python etl/fetch_fred_rates.py --api-key YOUR_KEY --latest     # quick refresh (last 7 days)
+python etl/fetch_fred_rates.py --api-key YOUR_KEY --series SOFR DGS10  # specific series only
+# Or set FRED_API_KEY env var and omit --api-key
+
+# Load HUD Area Median Income (AMI) limits
+# Fetches from HUD public API (no account required) or a local Excel file
+python etl/fetch_hud_ami.py                              # all states, current fiscal year
+python etl/fetch_hud_ami.py --year 2024                  # specific year
+python etl/fetch_hud_ami.py --states CA TX NY            # specific states only
+python etl/fetch_hud_ami.py --file data/raw/Section8-FY25.xlsx          # local Excel
+python etl/fetch_hud_ami.py --file data/raw/Section8-FY25.xlsx --columns-only
+
+# Load HUD Fair Market Rents (FMRs)
+# Download Excel from: https://www.huduser.gov/portal/datasets/fmr.html
+python etl/fetch_hud_fmr.py                              # all states, current fiscal year
+python etl/fetch_hud_fmr.py --year 2025
+python etl/fetch_hud_fmr.py --states CA TX NY
+python etl/fetch_hud_fmr.py --file data/raw/FY2025_4050_FMRs_Final.xlsx
+python etl/fetch_hud_fmr.py --file data/raw/FY2025_4050_FMRs_Final.xlsx --columns-only
+
+# Load FFIEC CRA institution and assessment area data
+# Download flat files from: https://www.ffiec.gov/cradownload.htm
+# Extract zip; look for Transmittal.dat and Agg_Assessment_Area.dat
+python etl/fetch_cra_data.py --year 2023 \
+    --transmittal data/raw/CRA_Flat_2023_Transmittal.dat \
+    --assessment-area data/raw/CRA_Flat_2023_Agg_Assessment_Area.dat
+python etl/fetch_cra_data.py --year 2023 \
+    --transmittal data/raw/CRA_Flat_2023_Transmittal.dat \
+    --assessment-area data/raw/CRA_Flat_2023_Agg_Assessment_Area.dat \
+    --states CA TX NY
+python etl/fetch_cra_data.py --year 2023 \
+    --transmittal data/raw/CRA_Flat_2023_Transmittal.dat --columns-only
+
+# Load SBA 7(a) and 504 loan data
+# Download CSV files from: https://data.sba.gov/dataset/sba-7-a-504-foia
+python etl/fetch_sba_loans.py --file data/raw/foia-7afy2024.csv --program 7a
+python etl/fetch_sba_loans.py --file data/raw/foia-504fy2024.csv --program 504
+python etl/fetch_sba_loans.py --file data/raw/foia-7afy2024.csv --program 7a --states CA TX NY
+python etl/fetch_sba_loans.py --file data/raw/foia-7afy2024.csv --program 7a --year 2023
+python etl/fetch_sba_loans.py --file data/raw/foia-7afy2024.csv --program 7a --columns-only
+
+# Load HMDA mortgage lending activity by census tract (CFPB API, no key required)
+python etl/fetch_hmda.py --year 2023 --states CA TX NY
+python etl/fetch_hmda.py --year 2023 --all              # all states (~50 API calls, slow)
+
+# Load BLS unemployment by state/MSA/county
+# FRED API key (free): https://fred.stlouisfed.org/docs/api/api_key.html
+# BLS API key (free, optional): https://data.bls.gov/registrationEngine/
+python etl/fetch_bls_unemployment.py --mode fred-states --api-key YOUR_FRED_KEY
+python etl/fetch_bls_unemployment.py --mode fred-states --api-key YOUR_FRED_KEY --states CA TX NY --months 36
+python etl/fetch_bls_unemployment.py --mode fred-msa --api-key YOUR_FRED_KEY \
+    --msa-series LAUMT064720000000003 LAUMT367400000000003
+python etl/fetch_bls_unemployment.py --mode bls-county --fips 06037 17031 36061
+python etl/fetch_bls_unemployment.py --mode bls-county --fips 06037 --bls-key YOUR_BLS_KEY
+
+# Load BLS QCEW employment by county and industry (BLS API, no key required)
+python etl/fetch_bls_qcew.py --fips 06037 17031 --year 2023 --quarter 4
+python etl/fetch_bls_qcew.py --fips 06037 --year 2023 --annual
+python etl/fetch_bls_qcew.py --fips 06037 --year 2023 --quarter 4 --totals-only
+# Bulk load from downloaded CSV (https://www.bls.gov/cew/downloadable-data.htm):
+python etl/fetch_bls_qcew.py --file data/raw/2023_annual.csv --year 2023 --annual --totals-only
+python etl/fetch_bls_qcew.py --file data/raw/2023_annual.csv --year 2023 --states CA TX --columns-only
+
 # Run tests (when they exist)
 pytest tests/
 ```

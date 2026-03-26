@@ -608,6 +608,221 @@ def init_db():
         )
     """)
 
+    # Market rates — FRED daily rate observations (SOFR, Treasuries, Fed Funds)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS market_rates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            series_id TEXT NOT NULL,       -- FRED series ID, e.g. 'SOFR', 'DGS10'
+            series_name TEXT,              -- Human-readable label
+            rate_date TEXT NOT NULL,       -- ISO date (YYYY-MM-DD)
+            rate_value REAL,               -- Rate as a percentage (e.g. 5.33 = 5.33%)
+            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(series_id, rate_date)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_rates_series ON market_rates(series_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_rates_date   ON market_rates(rate_date)")
+
+    # HUD Area Median Income — annual income limits by county/metro, family size 4 (standard benchmark)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS hud_ami (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fiscal_year INTEGER NOT NULL,
+            state TEXT,
+            fips TEXT NOT NULL,            -- HUD area FIPS code (county or metro)
+            area_name TEXT,                -- Metro area or county name
+            county_name TEXT,
+            median_income REAL,            -- 100% AMI for 4-person family
+            limit_30_pct REAL,             -- 30% AMI — Extremely Low Income
+            limit_50_pct REAL,             -- 50% AMI — Very Low Income
+            limit_80_pct REAL,             -- 80% AMI — Low Income (most common threshold)
+            limit_120_pct REAL,            -- 120% AMI — middle-income programs (computed: median_income * 1.2)
+            -- Full limits by family size stored as JSON for less common lookups
+            -- Format: {"1": {"30": x, "50": y, "80": z}, "2": {...}, ...}
+            limits_json TEXT,
+            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(fiscal_year, fips)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ami_state ON hud_ami(state)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ami_year  ON hud_ami(fiscal_year)")
+
+    # HUD Fair Market Rents — annual FMRs by county/metro area
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS hud_fmr (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fiscal_year INTEGER NOT NULL,
+            state TEXT,
+            fips TEXT NOT NULL,            -- HUD FMR area FIPS
+            area_name TEXT,
+            county_name TEXT,
+            fmr_0br REAL,                  -- Studio / efficiency FMR
+            fmr_1br REAL,
+            fmr_2br REAL,                  -- 2-bedroom is standard benchmark for most programs
+            fmr_3br REAL,
+            fmr_4br REAL,
+            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(fiscal_year, fips)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_fmr_state ON hud_fmr(state)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_fmr_year  ON hud_fmr(fiscal_year)")
+
+    # CRA institutions — bank CRA exam register from FFIEC.
+    # Shows which banks operate in which states; used to identify CRA-motivated capital demand.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS cra_institutions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            respondent_id TEXT NOT NULL,       -- FFIEC respondent ID (unique per institution per year)
+            institution_name TEXT,
+            city TEXT,
+            state TEXT,
+            zip_code TEXT,
+            asset_size_indicator TEXT,         -- 'Large', 'Intermediate Small', 'Small'
+            report_year INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(respondent_id, report_year)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_cra_inst_state ON cra_institutions(state)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_cra_inst_year  ON cra_institutions(report_year)")
+
+    # CRA assessment areas — the counties/MSAs each bank covers in its CRA plan.
+    # Drives where banks are obligated to deploy capital, which creates NMTC/CDFI demand.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS cra_assessment_areas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            respondent_id TEXT NOT NULL,       -- joins to cra_institutions.respondent_id
+            institution_name TEXT,
+            report_year INTEGER NOT NULL,
+            state TEXT,
+            assessment_area_name TEXT,         -- e.g. "Chicago-Naperville-Elgin, IL"
+            area_type TEXT,                    -- 'MSA', 'Non-MSA', 'Statewide'
+            county_fips TEXT,                  -- 5-digit FIPS when area is a single county
+            msa_code TEXT,                     -- MSA code when area is a metro area
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(respondent_id, report_year, assessment_area_name)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_cra_area_state ON cra_assessment_areas(state)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_cra_area_inst  ON cra_assessment_areas(respondent_id)")
+
+    # SBA loans — approved 7(a) and 504 loans by borrower geography.
+    # Shows existing small-business lending activity; useful for identifying credit deserts
+    # and understanding prior SBA penetration in a target market.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS sba_loans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            loan_number TEXT UNIQUE,
+            program TEXT NOT NULL,             -- '7a' or '504'
+            borrower_name TEXT,
+            borrower_city TEXT,
+            borrower_state TEXT,
+            borrower_zip TEXT,
+            borrower_county TEXT,
+            census_tract_id TEXT,              -- 11-digit FIPS (when available from source)
+            naics_code TEXT,
+            business_type TEXT,               -- 'Corporation', 'Partnership', etc.
+            approval_date TEXT,                -- ISO date
+            approval_year INTEGER,
+            gross_approval REAL,               -- total loan amount approved
+            sba_guaranteed_portion REAL,       -- SBA-guaranteed amount
+            lender_name TEXT,
+            lender_state TEXT,
+            jobs_supported INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_sba_state  ON sba_loans(borrower_state)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_sba_year   ON sba_loans(approval_year)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_sba_tract  ON sba_loans(census_tract_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_sba_zip    ON sba_loans(borrower_zip)")
+
+    # HMDA activity — HMDA lending aggregated by census tract and year.
+    # Stored as tract-level summaries (not individual loan records) to keep size manageable.
+    # Use to identify credit deserts: high-poverty tracts with low origination rates.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS hmda_activity (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            census_tract_id TEXT NOT NULL,     -- 11-digit FIPS
+            report_year INTEGER NOT NULL,
+            state TEXT,
+            county_fips TEXT,                  -- 5-digit FIPS
+            -- Application counts
+            total_applications INTEGER,
+            total_originations INTEGER,
+            total_denials INTEGER,
+            total_withdrawn INTEGER,
+            -- Loan purpose breakdown
+            home_purchase_originations INTEGER,
+            refinance_originations INTEGER,
+            home_improvement_originations INTEGER,
+            -- Loan type breakdown
+            conventional_originations INTEGER,
+            fha_originations INTEGER,
+            va_originations INTEGER,
+            -- Computed metrics
+            denial_rate REAL,                  -- total_denials / total_applications
+            origination_rate REAL,             -- total_originations / total_applications
+            median_loan_amount REAL,
+            total_loan_amount REAL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(census_tract_id, report_year)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_hmda_tract  ON hmda_activity(census_tract_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_hmda_year   ON hmda_activity(report_year)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_hmda_state  ON hmda_activity(state)")
+
+    # BLS unemployment — monthly unemployment rate by MSA or county from BLS/FRED.
+    # Provides economic context for deal underwriting and impact reporting.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS bls_unemployment (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            area_fips TEXT NOT NULL,           -- 5-digit county FIPS or MSA code
+            area_name TEXT,
+            area_type TEXT,                    -- 'county' or 'msa'
+            state TEXT,
+            period TEXT NOT NULL,              -- YYYY-MM (e.g. '2024-11')
+            unemployment_rate REAL,            -- % unemployed
+            labor_force INTEGER,
+            employed INTEGER,
+            unemployed INTEGER,
+            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(area_fips, period)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_unemp_fips   ON bls_unemployment(area_fips)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_unemp_state  ON bls_unemployment(state)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_unemp_period ON bls_unemployment(period)")
+
+    # BLS QCEW — Quarterly Census of Employment and Wages by county and industry.
+    # Shows job counts, wages, and establishment counts by NAICS sector.
+    # Useful for job impact analysis and understanding the economic base of a target market.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS bls_qcew (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            area_fips TEXT NOT NULL,           -- 5-digit county FIPS (or 'US000' for national)
+            area_name TEXT,
+            state TEXT,
+            year INTEGER NOT NULL,
+            quarter INTEGER NOT NULL,          -- 1-4; use quarter=0 for annual averages
+            industry_code TEXT NOT NULL,       -- NAICS code or '10' for total all industries
+            industry_title TEXT,
+            ownership_code TEXT,               -- '0' = total, '5' = private, '1' = federal govt
+            establishments INTEGER,
+            employment INTEGER,                -- average monthly employment in period
+            total_wages REAL,                  -- total quarterly wages
+            avg_weekly_wage REAL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(area_fips, year, quarter, industry_code, ownership_code)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_qcew_fips    ON bls_qcew(area_fips)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_qcew_state   ON bls_qcew(state)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_qcew_year    ON bls_qcew(year)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_qcew_naics   ON bls_qcew(industry_code)")
+
     conn.commit()
     conn.close()
 
