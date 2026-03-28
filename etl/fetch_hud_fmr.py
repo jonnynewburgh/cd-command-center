@@ -64,17 +64,20 @@ ALL_STATES = [
 # HUD API fetch
 # ---------------------------------------------------------------------------
 
-def fetch_fmr_for_state(state: str, year: int) -> list[dict]:
+def fetch_fmr_for_state(state: str, year: int, api_key: str = None) -> list[dict]:
     """
     Fetch FMRs for all counties/areas in a state via the HUD API.
     Returns a list of row dicts ready for upsert into hud_fmr.
 
     HUD API: GET /fmr/data/{state}?year={year}
+    Requires a Bearer token from https://www.huduser.gov/hudapi/public/home
     Response: list of area objects with Efficiency, One-Bedroom, ..., Four-Bedroom fields.
     """
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     resp = requests.get(
         f"{HUD_API_BASE}/data/{state}",
         params={"year": str(year)},
+        headers=headers,
         timeout=30,
     )
 
@@ -228,7 +231,16 @@ def main():
         action="store_true",
         help="Print column names from the Excel file and exit (use with --file).",
     )
+    parser.add_argument(
+        "--api-key",
+        default=None,
+        help="HUD USER API Bearer token. Register free at "
+             "https://www.huduser.gov/hudapi/public/home. "
+             "Can also be set via HUD_API_KEY env var.",
+    )
     args = parser.parse_args()
+
+    api_key = args.api_key or os.environ.get("HUD_API_KEY")
 
     print("CD Command Center — HUD FMR Load")
     print(f"  Fiscal year: {args.year}")
@@ -259,6 +271,16 @@ def main():
 
         else:
             # --- API mode ---
+            if not api_key:
+                print(
+                    "Error: HUD API requires a free token. Register at:\n"
+                    "  https://www.huduser.gov/hudapi/public/home\n"
+                    "Then pass --api-key YOUR_TOKEN or set HUD_API_KEY env var.\n"
+                    "\nAlternatively, download the Excel file and use --file:\n"
+                    "  https://www.huduser.gov/portal/datasets/fmr.html"
+                )
+                sys.exit(1)
+
             states = args.states if args.states else ALL_STATES
             print(f"  States: {', '.join(states)}")
             print()
@@ -266,7 +288,7 @@ def main():
             for state in states:
                 print(f"  {state}...", end=" ", flush=True)
                 try:
-                    rows = fetch_fmr_for_state(state, args.year)
+                    rows = fetch_fmr_for_state(state, args.year, api_key=api_key)
                 except requests.RequestException as e:
                     print(f"Error: {e}")
                     continue

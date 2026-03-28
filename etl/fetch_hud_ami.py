@@ -7,27 +7,33 @@ unit in an LIHTC or NMTC deal is priced at a percentage of AMI (30%, 50%, 60%, 8
 quickly check whether a proposed project meets program thresholds.
 
 Data source:
-    HUD publishes income limits annually via their public API (no account required):
-        https://www.huduser.gov/hudapi/public/il
+    HUD publishes income limits annually. Two options:
+
+    Option A — HUD USER API (requires free API token):
+        Register at https://www.huduser.gov/hudapi/public/home to get a Bearer token.
+        Set it via --api-key or the HUD_API_KEY env var.
+        Endpoint: https://www.huduser.gov/hudapi/public/il
+
+    Option B — local Excel file (recommended, no account needed):
+        Download from https://www.huduser.gov/portal/datasets/il.html
+        Look for "FY2025 Income Limits" → download the Excel file.
+        Pass via --file: python etl/fetch_hud_ami.py --file data/raw/Section8-FY25.xlsx
 
     The API returns limits by HUD area (county or metro) for all family sizes (1–8 persons).
     This script stores 4-person family limits as the primary benchmark columns, plus
     a JSON blob of all family sizes for less common lookups.
 
-    Alternative — local Excel file:
-    HUD also publishes Excel files at:
-        https://www.huduser.gov/portal/datasets/il.html
-    Download "Section8-FY{YY}.xlsx" and pass it via --file.
-
 Usage:
-    # Fetch from HUD API (recommended — no account required):
-    python etl/fetch_hud_ami.py
-    python etl/fetch_hud_ami.py --year 2024
-    python etl/fetch_hud_ami.py --states CA TX NY
-
-    # Load from a locally downloaded Excel file:
+    # Load from a locally downloaded HUD Excel file (recommended):
+    # Download from https://www.huduser.gov/portal/datasets/il.html
     python etl/fetch_hud_ami.py --file data/raw/Section8-FY25.xlsx
     python etl/fetch_hud_ami.py --file data/raw/Section8-FY25.xlsx --columns-only
+
+    # Fetch from HUD API (requires free token from huduser.gov/hudapi/public/home):
+    python etl/fetch_hud_ami.py --api-key YOUR_HUD_TOKEN
+    python etl/fetch_hud_ami.py --api-key YOUR_HUD_TOKEN --year 2024
+    python etl/fetch_hud_ami.py --api-key YOUR_HUD_TOKEN --states CA TX NY
+    # Or set HUD_API_KEY env var and omit --api-key
 
 Notes on AMI thresholds:
     30% AMI  = Extremely Low Income (ELI) — deepest subsidy housing
@@ -68,16 +74,18 @@ ALL_STATES = [
 # HUD API fetch
 # ---------------------------------------------------------------------------
 
-def fetch_ami_for_state(state: str, year: int) -> list[dict]:
+def fetch_ami_for_state(state: str, year: int, api_key: str = None) -> list[dict]:
     """
     Fetch AMI limits for all HUD areas in a state via the HUD API.
     Returns a list of row dicts ready for upsert into hud_ami.
 
     The HUD API endpoint: GET /il/data?stateId={STATE}&year={YEAR}
+    Requires a Bearer token from https://www.huduser.gov/hudapi/public/home
     Response: list of area objects, each with il30, il50, il80 for family sizes 1-8.
     """
     params = {"stateId": state, "year": str(year)}
-    resp = requests.get(f"{HUD_API_BASE}/data", params=params, timeout=30)
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    resp = requests.get(f"{HUD_API_BASE}/data", params=params, headers=headers, timeout=30)
 
     if resp.status_code == 404:
         return []  # State or year not available
@@ -274,7 +282,17 @@ def main():
         action="store_true",
         help="Print column names from the Excel file and exit (use with --file).",
     )
+    parser.add_argument(
+        "--api-key",
+        default=None,
+        help="HUD USER API Bearer token. Register free at "
+             "https://www.huduser.gov/hudapi/public/home. "
+             "Can also be set via HUD_API_KEY env var.",
+    )
     args = parser.parse_args()
+
+    # Resolve API key from arg or env var
+    api_key = args.api_key or os.environ.get("HUD_API_KEY")
 
     print("CD Command Center — HUD AMI Load")
     print(f"  Fiscal year: {args.year}")
@@ -305,6 +323,16 @@ def main():
 
         else:
             # --- API mode ---
+            if not api_key:
+                print(
+                    "Error: HUD API requires a free token. Register at:\n"
+                    "  https://www.huduser.gov/hudapi/public/home\n"
+                    "Then pass --api-key YOUR_TOKEN or set HUD_API_KEY env var.\n"
+                    "\nAlternatively, download the Excel file and use --file:\n"
+                    "  https://www.huduser.gov/portal/datasets/il.html"
+                )
+                sys.exit(1)
+
             states = args.states if args.states else ALL_STATES
             print(f"  States: {', '.join(states)}")
             print()
@@ -312,7 +340,7 @@ def main():
             for state in states:
                 print(f"  {state}...", end=" ", flush=True)
                 try:
-                    rows = fetch_ami_for_state(state, args.year)
+                    rows = fetch_ami_for_state(state, args.year, api_key=api_key)
                 except requests.RequestException as e:
                     print(f"Error: {e}")
                     continue
