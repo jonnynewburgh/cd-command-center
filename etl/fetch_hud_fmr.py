@@ -66,16 +66,17 @@ ALL_STATES = [
 
 def fetch_fmr_for_state(state: str, year: int, api_key: str = None) -> list[dict]:
     """
-    Fetch FMRs for all counties/areas in a state via the HUD API.
+    Fetch FMRs for all metro areas and counties in a state via the HUD USER API.
     Returns a list of row dicts ready for upsert into hud_fmr.
 
-    HUD API: GET /fmr/data/{state}?year={year}
+    HUD API: GET /fmr/statedata/{state}?year={year}
     Requires a Bearer token from https://www.huduser.gov/hudapi/public/home
-    Response: list of area objects with Efficiency, One-Bedroom, ..., Four-Bedroom fields.
+    Response: {"data": {"metroareas": [...], "counties": [...]}}
+    Each area has: metro_name/county_name, code, Efficiency, One-Bedroom, ..., Four-Bedroom
     """
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     resp = requests.get(
-        f"{HUD_API_BASE}/data/{state}",
+        f"{HUD_API_BASE}/statedata/{state}",
         params={"year": str(year)},
         headers=headers,
         timeout=30,
@@ -86,20 +87,15 @@ def fetch_fmr_for_state(state: str, year: int, api_key: str = None) -> list[dict
     resp.raise_for_status()
 
     payload = resp.json()
-    # HUD response structure: {"data": {"metroareas": [...], "counties": [...]}}
-    # or a flat list — handle both
-    if isinstance(payload, list):
-        areas = payload
-    else:
-        data = payload.get("data", payload)
-        metro_areas = data.get("metroareas", [])
-        counties    = data.get("counties", [])
-        areas = metro_areas + counties
+    data = payload.get("data", {})
+    metro_areas = data.get("metroareas", [])
+    counties    = data.get("counties", [])
+    areas = metro_areas + counties
 
     rows = []
     for area in areas:
-        fips      = area.get("fips_code") or area.get("fipsCode") or area.get("areaId", "")
-        area_name = area.get("area_name") or area.get("areaName") or area.get("name", "")
+        fips      = area.get("fips_code") or area.get("fipsCode") or area.get("code", "")
+        area_name = area.get("metro_name") or area.get("county_name") or area.get("area_name") or area.get("name", "")
         county    = area.get("county_name") or area.get("countyName") or ""
 
         def get_fmr(key_variants):

@@ -76,78 +76,66 @@ ALL_STATES = [
 
 def fetch_ami_for_state(state: str, year: int, api_key: str = None) -> list[dict]:
     """
-    Fetch AMI limits for all HUD areas in a state via the HUD API.
+    Fetch AMI limits for a state via the HUD USER API.
     Returns a list of row dicts ready for upsert into hud_ami.
 
-    The HUD API endpoint: GET /il/data?stateId={STATE}&year={YEAR}
+    Endpoint: GET /il/statedata/{state}?year={YEAR}
     Requires a Bearer token from https://www.huduser.gov/hudapi/public/home
-    Response: list of area objects, each with il30, il50, il80 for family sizes 1-8.
+    Response: {"data": {"median_income": N, "very_low": {...}, "extremely_low": {...}, "low": {...}}}
     """
-    params = {"stateId": state, "year": str(year)}
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    resp = requests.get(f"{HUD_API_BASE}/data", params=params, headers=headers, timeout=30)
+    resp = requests.get(
+        f"{HUD_API_BASE}/statedata/{state}",
+        params={"year": str(year)},
+        headers=headers,
+        timeout=30,
+    )
 
     if resp.status_code == 404:
-        return []  # State or year not available
+        return []
     resp.raise_for_status()
 
-    data = resp.json()
-    areas = data if isinstance(data, list) else data.get("data", [])
+    payload = resp.json()
+    data = payload.get("data", {})
 
-    rows = []
-    for area in areas:
-        # HUD returns limits for all family sizes. We pull family size 4 (index 3, 0-based)
-        # as the standard benchmark, and store all sizes as JSON.
-        il30 = area.get("il30", {})
-        il50 = area.get("il50", {})
-        il80 = area.get("il80", {})
+    # The statedata endpoint returns one aggregate record per state (not per county).
+    # Extract family-size-4 benchmarks from each income tier.
+    il30 = data.get("extremely_low", {})
+    il50 = data.get("very_low", {})
+    il80 = data.get("low", {})
 
-        # Family size 4 benchmark (keys are "p1" through "p8" in the HUD response)
-        limit_30 = _get_family4(il30)
-        limit_50 = _get_family4(il50)
-        limit_80 = _get_family4(il80)
+    median_income = data.get("median_income")
+    limit_30 = il30.get("il30_p4")
+    limit_50 = il50.get("il50_p4")
+    limit_80 = il80.get("il80_p4")
+    if median_income is None and limit_80:
+        median_income = round(limit_80 / 0.80)
+    limit_120 = round(median_income * 1.20) if median_income else None
 
-        # Median income: HUD publishes it directly in some endpoints; otherwise back-calculate
-        # from 80% limit (80% limit = 80% of median, so median = limit_80 / 0.8)
-        median_raw = area.get("median_income") or area.get("medianIncome")
-        if median_raw:
-            median_income = float(median_raw)
-        elif limit_80:
-            median_income = round(limit_80 / 0.80)
-        else:
-            median_income = None
+    limits_by_size = {}
+    for i in range(1, 9):
+        limits_by_size[str(i)] = {
+            "30": il30.get(f"il30_p{i}"),
+            "50": il50.get(f"il50_p{i}"),
+            "80": il80.get(f"il80_p{i}"),
+        }
 
-        limit_120 = round(median_income * 1.20) if median_income else None
+    fips = str(data.get("stateID", "")).zfill(2)
+    areas = [{
+        "fiscal_year":   year,
+        "state":         state,
+        "fips":          fips,
+        "area_name":     f"{state} Statewide",
+        "county_name":   "",
+        "median_income": median_income,
+        "limit_30_pct":  limit_30,
+        "limit_50_pct":  limit_50,
+        "limit_80_pct":  limit_80,
+        "limit_120_pct": limit_120,
+        "limits_json":   __import__("json").dumps(limits_by_size),
+    }] if data else []
 
-        # Build the full family-size JSON for completeness
-        limits_by_size = {}
-        for i in range(1, 9):
-            key = f"p{i}"
-            limits_by_size[str(i)] = {
-                "30": il30.get(key),
-                "50": il50.get(key),
-                "80": il80.get(key),
-            }
-
-        fips = area.get("fips_code") or area.get("fipsCode") or area.get("areaId", "")
-        area_name = area.get("area_name") or area.get("areaName") or area.get("name", "")
-        county_name = area.get("county_name") or area.get("countyName") or ""
-
-        rows.append({
-            "fiscal_year": year,
-            "state": state,
-            "fips": str(fips),
-            "area_name": area_name,
-            "county_name": county_name,
-            "median_income": median_income,
-            "limit_30_pct": limit_30,
-            "limit_50_pct": limit_50,
-            "limit_80_pct": limit_80,
-            "limit_120_pct": limit_120,
-            "limits_json": json.dumps(limits_by_size),
-        })
-
-    return rows
+    return areas
 
 
 def _get_family4(limits_dict: dict):
