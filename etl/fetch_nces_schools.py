@@ -143,7 +143,7 @@ def fetch_state_demographics(year: int, fips: int, ncessch_set: set) -> dict:
 
     Returns:
         dict keyed by ncessch → {'pct_black': float|None, 'pct_hispanic': float|None,
-                                   'pct_white': float|None}
+                                   'pct_white': float|None, 'pct_asian': float|None}
     """
     results = []
     page = 1
@@ -198,12 +198,14 @@ def fetch_state_demographics(year: int, fips: int, ncessch_set: set) -> dict:
                 "pct_black":    _safe_pct(counts.get(2, 0), total),
                 "pct_hispanic": _safe_pct(counts.get(3, 0), total),
                 "pct_white":    _safe_pct(counts.get(1, 0), total),
+                "pct_asian":    _safe_pct(counts.get(4, 0), total),
             }
         else:
             demographics[ncessch] = {
                 "pct_black": None,
                 "pct_hispanic": None,
                 "pct_white": None,
+                "pct_asian": None,
             }
 
     return demographics
@@ -323,6 +325,7 @@ def map_record(api_row: dict, year: int, demographics: dict = None) -> dict:
         "pct_black":    (demographics or {}).get(api_row.get("ncessch"), {}).get("pct_black"),
         "pct_hispanic": (demographics or {}).get(api_row.get("ncessch"), {}).get("pct_hispanic"),
         "pct_white":    (demographics or {}).get(api_row.get("ncessch"), {}).get("pct_white"),
+        "pct_asian":    (demographics or {}).get(api_row.get("ncessch"), {}).get("pct_asian"),
         "school_status": decode_status(api_row.get("school_status")),
         "year_opened": None,
         "year_closed": None,
