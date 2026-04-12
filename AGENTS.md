@@ -26,7 +26,7 @@ This is NOT a reporting tool. It's a working tool for finding, evaluating, and c
 
 ```
 cd-command-center/
-├── CLAUDE.md              # This file
+├── AGENTS.md              # This file
 ├── README.md
 ├── requirements.txt
 ├── db.py                  # All database access functions (single point of change for DB migration)
@@ -90,8 +90,6 @@ The database (`cd_command_center.sqlite`) consolidates all data sources. Key tab
 - `bls_qcew` — BLS quarterly employment, wages, and establishments by county/industry
 - `cra_institutions` — FFIEC CRA institution registry (banks with CRA obligations)
 - `cra_assessment_areas` — bank CRA service territories (county/MSA coverage by institution)
-- `cra_sb_discl` — FFIEC CRA D2-1 per-bank small business disclosure (2004-2024; ~1M rows)
-- `cra_sb_aggr` — FFIEC CRA A2-1 all-bank aggregate small business lending by tract (2004-2024; ~560K rows)
 - `scsc_cpf` — SCSC Comprehensive Performance Framework scores for GA charter schools
 - `nmtc_coalition_projects` — NMTC Coalition transaction-level project database, matched to nmtc_projects
 
@@ -309,12 +307,6 @@ python etl/fetch_cra_data.py --year 2023 \
 # Auto-download CRA flat files from ffiec.gov:
 python etl/fetch_cra_data.py --year 2023 --auto
 python etl/fetch_cra_data.py --year 2023 --auto --states CA TX NY
-
-# Load FFIEC CRA small business lending data (D2-1 disclosure + A2-1 aggregate, 2004-2024)
-# Place downloaded flat files in data/raw/cra/ (zip-extracted; any folder depth works)
-python etl/load_cra_lending.py                         # all years, all states
-python etl/load_cra_lending.py --year 2023             # single year
-python etl/load_cra_lending.py --year 2023 --states GA TX NY  # filtered
 
 # Load SBA 7(a) and 504 loan data
 # Auto-download from data.sba.gov via CKAN API (300+ MB files):
