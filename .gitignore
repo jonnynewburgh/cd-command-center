@@ -8,9 +8,15 @@ __pycache__/
 .env
 .venv/
 venv/
+Lib/
+Scripts/
+pyvenv.cfg
 *.egg-info/
 .DS_Store
 *.log
+
+# Claude Code local config
+.claude/
 
 # Streamlit secrets — never commit real passwords/keys
 .streamlit/secrets.toml
