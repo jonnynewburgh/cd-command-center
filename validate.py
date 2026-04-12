@@ -45,6 +45,10 @@ def _scalar(sql, params=None):
 def ok(msg):
     print(f"  OK   {msg}")
 
+def info(msg):
+    """Informational note — not counted as an issue (used for known optional pipeline steps)."""
+    print(f"  INFO {msg}")
+
 def warn(msg):
     print(f"  WARN {msg}")
     issues.append(msg)
@@ -144,19 +148,91 @@ def check_census():
     n = check_row_count("census_tracts", min_rows=70000)  # ~74k tracts nationally
     if n == 0:
         return
+
+    # Core ACS variables — these are always populated by load_census_tracts.py
     check_null_rate("census_tracts", "total_population", max_pct=0.01)
     check_null_rate("census_tracts", "poverty_rate", max_pct=0.05)
     check_null_rate("census_tracts", "median_household_income", max_pct=0.05)
+    check_null_rate("census_tracts", "unemployment_rate", max_pct=0.05)
+    check_null_rate("census_tracts", "median_family_income", max_pct=0.05)
+
+    # Gap-analysis population fields — always fetched alongside core ACS variables
+    check_null_rate("census_tracts", "pop_under_5", max_pct=0.01)
+    check_null_rate("census_tracts", "pop_under_18", max_pct=0.01)
+
     # poverty_rate is stored as a percentage (e.g. 15.3 = 15.3%), not a decimal
     check_value_range("census_tracts", "poverty_rate", min_val=0.0, max_val=100.0)
+    check_value_range("census_tracts", "unemployment_rate", min_val=0.0, max_val=100.0)
     check_value_range("census_tracts", "median_household_income", min_val=0)
+    check_value_range("census_tracts", "median_family_income", min_val=0)
     check_value_range("census_tracts", "total_population", min_val=0)
+
+    # NMTC eligibility — tier must be set whenever eligibility flags are set
+    check_null_rate("census_tracts", "nmtc_eligibility_tier", max_pct=0.001)
+
+    # Consistency: is_nmtc_eligible and nmtc_eligibility_tier must agree
+    bad_eligible = _scalar("""
+        SELECT COUNT(*) FROM census_tracts
+        WHERE is_nmtc_eligible = 1
+          AND (nmtc_eligibility_tier IS NULL OR nmtc_eligibility_tier = 'Not Eligible')
+    """)
+    if bad_eligible:
+        warn(f"census_tracts: {bad_eligible:,} rows where is_nmtc_eligible=1 but tier is NULL/Not Eligible")
+    else:
+        ok("census_tracts: is_nmtc_eligible / nmtc_eligibility_tier are consistent")
+
+    bad_ineligible = _scalar("""
+        SELECT COUNT(*) FROM census_tracts
+        WHERE is_nmtc_eligible = 0
+          AND nmtc_eligibility_tier IN ('LIC', 'Severely Distressed', 'Deep Distress')
+    """)
+    if bad_ineligible:
+        warn(f"census_tracts: {bad_ineligible:,} rows where is_nmtc_eligible=0 but tier is LIC or better")
+    else:
+        ok("census_tracts: is_nmtc_eligible=0 rows have consistent tier (Not Eligible)")
+
     # Spot-check: at least some tracts should be NMTC-eligible
     eligible = _scalar("SELECT COUNT(*) FROM census_tracts WHERE is_nmtc_eligible = 1")
     if eligible and eligible > 0:
         ok(f"census_tracts: {eligible:,} NMTC-eligible tracts")
     else:
         warn("census_tracts: 0 NMTC-eligible tracts — eligibility flags may not be set")
+
+    # NMTC tier distribution sanity check (LIC-or-better should be 20–35% of all tracts)
+    total = _scalar("SELECT COUNT(*) FROM census_tracts")
+    lic_plus = _scalar("SELECT COUNT(*) FROM census_tracts WHERE nmtc_eligibility_tier != 'Not Eligible'")
+    if total and lic_plus is not None:
+        pct = lic_plus / total
+        if 0.15 < pct < 0.45:
+            ok(f"census_tracts: {lic_plus:,} tracts LIC-or-better ({pct:.0%} of total)")
+        else:
+            warn(f"census_tracts: {lic_plus:,} tracts LIC-or-better ({pct:.0%}) — expected 15–45%")
+
+    # census_tract_id must be exactly 11 digits
+    check_census_tract_format("census_tracts", col="census_tract_id")
+
+    # These columns are populated by the main ACS load (load_census_tracts.py)
+    check_null_rate("census_tracts", "pct_minority", max_pct=0.05)
+    check_value_range("census_tracts", "pct_minority", min_val=0.0, max_val=100.0)
+    check_null_rate("census_tracts", "county_name", max_pct=0.01)
+    check_null_rate("census_tracts", "pop_uninsured", max_pct=0.05)
+    check_value_range("census_tracts", "pop_uninsured", min_val=0)
+    check_null_rate("census_tracts", "pop_65_plus", max_pct=0.05)
+    check_value_range("census_tracts", "pop_65_plus", min_val=0)
+
+    # EJScreen columns: separate opt-in ETL step (load_ejscreen.py + manual file download)
+    ej_null = _scalar("SELECT COUNT(*) FROM census_tracts WHERE ej_index IS NULL")
+    if ej_null == n:
+        info("census_tracts.ej_index: not yet loaded — run etl/load_ejscreen.py with EPA CSV to populate EJScreen indicators")
+    else:
+        ok(f"census_tracts.ej_index: populated for {n - ej_null:,} tracts")
+
+    # Historical change columns: separate opt-in step (load_census_tracts.py --historical)
+    hist_null = _scalar("SELECT COUNT(*) FROM census_tracts WHERE poverty_rate_5yr_ago IS NULL")
+    if hist_null == n:
+        info("census_tracts.poverty_rate_5yr_ago: not yet loaded — run load_census_tracts.py --historical to populate 5-year trend columns")
+    else:
+        ok(f"census_tracts.poverty_rate_5yr_ago: populated for {n - hist_null:,} tracts")
 
 def check_schools():
     section("schools")
@@ -166,7 +242,14 @@ def check_schools():
     check_null_rate("schools", "nces_id", max_pct=0.0)
     check_null_rate("schools", "school_name", max_pct=0.0)
     check_null_rate("schools", "state", max_pct=0.01)
-    check_null_rate("schools", "census_tract_id", max_pct=0.15)  # geocoding isn't perfect
+    # census_tract_id is assigned by assign_census_tracts.py — not run for all states yet
+    ct_null = _scalar("SELECT COUNT(*) FROM schools WHERE census_tract_id IS NULL")
+    ct_total = _scalar("SELECT COUNT(*) FROM schools")
+    ct_pct = ct_null / ct_total if ct_total else 0
+    if ct_pct > 0.20:
+        info(f"schools.census_tract_id: {ct_pct:.0%} null ({ct_null:,}/{ct_total:,} rows) — run assign_census_tracts.py to populate")
+    else:
+        check_null_rate("schools", "census_tract_id", max_pct=0.15)
     check_geo("schools")
     check_census_tract_format("schools")
     check_value_range("schools", "enrollment", min_val=0)

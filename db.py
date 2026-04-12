@@ -47,10 +47,32 @@ def get_connection():
 
 
 def _adapt_sql(sql: str) -> str:
-    """Convert SQLite-style ? placeholders to %s for PostgreSQL."""
+    """Convert SQLite-style SQL to PostgreSQL-compatible SQL."""
     if _IS_POSTGRES:
-        return sql.replace("?", "%s")
+        sql = sql.replace("?", "%s")
+        sql = sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
     return sql
+
+
+def _try_exec(cur, sql: str):
+    """Execute a statement that might fail (e.g. ADD COLUMN on an existing table).
+
+    PostgreSQL aborts the entire transaction when any statement fails, so we use
+    SAVEPOINTs to isolate the failure. SQLite just uses try/except.
+    """
+    sql = _adapt_sql(sql)
+    if _IS_POSTGRES:
+        cur.execute("SAVEPOINT _safe")
+        try:
+            cur.execute(sql)
+            cur.execute("RELEASE SAVEPOINT _safe")
+        except Exception:
+            cur.execute("ROLLBACK TO SAVEPOINT _safe")
+    else:
+        try:
+            cur.execute(sql)
+        except Exception:
+            pass
 
 
 def init_db():
@@ -59,13 +81,27 @@ def init_db():
     Call this once at app startup or from ETL scripts.
     """
     conn = get_connection()
-    cur = conn.cursor()
+    _raw_cur = conn.cursor()
+
+    # Wrap the cursor so every cur.execute() call in this function automatically
+    # adapts SQL for the active backend (e.g. AUTOINCREMENT → SERIAL for PostgreSQL).
+    class _Cur:
+        def execute(self, sql, params=None):
+            sql = _adapt_sql(sql)
+            return _raw_cur.execute(sql, params) if params is not None else _raw_cur.execute(sql)
+        def fetchone(self):
+            return _raw_cur.fetchone()
+        def fetchall(self):
+            return _raw_cur.fetchall()
+
+    cur = _Cur()
 
     # Schools — one row per school site (all public schools, not just charters)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS schools (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             nces_id TEXT UNIQUE,           -- National Center for Ed Stats school ID
+            seasch TEXT,                   -- State-assigned school ID (used for state-level joins)
             school_name TEXT NOT NULL,
             lea_name TEXT,                 -- Local education agency (district) name
             lea_id TEXT,                   -- LEA NCES ID (joins to lea_accountability)
@@ -102,41 +138,47 @@ def init_db():
         )
     """)
 
-    # Migrate from old charter_schools table if it exists
-    try:
-        cur.execute("SELECT COUNT(*) FROM charter_schools")
-        old_count = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM schools")
-        new_count = cur.fetchone()[0]
-        if old_count > 0 and new_count == 0:
-            # Copy data from old table, setting is_charter=1 since old table was charter-only
-            cur.execute("""
-                INSERT INTO schools (
-                    nces_id, school_name, lea_name, lea_id, state, city, address,
-                    zip_code, county, census_tract_id, latitude, longitude, enrollment,
-                    grade_low, grade_high, is_charter,
-                    pct_free_reduced_lunch, pct_ell, pct_sped, pct_black, pct_hispanic, pct_white,
-                    school_status, year_opened, year_closed,
-                    survival_score, survival_risk_tier, data_year, created_at, updated_at
-                )
-                SELECT
-                    nces_id, school_name, lea_name, lea_id, state, city, address,
-                    zip_code, county, census_tract_id, latitude, longitude, enrollment,
-                    grade_low, grade_high, 1,
-                    pct_free_reduced_lunch, pct_ell, pct_sped, pct_black, pct_hispanic, pct_white,
-                    school_status, year_opened, year_closed,
-                    survival_score, survival_risk_tier, data_year, created_at, updated_at
-                FROM charter_schools
-            """)
-            print(f"  Migrated {old_count:,} records from charter_schools → schools table")
-    except Exception:
-        pass  # charter_schools doesn't exist, that's fine
+    # Migrate from old charter_schools table if it exists (SQLite only)
+    if not _IS_POSTGRES:
+        try:
+            cur.execute("SELECT COUNT(*) FROM charter_schools")
+            old_count = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM schools")
+            new_count = cur.fetchone()[0]
+            if old_count > 0 and new_count == 0:
+                # Copy data from old table, setting is_charter=1 since old table was charter-only
+                cur.execute("""
+                    INSERT INTO schools (
+                        nces_id, school_name, lea_name, lea_id, state, city, address,
+                        zip_code, county, census_tract_id, latitude, longitude, enrollment,
+                        grade_low, grade_high, is_charter,
+                        pct_free_reduced_lunch, pct_ell, pct_sped, pct_black, pct_hispanic, pct_white,
+                        school_status, year_opened, year_closed,
+                        survival_score, survival_risk_tier, data_year, created_at, updated_at
+                    )
+                    SELECT
+                        nces_id, school_name, lea_name, lea_id, state, city, address,
+                        zip_code, county, census_tract_id, latitude, longitude, enrollment,
+                        grade_low, grade_high, 1,
+                        pct_free_reduced_lunch, pct_ell, pct_sped, pct_black, pct_hispanic, pct_white,
+                        school_status, year_opened, year_closed,
+                        survival_score, survival_risk_tier, data_year, created_at, updated_at
+                    FROM charter_schools
+                """)
+                print(f"  Migrated {old_count:,} records from charter_schools → schools table")
+        except Exception:
+            pass  # charter_schools doesn't exist, that's fine
 
     # Add is_charter column to schools table if it was created without it
-    try:
-        cur.execute("ALTER TABLE schools ADD COLUMN is_charter INTEGER DEFAULT 0")
-    except Exception:
-        pass
+    _try_exec(cur, "ALTER TABLE schools ADD COLUMN is_charter INTEGER DEFAULT 0")
+
+    # Add demographic columns added in later ETL runs
+    for _col, _type in [
+        ("pct_asian",      "REAL"),
+        ("pct_multiracial","REAL"),
+        ("seasch",         "TEXT"),
+    ]:
+        _try_exec(cur, f"ALTER TABLE schools ADD COLUMN {_col} {_type}")
 
     # LEA (district) accountability scores
     cur.execute("""
@@ -183,14 +225,8 @@ def init_db():
     """)
 
     # Add columns to existing census_tracts tables that predate these
-    try:
-        cur.execute("ALTER TABLE census_tracts ADD COLUMN median_family_income REAL")
-    except Exception:
-        pass
-    try:
-        cur.execute("ALTER TABLE census_tracts ADD COLUMN nmtc_eligibility_tier TEXT")
-    except Exception:
-        pass
+    _try_exec(cur, "ALTER TABLE census_tracts ADD COLUMN median_family_income REAL")
+    _try_exec(cur, "ALTER TABLE census_tracts ADD COLUMN nmtc_eligibility_tier TEXT")
 
     # Phase A-B: new census_tract columns for OZ, EJScreen, trend analysis, and gap analysis
     new_census_cols = [
@@ -211,10 +247,7 @@ def init_db():
         ("pop_65_plus", "INTEGER"),                    # ACS: population 65+ (elder care)
     ]
     for col, col_type in new_census_cols:
-        try:
-            cur.execute(f"ALTER TABLE census_tracts ADD COLUMN {col} {col_type}")
-        except Exception:
-            pass  # column already exists
+        _try_exec(cur, f"ALTER TABLE census_tracts ADD COLUMN {col} {col_type}")
 
     # NMTC projects — project-level QALICB investments from CDFI Fund public data release
     cur.execute("""
@@ -448,13 +481,8 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_programs_state ON state_programs(state)")
 
     # Add ein column to schools and fqhc tables if it doesn't exist yet.
-    # ALTER TABLE only runs on existing DBs — new DBs get the column from init.
-    # We use try/except because SQLite has no "ADD COLUMN IF NOT EXISTS".
     for table, col in [("schools", "ein"), ("fqhc", "ein"), ("cde_allocations", "ein")]:
-        try:
-            cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
-        except Exception:
-            pass  # column already exists
+        _try_exec(cur, f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
 
     # Add extra financial columns to irs_990 and irs_990_history for ratio calculations.
     # These map to Part X of the 990 form: balance sheet items.
@@ -468,10 +496,7 @@ def init_db():
     ]
     for col, col_type in extra_990_cols:
         for tbl in ("irs_990", "irs_990_history"):
-            try:
-                cur.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {col_type}")
-            except Exception:
-                pass
+            _try_exec(cur, f"ALTER TABLE {tbl} ADD COLUMN {col} {col_type}")
 
     # Enrollment history — NCES historical enrollment per school, one row per year
     cur.execute("""
@@ -707,6 +732,76 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_cra_area_state ON cra_assessment_areas(state)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_cra_area_inst  ON cra_assessment_areas(respondent_id)")
 
+    # CRA small business disclosure — D2-1 flat file.
+    # Per-bank, per-census-tract small business lending. The key table for identifying
+    # which banks are actively lending (vs. just having assessment area obligations)
+    # in a specific geography. One row per bank × tract × row_code × year.
+    #
+    # Row codes: 101=total SB loans, 102=to biz w/ rev≤$1M, 103=loans≤$100K,
+    #            104=loans $100K-$250K, 105=loans $250K-$1M, 106=small farm
+    # Amounts are in $thousands. loan_type: S=small biz, L=community dev.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS cra_sb_discl (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            respondent_id TEXT NOT NULL,
+            agency_code TEXT NOT NULL,
+            year INTEGER NOT NULL,
+            state_fips TEXT NOT NULL,
+            county_fips TEXT NOT NULL,
+            msa_code TEXT NOT NULL,
+            census_tract TEXT NOT NULL,   -- 4-char FFIEC code (e.g. '0301')
+            census_tract_id TEXT,         -- 11-digit GEOID (state+county+tract+'00')
+            row_code TEXT NOT NULL,       -- '101'-'106'
+            loan_type TEXT,               -- 'S' or 'L'
+            n_total INTEGER,              -- f1: total loan count
+            amt_total INTEGER,            -- f2: total amount ($K)
+            n_small_biz INTEGER,          -- f3: to businesses with revenues ≤$1M
+            amt_small_biz INTEGER,        -- f4: to small biz ($K)
+            n_orig INTEGER,               -- f5
+            amt_orig INTEGER,             -- f6
+            n_orig_sb INTEGER,            -- f7
+            amt_orig_sb INTEGER,          -- f8
+            n_purch INTEGER,              -- f9
+            amt_purch INTEGER,            -- f10
+            UNIQUE(respondent_id, agency_code, year, state_fips, county_fips,
+                   msa_code, census_tract, row_code, loan_type)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_cra_sbd_tract  ON cra_sb_discl(census_tract_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_cra_sbd_state  ON cra_sb_discl(state_fips, county_fips)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_cra_sbd_inst   ON cra_sb_discl(respondent_id, year)")
+
+    # CRA small business aggregate — A2-1 flat file.
+    # All-bank totals by census tract. Shows how much small business lending
+    # happened in a tract (regardless of which bank), useful for identifying
+    # credit deserts and high-activity markets.
+    #
+    # census_tract is 7-char FFIEC format with decimal (e.g. '0301.01').
+    # Amounts are in $thousands.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS cra_sb_aggr (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            year INTEGER NOT NULL,
+            state_fips TEXT NOT NULL,
+            county_fips TEXT NOT NULL,
+            msa_code TEXT NOT NULL,
+            census_tract TEXT NOT NULL,   -- 7-char FFIEC format (e.g. '0301.01')
+            census_tract_id TEXT,         -- 11-digit GEOID
+            row_code TEXT NOT NULL,       -- '101'-'106'
+            n_orig INTEGER,               -- f1: originations count
+            amt_orig INTEGER,             -- f2: originations amount ($K)
+            n_orig_sb INTEGER,            -- f3: originations to biz w/ rev ≤$1M
+            amt_orig_sb INTEGER,          -- f4: amount to small biz ($K)
+            n_prev INTEGER,               -- f5: prior year originations count
+            amt_prev INTEGER,             -- f6: prior year amount ($K)
+            n_prev_sb INTEGER,            -- f7: prior year small biz count
+            amt_prev_sb INTEGER,          -- f8: prior year small biz amount ($K)
+            UNIQUE(year, state_fips, county_fips, msa_code, census_tract, row_code)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_cra_sba_tract  ON cra_sb_aggr(census_tract_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_cra_sba_state  ON cra_sb_aggr(state_fips, county_fips)")
+
     # SBA loans — approved 7(a) and 504 loans by borrower geography.
     # Shows existing small-business lending activity; useful for identifying credit deserts
     # and understanding prior SBA penetration in a target market.
@@ -822,6 +917,295 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_qcew_state   ON bls_qcew(state)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_qcew_year    ON bls_qcew(year)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_qcew_naics   ON bls_qcew(industry_code)")
+
+    # SCSC Comprehensive Performance Framework — GA charter school evaluations.
+    # School-level CPF scores from the State Charter Schools Commission of Georgia.
+    # Loaded from the charters repo (cpf_all_years.csv).
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS scsc_cpf (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nces_id TEXT,                      -- joined from schools table (may be NULL if no match)
+            school_name TEXT NOT NULL,
+            school_year TEXT NOT NULL,         -- e.g. '2023-24'
+            academic_designation TEXT,         -- 'Exceeds', 'Meets', 'Approaches', 'Does Not Meet'
+            financial_designation TEXT,        -- same scale
+            financial_indicator_1 REAL,        -- fin_ind1 score
+            financial_indicator_2 REAL,        -- fin_ind2 score
+            operations_score REAL,
+            operations_designation TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(school_name, school_year)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_scsc_nces ON scsc_cpf(nces_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_scsc_year ON scsc_cpf(school_year)")
+
+    # NMTC Coalition transaction-level project database.
+    # More detailed than CDFI Fund public data: includes project address, total costs, jobs.
+    # Matched to nmtc_projects via coalition_id FK (stored on nmtc_projects).
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS nmtc_coalition_projects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            coalition_project_id TEXT UNIQUE,  -- Coalition's own project identifier (if any)
+            cdfi_project_id TEXT,              -- CDFI Fund project ID (when known)
+            project_name TEXT,
+            cde_name TEXT,
+            address TEXT,
+            city TEXT,
+            state TEXT,
+            zip_code TEXT,
+            census_tract_id TEXT,
+            -- Financials
+            total_project_costs REAL,
+            nmtc_allocation_used REAL,         -- QLICI equivalent from Coalition data
+            -- Impact
+            jobs_created INTEGER,
+            jobs_retained INTEGER,
+            -- Classification
+            project_type TEXT,                 -- 'Real Estate', 'Operating Business', etc.
+            investment_year INTEGER,
+            -- Match metadata
+            nmtc_project_id INTEGER,           -- FK to nmtc_projects.id when matched
+            match_confidence REAL,             -- 0.0–1.0 fuzzy match score
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_coalition_state ON nmtc_coalition_projects(state)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_coalition_cde   ON nmtc_coalition_projects(cde_name)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_coalition_tract ON nmtc_coalition_projects(census_tract_id)")
+
+    # Add coalition_id column to nmtc_projects if not already present (idempotent migration)
+    _try_exec(cur, "ALTER TABLE nmtc_projects ADD COLUMN coalition_id INTEGER")
+
+    # ------------------------------------------------------------------
+    # Federal Audit Clearinghouse (FAC / Single Audit) — horizontal source
+    # Layered across schools, fqhc, cdfi_directory, ece_centers, etc. via EIN.
+    # Source: api.fac.gov (GSA, since Oct 2023). Federal public-domain data.
+    # See etl/fetch_fac.py.
+    # ------------------------------------------------------------------
+
+    # federal_audits — one row per Single Audit submission
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS federal_audits (
+            report_id TEXT PRIMARY KEY,        -- e.g., '2024-02-GSAFAC-0000045331'
+
+            -- Auditee identity (the join keys to other tables)
+            auditee_ein TEXT,                  -- 9-digit; joins to irs_990, fqhc, schools
+            auditee_uei TEXT,                  -- SAM.gov UEI (newer federal identifier)
+            auditee_name TEXT NOT NULL,
+            entity_type TEXT,                  -- 'non-profit', 'state', 'local', 'tribal', 'higher-ed'
+            is_multiple_eins BOOLEAN,          -- True → use /additional_eins to find others
+
+            -- Auditee location
+            auditee_address_line_1 TEXT,
+            auditee_city TEXT,
+            auditee_state TEXT,
+            auditee_zip TEXT,
+
+            -- Auditee contact (deal-origination outreach data — KEEP)
+            auditee_contact_name TEXT,
+            auditee_contact_title TEXT,
+            auditee_email TEXT,
+            auditee_phone TEXT,
+            auditee_certify_name TEXT,         -- whoever signed off (often CFO/ED)
+            auditee_certify_title TEXT,
+            auditee_certified_date DATE,
+
+            -- Audit period
+            audit_year INTEGER,
+            fy_start_date DATE,
+            fy_end_date DATE,
+            audit_period_covered TEXT,         -- 'annual', 'biennial', etc.
+            audit_type TEXT,                   -- 'single-audit', 'program-specific'
+
+            -- Financial scale
+            total_amount_expended BIGINT,      -- total federal $ expended in audit period (BIGINT: state govs can exceed $2.1B INT cap)
+            dollar_threshold INTEGER,          -- 750000 (pre-FY25) or 1000000
+
+            -- Audit opinion + findings (normalized from 'Yes'/'No' strings to booleans)
+            gaap_results TEXT,                 -- 'unmodified_opinion', 'qualified_opinion', etc.
+            is_going_concern BOOLEAN,
+            is_material_weakness BOOLEAN,
+            is_significant_deficiency BOOLEAN,
+            is_material_noncompliance BOOLEAN,
+            is_low_risk_auditee BOOLEAN,
+            agencies_with_prior_findings TEXT, -- comma-separated agency codes (recurrence signal)
+
+            -- Federal oversight
+            cognizant_agency TEXT,
+            oversight_agency TEXT,
+
+            -- Auditor (the firm doing the audit)
+            auditor_firm_name TEXT,
+            auditor_ein TEXT,
+            auditor_state TEXT,
+            auditor_city TEXT,
+            auditor_zip TEXT,
+            auditor_address_line_1 TEXT,
+            auditor_country TEXT,
+            auditor_contact_name TEXT,
+            auditor_contact_title TEXT,
+            auditor_email TEXT,
+            auditor_phone TEXT,
+            auditor_certify_name TEXT,
+            auditor_certify_title TEXT,
+            auditor_certified_date DATE,
+
+            -- Submission timestamps
+            submitted_date DATE,
+            fac_accepted_date DATE,
+            resubmission_version INTEGER,      -- detect updated audits
+
+            -- Provenance
+            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_federal_audits_ein        ON federal_audits(auditee_ein)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_federal_audits_uei        ON federal_audits(auditee_uei)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_federal_audits_state_year ON federal_audits(auditee_state, audit_year)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_federal_audits_entity     ON federal_audits(entity_type)")
+
+    # federal_audit_programs — one row per ALN per audit (line items from /federal_awards)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS federal_audit_programs (
+            report_id TEXT NOT NULL,           -- FK to federal_audits.report_id
+            award_reference TEXT NOT NULL,     -- e.g., 'AWARD-0001'
+
+            -- ALN (constructed at load time from prefix + extension)
+            aln TEXT NOT NULL,                 -- e.g., '14.126'
+            federal_agency_prefix TEXT,        -- '14'
+            federal_award_extension TEXT,      -- '126'
+            federal_program_name TEXT,
+
+            -- Money (BIGINT for all $ fields — federal program totals can exceed $2.1B INT cap)
+            amount_expended BIGINT,
+            federal_program_total BIGINT,
+
+            -- Type flags
+            is_loan BOOLEAN,
+            loan_balance BIGINT,
+            is_direct BOOLEAN,                 -- direct from feds vs. passthrough
+            is_passthrough_award BOOLEAN,
+            passthrough_amount BIGINT,
+            is_major BOOLEAN,                  -- audited as a major program
+
+            -- Cluster grouping
+            cluster_name TEXT,
+            other_cluster_name TEXT,
+            state_cluster_name TEXT,
+            cluster_total BIGINT,
+
+            -- Findings on this specific program
+            findings_count INTEGER,
+            audit_report_type TEXT,            -- 'U'/'Q'/'A'/'D' (unmodified/qualified/adverse/disclaimer)
+
+            PRIMARY KEY (report_id, award_reference)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_fap_aln       ON federal_audit_programs(aln)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_fap_report_id ON federal_audit_programs(report_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_fap_agency    ON federal_audit_programs(federal_agency_prefix)")
+
+    # ------------------------------------------------------------------
+    # Head Start PIR (Program Information Report) — HSES export
+    # Program-level data on Head Start / Early Head Start programs.
+    # Source: https://hses.ohs.acf.hhs.gov (requires account + DUA).
+    # See etl/load_headstart_pir.py.
+    # ------------------------------------------------------------------
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS headstart_programs (
+            grant_number TEXT NOT NULL,
+            program_number TEXT NOT NULL,
+            pir_year INTEGER NOT NULL,
+
+            -- Program identity
+            region TEXT,
+            state TEXT,
+            program_type TEXT,              -- 'HS', 'EHS', 'Migrant', 'AIAN'
+            grantee_name TEXT,
+            program_name TEXT,
+            agency_type TEXT,               -- 'Community Action Agency (CAA)', 'School System', etc.
+            agency_description TEXT,
+
+            -- Location
+            address TEXT,
+            city TEXT,
+            zip_code TEXT,
+            phone TEXT,
+            email TEXT,
+
+            -- Geocoding (populated later)
+            latitude REAL,
+            longitude REAL,
+            census_tract_id TEXT,
+
+            -- Section A: Enrollment & capacity (the deal-origination core)
+            funded_enrollment INTEGER,      -- A.1.a: ACF funded slots
+            non_acf_enrollment INTEGER,     -- A.1.b
+            total_cumulative_enrollment INTEGER,  -- A.12
+            total_slots_center_based INTEGER,     -- A.7
+            slots_at_child_care_partner INTEGER,  -- A.7.a
+            total_classes INTEGER,          -- A.9
+            home_based_slots INTEGER,       -- A.3
+            family_child_care_slots INTEGER, -- A.4
+
+            -- Age breakdown
+            children_lt1 INTEGER,           -- A.10.a
+            children_1yr INTEGER,           -- A.10.b
+            children_2yr INTEGER,           -- A.10.c
+            children_3yr INTEGER,           -- A.10.d
+            children_4yr INTEGER,           -- A.10.e
+            children_5plus INTEGER,         -- A.10.f
+            pregnant_women INTEGER,         -- A.11
+
+            -- Eligibility
+            eligible_income INTEGER,        -- A.13.a: at/below 100% FPL
+            eligible_public_assist INTEGER, -- A.13.b
+            eligible_foster INTEGER,        -- A.13.c
+            eligible_homeless INTEGER,      -- A.13.d
+
+            -- Turnover
+            children_left_program INTEGER,  -- A.16 (preschool) or A.18 (EHS)
+            children_end_of_year INTEGER,   -- A.17
+
+            -- Demographics
+            dual_language_learners INTEGER, -- A.27
+            children_transported INTEGER,   -- A.28
+            children_with_subsidy INTEGER,  -- A.24
+
+            -- Section B: Staffing
+            total_staff INTEGER,            -- B.1-1
+            total_contracted_staff INTEGER, -- B.1-2
+            classroom_teachers INTEGER,     -- B.3-1
+            assistant_teachers INTEGER,     -- B.3-2
+            teachers_ba_or_higher INTEGER,  -- B.3.a-1 + B.3.b-1
+            volunteers INTEGER,             -- B.2
+
+            -- Section C: Health (FQHC cross-ref signal)
+            children_with_insurance_start INTEGER,   -- C.1-1
+            children_with_insurance_end INTEGER,     -- C.1-2
+            children_medicaid_start INTEGER,          -- C.1.a-1
+            children_no_insurance_start INTEGER,      -- C.2-1
+            children_with_medical_home_start INTEGER, -- C.5-1
+            children_at_fqhc_start INTEGER,           -- C.5.a-1
+
+            -- Section D: Administration
+            child_care_partners INTEGER,    -- D.6
+            leas_in_service_area INTEGER,   -- D.7
+
+            -- Provenance
+            data_source TEXT DEFAULT 'HSES PIR Export',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+            PRIMARY KEY (grant_number, program_number, pir_year)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_hs_state      ON headstart_programs(state)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_hs_type       ON headstart_programs(program_type)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_hs_grantee    ON headstart_programs(grantee_name)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_hs_tract      ON headstart_programs(census_tract_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_hs_zip        ON headstart_programs(zip_code)")
 
     conn.commit()
     conn.close()
@@ -1838,16 +2222,41 @@ def upsert_lea_accountability(record: dict):
 
 
 def upsert_census_tract(record: dict):
-    """Insert or update a census tract record (keyed on census_tract_id)."""
+    """Insert or update a census tract record (keyed on census_tract_id).
+
+    Columns populated by separate ETL steps (EJScreen, pct_minority, county_name,
+    pop_uninsured, pop_65_plus, historical change columns) are preserved when the
+    incoming record has NULL for those fields — so re-running the main ACS load
+    does not wipe enrichment data written by other pipelines.
+    """
     conn = get_connection()
     cur = conn.cursor()
+
+    # These columns are populated by separate ETL steps (not load_census_tracts.py).
+    # On conflict, keep the existing non-null value rather than overwriting with NULL.
+    preserve_if_null = {
+        "pct_minority", "county_name",
+        "pop_uninsured", "pop_65_plus",
+        "ej_index", "pm25_percentile", "diesel_percentile",
+        "lead_paint_percentile", "superfund_percentile", "wastewater_percentile",
+        "poverty_rate_5yr_ago", "median_income_5yr_ago",
+        "poverty_rate_change", "income_change_pct",
+        "is_opportunity_zone",
+    }
 
     columns = list(record.keys())
     values = list(record.values())
     placeholders = ",".join("?" * len(values))
-    update_clause = ",".join(
-        f"{col}=excluded.{col}" for col in columns if col != "census_tract_id"
-    )
+    update_parts = []
+    for col in columns:
+        if col == "census_tract_id":
+            continue
+        if col in preserve_if_null:
+            # COALESCE: keep existing value if incoming is NULL
+            update_parts.append(f"{col}=COALESCE(excluded.{col}, {col})")
+        else:
+            update_parts.append(f"{col}=excluded.{col}")
+    update_clause = ",".join(update_parts)
 
     sql = f"""
         INSERT INTO census_tracts ({",".join(columns)})
@@ -3007,6 +3416,94 @@ def compute_and_store_ratios(ein: str):
 
 
 # ---------------------------------------------------------------------------
+# Market rates — FRED daily observations
+# ---------------------------------------------------------------------------
+
+def get_market_rates(
+    series_ids=None,
+    start_date: str = None,
+    end_date: str = None,
+    days: int = None,
+) -> pd.DataFrame:
+    """
+    Return market rate observations from the market_rates table.
+
+    Args:
+        series_ids: list of FRED series IDs to include (None = all series)
+        start_date: ISO date string 'YYYY-MM-DD' — inclusive lower bound
+        end_date: ISO date string 'YYYY-MM-DD' — inclusive upper bound
+        days: if provided, return the last N calendar days (overrides start_date)
+    """
+    conditions = []
+    params = []
+
+    if series_ids:
+        placeholders = ",".join("?" * len(series_ids))
+        conditions.append(f"series_id IN ({placeholders})")
+        params.extend(series_ids)
+
+    if days is not None:
+        # SQLite: date('now', '-N days'); PostgreSQL: CURRENT_DATE - INTERVAL 'N days'
+        if _IS_POSTGRES:
+            conditions.append("rate_date >= CURRENT_DATE - INTERVAL '%s days'")
+            params.append(days)
+        else:
+            conditions.append(f"rate_date >= date('now', '-{int(days)} days')")
+
+    else:
+        if start_date:
+            conditions.append("rate_date >= ?")
+            params.append(start_date)
+        if end_date:
+            conditions.append("rate_date <= ?")
+            params.append(end_date)
+
+    where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+    query = f"""
+        SELECT series_id, series_name, rate_date, rate_value
+        FROM market_rates
+        {where_clause}
+        ORDER BY series_id, rate_date DESC
+    """
+
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(_adapt_sql(query), conn, params=params)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+@_cached(ttl=300)
+def get_latest_rates() -> pd.DataFrame:
+    """
+    Return the single most recent observation for every rate series.
+    Used for the dashboard rate ticker / summary cards.
+    """
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(
+            """
+            SELECT m.series_id, m.series_name, m.rate_date, m.rate_value
+            FROM market_rates m
+            INNER JOIN (
+                SELECT series_id, MAX(rate_date) AS max_date
+                FROM market_rates
+                GROUP BY series_id
+            ) latest ON m.series_id = latest.series_id
+                    AND m.rate_date  = latest.max_date
+            ORDER BY m.series_id
+            """,
+            conn,
+        )
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+# ---------------------------------------------------------------------------
 # Org search — by name or EIN across 990 records
 # ---------------------------------------------------------------------------
 
@@ -3033,3 +3530,534 @@ def search_org(query_text: str) -> pd.DataFrame:
         df = pd.DataFrame()
     conn.close()
     return df
+
+
+# ---------------------------------------------------------------------------
+# HUD Area Median Income (AMI)
+# ---------------------------------------------------------------------------
+
+def get_hud_ami(fiscal_year=None, state=None, fips=None):
+    """
+    Return HUD Area Median Income records.
+
+    Args:
+        fiscal_year: HUD fiscal year (e.g. 2024)
+        state:       2-letter state abbreviation
+        fips:        HUD area FIPS code (county or metro)
+    """
+    conditions, params = [], []
+    if fiscal_year is not None:
+        conditions.append("fiscal_year = ?"); params.append(fiscal_year)
+    if state:
+        conditions.append("state = ?"); params.append(state.upper())
+    if fips:
+        conditions.append("fips = ?"); params.append(fips)
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    query = f"""
+        SELECT fiscal_year, state, fips, area_name, county_name,
+               median_income, limit_30_pct, limit_50_pct, limit_80_pct, limit_120_pct
+        FROM hud_ami {where}
+        ORDER BY state, area_name
+    """
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(_adapt_sql(query), conn, params=params)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+# ---------------------------------------------------------------------------
+# HUD Fair Market Rents (FMR)
+# ---------------------------------------------------------------------------
+
+def get_hud_fmr(fiscal_year=None, state=None, fips=None):
+    """
+    Return HUD Fair Market Rent records.
+
+    Args:
+        fiscal_year: HUD fiscal year (e.g. 2025)
+        state:       2-letter state abbreviation
+        fips:        HUD FMR area FIPS code
+    """
+    conditions, params = [], []
+    if fiscal_year is not None:
+        conditions.append("fiscal_year = ?"); params.append(fiscal_year)
+    if state:
+        conditions.append("state = ?"); params.append(state.upper())
+    if fips:
+        conditions.append("fips = ?"); params.append(fips)
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    query = f"""
+        SELECT fiscal_year, state, fips, area_name, county_name,
+               fmr_0br, fmr_1br, fmr_2br, fmr_3br, fmr_4br
+        FROM hud_fmr {where}
+        ORDER BY state, area_name
+    """
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(_adapt_sql(query), conn, params=params)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+# ---------------------------------------------------------------------------
+# CRA Institutions and Assessment Areas
+# ---------------------------------------------------------------------------
+
+def get_cra_institutions(state=None, report_year=None, asset_size=None, search=None, limit=None):
+    """
+    Return CRA institution records from the FFIEC exam register.
+
+    Args:
+        state:       2-letter state abbreviation
+        report_year: CRA exam report year
+        asset_size:  "Large", "Intermediate Small", or "Small"
+        search:      substring search on institution_name
+        limit:       max rows to return
+    """
+    conditions, params = [], []
+    if state:
+        conditions.append("state = ?"); params.append(state.upper())
+    if report_year is not None:
+        conditions.append("report_year = ?"); params.append(report_year)
+    if asset_size:
+        conditions.append("asset_size_indicator = ?"); params.append(asset_size)
+    if search:
+        conditions.append("institution_name LIKE ?"); params.append(f"%{search}%")
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    limit_clause = f"LIMIT {int(limit)}" if limit else ""
+    query = f"""
+        SELECT respondent_id, institution_name, city, state, zip_code,
+               asset_size_indicator, report_year
+        FROM cra_institutions {where}
+        ORDER BY state, institution_name {limit_clause}
+    """
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(_adapt_sql(query), conn, params=params)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+def get_cra_assessment_areas(state=None, report_year=None, respondent_id=None, county_fips=None):
+    """
+    Return CRA assessment areas — geographies each bank covers in its CRA plan.
+    Joined to cra_institutions for asset size context.
+
+    Args:
+        state:          2-letter state abbreviation
+        report_year:    CRA exam year
+        respondent_id:  FFIEC respondent ID to get all areas for one bank
+        county_fips:    5-digit county FIPS to find all banks serving that county
+    """
+    conditions, params = [], []
+    if state:
+        conditions.append("a.state = ?"); params.append(state.upper())
+    if report_year is not None:
+        conditions.append("a.report_year = ?"); params.append(report_year)
+    if respondent_id:
+        conditions.append("a.respondent_id = ?"); params.append(respondent_id)
+    if county_fips:
+        conditions.append("a.county_fips = ?"); params.append(county_fips)
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    query = f"""
+        SELECT a.respondent_id, a.institution_name, a.report_year,
+               a.state, a.assessment_area_name, a.area_type,
+               a.county_fips, a.msa_code,
+               i.asset_size_indicator, i.city AS inst_city
+        FROM cra_assessment_areas a
+        LEFT JOIN cra_institutions i
+               ON a.respondent_id = i.respondent_id
+              AND a.report_year    = i.report_year
+        {where}
+        ORDER BY a.state, a.institution_name
+    """
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(_adapt_sql(query), conn, params=params)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+# ---------------------------------------------------------------------------
+# SBA Loans
+# ---------------------------------------------------------------------------
+
+def get_sba_loans(state=None, year=None, program=None, census_tract_id=None,
+                  zip_code=None, naics_code=None, limit=500):
+    """
+    Return SBA 7(a) and 504 loan records.
+
+    Args:
+        state:           borrower state (2-letter)
+        year:            approval year
+        program:         "7a" or "504"
+        census_tract_id: 11-digit FIPS
+        zip_code:        5-digit borrower ZIP
+        naics_code:      NAICS code prefix (e.g. "72" matches all hospitality)
+        limit:           max rows (default 500)
+    """
+    conditions, params = [], []
+    if state:
+        conditions.append("borrower_state = ?"); params.append(state.upper())
+    if year is not None:
+        conditions.append("approval_year = ?"); params.append(year)
+    if program:
+        conditions.append("program = ?"); params.append(program.lower())
+    if census_tract_id:
+        conditions.append("census_tract_id = ?"); params.append(census_tract_id)
+    if zip_code:
+        conditions.append("borrower_zip = ?"); params.append(zip_code)
+    if naics_code:
+        conditions.append("naics_code LIKE ?"); params.append(f"{naics_code}%")
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    limit_clause = f"LIMIT {int(limit)}" if limit else ""
+    query = f"""
+        SELECT loan_number, program, borrower_name, borrower_city,
+               borrower_state, borrower_zip, borrower_county,
+               census_tract_id, naics_code, business_type,
+               approval_date, approval_year,
+               gross_approval, sba_guaranteed_portion,
+               lender_name, lender_state, jobs_supported
+        FROM sba_loans {where}
+        ORDER BY approval_date DESC {limit_clause}
+    """
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(_adapt_sql(query), conn, params=params)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+def get_sba_summary(state=None, year=None):
+    """Return aggregate SBA stats: count, total amount, jobs supported."""
+    conditions, params = [], []
+    if state:
+        conditions.append("borrower_state = ?"); params.append(state.upper())
+    if year is not None:
+        conditions.append("approval_year = ?"); params.append(year)
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    query = f"""
+        SELECT COUNT(*) AS total_loans, SUM(gross_approval) AS total_amount,
+               SUM(jobs_supported) AS total_jobs,
+               COUNT(DISTINCT borrower_state) AS states
+        FROM sba_loans {where}
+    """
+    conn = get_connection()
+    try:
+        row = pd.read_sql_query(_adapt_sql(query), conn, params=params).iloc[0]
+        result = {k: (None if pd.isna(v) else v) for k, v in row.items()}
+    except Exception:
+        result = {}
+    conn.close()
+    return result
+
+
+# ---------------------------------------------------------------------------
+# HMDA Activity
+# ---------------------------------------------------------------------------
+
+def get_hmda_activity(census_tract_id=None, state=None, county_fips=None,
+                      report_year=None, min_denial_rate=None, limit=500):
+    """
+    Return HMDA mortgage lending activity aggregated by census tract.
+
+    Args:
+        census_tract_id: 11-digit FIPS (exact match)
+        state:           2-letter state abbreviation
+        county_fips:     5-digit county FIPS
+        report_year:     HMDA report year
+        min_denial_rate: minimum denial rate 0-1 (credit desert filter)
+        limit:           max rows
+    """
+    conditions, params = [], []
+    if census_tract_id:
+        conditions.append("census_tract_id = ?"); params.append(census_tract_id)
+    if state:
+        conditions.append("state = ?"); params.append(state.upper())
+    if county_fips:
+        conditions.append("county_fips = ?"); params.append(county_fips)
+    if report_year is not None:
+        conditions.append("report_year = ?"); params.append(report_year)
+    if min_denial_rate is not None:
+        conditions.append("denial_rate >= ?"); params.append(min_denial_rate)
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    limit_clause = f"LIMIT {int(limit)}" if limit else ""
+    query = f"""
+        SELECT census_tract_id, report_year, state, county_fips,
+               total_applications, total_originations, total_denials,
+               home_purchase_originations, refinance_originations,
+               conventional_originations, fha_originations, va_originations,
+               denial_rate, origination_rate, median_loan_amount, total_loan_amount
+        FROM hmda_activity {where}
+        ORDER BY state, census_tract_id {limit_clause}
+    """
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(_adapt_sql(query), conn, params=params)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+# ---------------------------------------------------------------------------
+# BLS Unemployment
+# ---------------------------------------------------------------------------
+
+def get_bls_unemployment(area_fips=None, state=None, area_type=None,
+                         start_period=None, end_period=None, months=None):
+    """
+    Return BLS unemployment rate records by geography and period.
+
+    Args:
+        area_fips:     5-digit county FIPS or MSA code
+        state:         2-letter state abbreviation
+        area_type:     "county" or "msa"
+        start_period:  "YYYY-MM" inclusive lower bound
+        end_period:    "YYYY-MM" inclusive upper bound
+        months:        return the last N months (overrides start_period)
+    """
+    conditions, params = [], []
+    if area_fips:
+        conditions.append("area_fips = ?"); params.append(area_fips)
+    if state:
+        conditions.append("state = ?"); params.append(state.upper())
+    if area_type:
+        conditions.append("area_type = ?"); params.append(area_type)
+    if months is not None:
+        if _IS_POSTGRES:
+            conditions.append("period >= TO_CHAR(CURRENT_DATE - INTERVAL %s, 'YYYY-MM')")
+            params.append(f"{int(months)} months")
+        else:
+            conditions.append(f"period >= strftime('%Y-%m', date('now', '-{int(months)} months'))")
+    else:
+        if start_period:
+            conditions.append("period >= ?"); params.append(start_period)
+        if end_period:
+            conditions.append("period <= ?"); params.append(end_period)
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    query = f"""
+        SELECT area_fips, area_name, area_type, state, period,
+               unemployment_rate, labor_force, employed, unemployed
+        FROM bls_unemployment {where}
+        ORDER BY area_fips, period DESC
+    """
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(_adapt_sql(query), conn, params=params)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+# ---------------------------------------------------------------------------
+# BLS QCEW (Quarterly Census of Employment and Wages)
+# ---------------------------------------------------------------------------
+
+def get_bls_qcew(area_fips=None, state=None, year=None, quarter=None,
+                 industry_code=None, ownership_code=None, limit=500):
+    """
+    Return BLS QCEW employment and wage records.
+
+    Args:
+        area_fips:      5-digit county FIPS
+        state:          2-letter state abbreviation
+        year:           calendar year
+        quarter:        1-4 for quarterly data; 0 for annual averages
+        industry_code:  NAICS code or "10" for all-industry total
+        ownership_code: "0" = total, "5" = private sector, "1" = federal govt
+        limit:          max rows (default 500)
+    """
+    conditions, params = [], []
+    if area_fips:
+        conditions.append("area_fips = ?"); params.append(area_fips)
+    if state:
+        conditions.append("state = ?"); params.append(state.upper())
+    if year is not None:
+        conditions.append("year = ?"); params.append(year)
+    if quarter is not None:
+        conditions.append("quarter = ?"); params.append(quarter)
+    if industry_code:
+        conditions.append("industry_code = ?"); params.append(industry_code)
+    if ownership_code:
+        conditions.append("ownership_code = ?"); params.append(ownership_code)
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    limit_clause = f"LIMIT {int(limit)}" if limit else ""
+    query = f"""
+        SELECT area_fips, area_name, state, year, quarter,
+               industry_code, industry_title, ownership_code,
+               establishments, employment, total_wages, avg_weekly_wage
+        FROM bls_qcew {where}
+        ORDER BY area_fips, year DESC, quarter DESC, industry_code
+        {limit_clause}
+    """
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(_adapt_sql(query), conn, params=params)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+# ---------------------------------------------------------------------------
+# SCSC Comprehensive Performance Framework (GA charter schools)
+# ---------------------------------------------------------------------------
+
+def upsert_scsc_cpf(record: dict):
+    """Insert or update an SCSC CPF record (keyed on school_name + school_year)."""
+    columns = list(record.keys())
+    values  = list(record.values())
+    placeholders = ",".join("?" * len(values))
+    update_cols  = [c for c in columns if c not in ("school_name", "school_year")]
+    update_clause = ",".join(f"{c}=excluded.{c}" for c in update_cols)
+    sql = f"""
+        INSERT INTO scsc_cpf ({",".join(columns)})
+        VALUES ({placeholders})
+        ON CONFLICT(school_name, school_year) DO UPDATE SET {update_clause}
+    """
+    conn = get_connection()
+    conn.cursor().execute(_adapt_sql(sql), values)
+    conn.commit()
+    conn.close()
+
+
+def get_scsc_cpf(school_year=None, nces_id=None, school_name=None, designation=None):
+    """
+    Return SCSC CPF scores for GA charter schools.
+
+    Args:
+        school_year:  e.g. "2023-24"
+        nces_id:      NCES school identifier
+        school_name:  substring match on school name
+        designation:  filter by academic or ops designation (e.g. "Exceeds")
+    """
+    conditions, params = [], []
+    if school_year:
+        conditions.append("school_year = ?"); params.append(school_year)
+    if nces_id:
+        conditions.append("nces_id = ?"); params.append(nces_id)
+    if school_name:
+        conditions.append("school_name LIKE ?"); params.append(f"%{school_name}%")
+    if designation:
+        conditions.append("(academic_designation = ? OR operations_designation = ?)")
+        params.extend([designation, designation])
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    query = f"""
+        SELECT nces_id, school_name, school_year,
+               academic_designation, financial_designation,
+               financial_indicator_1, financial_indicator_2,
+               operations_score, operations_designation
+        FROM scsc_cpf {where}
+        ORDER BY school_year DESC, school_name
+    """
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(_adapt_sql(query), conn, params=params)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+# ---------------------------------------------------------------------------
+# NMTC Coalition project database
+# ---------------------------------------------------------------------------
+
+def upsert_nmtc_coalition_project(record: dict):
+    """Insert or update an NMTC Coalition project (keyed on coalition_project_id)."""
+    columns = list(record.keys())
+    values  = list(record.values())
+    placeholders = ",".join("?" * len(values))
+    update_cols  = [c for c in columns if c != "coalition_project_id"]
+    update_clause = ",".join(f"{c}=excluded.{c}" for c in update_cols)
+    sql = f"""
+        INSERT INTO nmtc_coalition_projects ({",".join(columns)})
+        VALUES ({placeholders})
+        ON CONFLICT(coalition_project_id) DO UPDATE SET {update_clause}
+    """
+    conn = get_connection()
+    conn.cursor().execute(_adapt_sql(sql), values)
+    conn.commit()
+    conn.close()
+
+
+def get_nmtc_coalition_projects(state=None, cde_name=None, investment_year=None,
+                                 matched_only=False, limit=500):
+    """
+    Return NMTC Coalition project records.
+
+    Args:
+        state:           2-letter state abbreviation
+        cde_name:        substring match on CDE name
+        investment_year: year of NMTC closing
+        matched_only:    if True, only return projects matched to nmtc_projects
+        limit:           max rows
+    """
+    conditions, params = [], []
+    if state:
+        conditions.append("state = ?"); params.append(state.upper())
+    if cde_name:
+        conditions.append("cde_name LIKE ?"); params.append(f"%{cde_name}%")
+    if investment_year is not None:
+        conditions.append("investment_year = ?"); params.append(investment_year)
+    if matched_only:
+        conditions.append("nmtc_project_id IS NOT NULL")
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    limit_clause = f"LIMIT {int(limit)}" if limit else ""
+    query = f"""
+        SELECT coalition_project_id, cdfi_project_id, project_name,
+               cde_name, address, city, state, zip_code, census_tract_id,
+               total_project_costs, nmtc_allocation_used,
+               jobs_created, jobs_retained, project_type, investment_year,
+               nmtc_project_id, match_confidence
+        FROM nmtc_coalition_projects {where}
+        ORDER BY state, investment_year DESC {limit_clause}
+    """
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(_adapt_sql(query), conn, params=params)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+def link_nmtc_coalition_to_projects():
+    """
+    Backfill nmtc_projects.coalition_id from matched Coalition records.
+    Call after load_nmtc_coalition.py has run matching.
+    Returns the number of projects updated.
+    """
+    conn = get_connection()
+    cur  = conn.cursor()
+    cur.execute(_adapt_sql("""
+        UPDATE nmtc_projects
+        SET coalition_id = (
+            SELECT cp.id
+            FROM nmtc_coalition_projects cp
+            WHERE cp.nmtc_project_id = nmtc_projects.id
+            ORDER BY cp.match_confidence DESC
+            LIMIT 1
+        )
+        WHERE EXISTS (
+            SELECT 1 FROM nmtc_coalition_projects cp
+            WHERE cp.nmtc_project_id = nmtc_projects.id
+        )
+    """))
+    conn.commit()
+    n = cur.rowcount
+    conn.close()
+    return n
