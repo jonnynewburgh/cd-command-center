@@ -7,7 +7,7 @@ Knowing which CDFIs operate in a given market helps identify deal partners.
 
 Data source:
   CDFI Fund: https://www.cdfifund.gov/research-and-resources/data-resources
-  → "CDFI Certification" → Download the certified CDFI list (Excel or CSV)
+  -> "CDFI Certification" -> Download the certified CDFI list (Excel or CSV)
 
 File format (as of 2024 release):
   One row per certified CDFI. Key columns:
@@ -35,10 +35,70 @@ import sys
 import os
 
 import pandas as pd
+import requests
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import db
+
+RAW_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "raw")
+
+
+def download_cdfi_directory(dest_dir: str = RAW_DIR) -> str:
+    """
+    Download the CDFI Fund certified institution list from data.gov (CKAN API).
+    Returns local file path.
+    """
+    os.makedirs(dest_dir, exist_ok=True)
+
+    PACKAGE_IDS = [
+        "certified-community-development-financial-institutions-cdfis",
+        "cdfi-certification",
+        "cdfi-certified-institutions",
+        "community-development-financial-institutions-cdfi-certification",
+    ]
+
+    resource_url = None
+    for pkg_id in PACKAGE_IDS:
+        try:
+            r = requests.get(
+                f"https://catalog.data.gov/api/3/action/package_show?id={pkg_id}",
+                timeout=20,
+            )
+            if r.status_code == 200 and r.json().get("success"):
+                resources = r.json()["result"]["resources"]
+                for res in resources:
+                    fmt = (res.get("format") or "").lower()
+                    if fmt in ("csv", "xlsx", "xls"):
+                        resource_url = res["url"]
+                        break
+                if resource_url:
+                    break
+        except requests.RequestException:
+            continue
+
+    if not resource_url:
+        raise RuntimeError(
+            "Could not find CDFI certified institution list on data.gov.\n"
+            "Download manually from: https://www.cdfifund.gov/research-and-resources/data-resources\n"
+            "Then run: python etl/load_cdfi_directory.py --file <downloaded_file>"
+        )
+
+    ext = resource_url.split(".")[-1].split("?")[0].lower()
+    dest_path = os.path.join(dest_dir, f"cdfi_certified_list.{ext}")
+
+    if os.path.exists(dest_path):
+        print(f"  Cached file found: {dest_path}")
+        return dest_path
+
+    print(f"  Downloading CDFI directory: {resource_url}")
+    r = requests.get(resource_url, stream=True, timeout=120)
+    r.raise_for_status()
+    with open(dest_path, "wb") as f:
+        for chunk in r.iter_content(chunk_size=512 * 1024):
+            f.write(chunk)
+    print(f"  Downloaded: {dest_path}")
+    return dest_path
 
 # Known column name candidates for each schema field
 # Format: {our_field: [candidate column names in source file]}
@@ -69,8 +129,13 @@ def main():
     )
     parser.add_argument(
         "--file",
-        required=True,
+        default=None,
         help="Path to the CDFI certified list (CSV or Excel). Download from CDFI Fund.",
+    )
+    parser.add_argument(
+        "--auto",
+        action="store_true",
+        help="Auto-download CDFI certified institution list from data.gov.",
     )
     parser.add_argument(
         "--states",
@@ -90,18 +155,54 @@ def main():
     )
     args = parser.parse_args()
 
-    if not os.path.exists(args.file):
-        print(f"Error: file not found: {args.file}")
+    if not args.file and not args.auto:
+        print("Error: provide --file or --auto.")
+        sys.exit(1)
+
+    filepath = args.file
+
+    if args.auto:
+        try:
+            filepath = download_cdfi_directory()
+        except Exception as e:
+            print(f"Error downloading CDFI directory: {e}")
+            sys.exit(1)
+
+    if not os.path.exists(filepath):
+        print(f"Error: file not found: {filepath}")
         sys.exit(1)
 
     print(f"CD Command Center — CDFI Directory Load")
-    print(f"  File: {args.file}")
+    print(f"  File: {filepath}")
 
     # Load file
-    if args.file.endswith((".xlsx", ".xls")):
-        df = pd.read_excel(args.file, sheet_name=args.sheet, dtype=str)
+    if filepath.endswith((".xlsx", ".xls")):
+        xl = pd.ExcelFile(filepath)
+        # Pick sheet: use --sheet arg, or find the first sheet whose name contains "certif" or "cdfi"
+        sheet = args.sheet
+        if not sheet:
+            for s in xl.sheet_names:
+                if any(kw in s.lower() for kw in ("certif", "cdfi", "list")):
+                    sheet = s
+                    break
+            if not sheet:
+                sheet = xl.sheet_names[0]
+        print(f"  Sheet: {sheet}")
+
+        # Auto-detect header row: scan first 10 rows for the one with the most non-null values
+        probe = xl.parse(sheet, header=None, nrows=10, dtype=str)
+        header_row = 0
+        best_count = 0
+        for i, row in probe.iterrows():
+            non_null = row.notna().sum()
+            if non_null > best_count:
+                best_count = non_null
+                header_row = i
+        df = xl.parse(sheet, header=header_row, dtype=str)
+        # Drop rows where all values are NaN (blank spacer rows)
+        df = df.dropna(how="all")
     else:
-        df = pd.read_csv(args.file, dtype=str)
+        df = pd.read_csv(filepath, dtype=str, encoding="latin-1")
 
     print(f"  Rows: {len(df):,}")
 
@@ -117,7 +218,7 @@ def main():
         found = find_column(df, candidates)
         col_mapping[our_field] = found
         if found:
-            print(f"  Mapped '{our_field}' ← '{found}'")
+            print(f"  Mapped '{our_field}' <- '{found}'")
         else:
             print(f"  Warning: '{our_field}' not found (tried: {candidates})")
 
@@ -185,7 +286,7 @@ def main():
     print(f"  Loaded: {loaded:,}")
     print(f"  Skipped: {skipped:,}")
     print()
-    print("CDFIs are now available in the Tools → CDFI Directory tab.")
+    print("CDFIs are now available in the Tools -> CDFI Directory tab.")
 
 
 if __name__ == "__main__":

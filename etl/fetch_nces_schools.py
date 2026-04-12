@@ -44,7 +44,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import db
-from models.charter_survival import CharterSurvivalModel
+# CharterSurvivalModel removed — survival_score/survival_risk_tier left NULL
 
 # ---------------------------------------------------------------------------
 # State / Territory FIPS codes (all 50 states + DC + territories)
@@ -285,6 +285,9 @@ def map_record(api_row: dict, year: int, demographics: dict = None) -> dict:
         frl_count = None
 
     pct_frl = round(frl_count / enrollment * 100, 1) if (enrollment > 0 and frl_count is not None) else None
+    # NCES sometimes reports FRL counts higher than enrollment (career tech centers, CEP schools)
+    if pct_frl is not None and pct_frl > 100:
+        pct_frl = 100.0
 
     state_fips = api_row.get("fips")
     county_code = api_row.get("county_code")
@@ -304,6 +307,7 @@ def map_record(api_row: dict, year: int, demographics: dict = None) -> dict:
 
     return {
         "nces_id": str(api_row.get("ncessch", "") or "").strip() or None,
+        "seasch": str(api_row.get("seasch", "") or "").strip() or None,
         "school_name": api_row.get("school_name"),
         "lea_name": api_row.get("lea_name"),
         "lea_id": str(api_row.get("leaid", "") or "").strip() or None,
@@ -336,32 +340,7 @@ def map_record(api_row: dict, year: int, demographics: dict = None) -> dict:
 
 
 def score_records(records: list) -> list:
-    """
-    Run the charter survival model on charter school records.
-    Only scores records where is_charter=1.
-    """
-    model = CharterSurvivalModel()
-
-    model_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "models", "charter_survival.pkl",
-    )
-    if os.path.exists(model_path):
-        model.load(model_path)
-
-    # Only score charter schools
-    charter_records = [r for r in records if r.get("is_charter") == 1]
-    if charter_records:
-        df = pd.DataFrame(charter_records)
-        scores = model.predict_batch(df)
-
-        charter_idx = 0
-        for record in records:
-            if record.get("is_charter") == 1:
-                record["survival_score"] = scores["survival_score"].iloc[charter_idx]
-                record["survival_risk_tier"] = scores["survival_risk_tier"].iloc[charter_idx]
-                charter_idx += 1
-
+    """Survival model removed. Returns records unchanged (survival fields stay NULL)."""
     return records
 
 
@@ -468,9 +447,6 @@ def main():
     if not all_records:
         print("No records to load. Check your year/state arguments.")
         sys.exit(0)
-
-    print("Running survival model scoring (charter schools only)...")
-    all_records = score_records(all_records)
 
     print(f"Loading into database...")
     loaded, errors = load_to_db(all_records)

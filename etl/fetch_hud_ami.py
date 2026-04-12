@@ -178,15 +178,24 @@ def load_from_excel(filepath: str, year: int, columns_only: bool = False) -> lis
         return None
 
     fips_col    = find_col("fips", "fips_code", "state_alpha", "metro code")
-    area_col    = find_col("area name", "areaname", "area_name", "metro area name")
-    state_col   = find_col("state_alpha", "state", "stateabb")
-    county_col  = find_col("county name", "countyname", "county_name")
+    area_col    = find_col("area name", "areaname", "area_name", "metro area name",
+                           "hud_area_name", "hud area name")
+    state_col   = find_col("state_alpha", "state", "stateabb", "stusps", "stusps")
+    county_col  = find_col("county name", "countyname", "county_name", "county_town_name")
 
     # Income limits: HUD uses l30_p4, l50_p4, l80_p4 (limit at 30/50/80%, 4-person family)
-    l30_col = find_col("l30_p4", "lim30_p4", "30% p4", "vli_p4")
-    l50_col = find_col("l50_p4", "lim50_p4", "50% p4")
-    l80_col = find_col("l80_p4", "lim80_p4", "80% p4")
+    # FY2025+ files use l50_4, l80_4, ELI_4 (Extremely Low Income ~= 30% AMI for family of 4)
+    l30_col = find_col("l30_p4", "lim30_p4", "30% p4", "vli_p4", "eli_4", "l30_4")
+    l50_col = find_col("l50_p4", "lim50_p4", "50% p4", "l50_4")
+    l80_col = find_col("l80_p4", "lim80_p4", "80% p4", "l80_4")
+    # median column: varies by year (median2025, median2024, etc.)
     med_col = find_col("median", "median income", "median_income", "ami")
+    if not med_col:
+        # Try year-suffixed variants (median2025, median2024, ...)
+        for candidate in cols_lower:
+            if candidate.startswith("median") and candidate[6:].isdigit():
+                med_col = cols_lower[candidate]
+                break
 
     if not fips_col:
         raise ValueError(

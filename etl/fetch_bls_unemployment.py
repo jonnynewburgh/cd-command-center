@@ -341,6 +341,12 @@ def main():
         help="For bls-county: 5-digit county FIPS codes. E.g. --fips 06037 17031",
     )
     parser.add_argument(
+        "--all-counties",
+        action="store_true",
+        dest="all_counties",
+        help="For bls-county: fetch all counties found in the census_tracts table.",
+    )
+    parser.add_argument(
         "--months",
         type=int,
         default=36,
@@ -384,8 +390,21 @@ def main():
                 total_loaded = db.upsert_rows("bls_unemployment", rows, unique_cols=["area_fips", "period"])
 
         elif args.mode == "bls-county":
+            if args.all_counties:
+                import sqlite3
+                DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                       "data", "cd_command_center.sqlite")
+                con = sqlite3.connect(DB_PATH)
+                cur = con.cursor()
+                cur.execute(
+                    "SELECT DISTINCT SUBSTR(census_tract_id, 1, 5) FROM census_tracts "
+                    "WHERE census_tract_id IS NOT NULL AND LENGTH(census_tract_id) >= 5 ORDER BY 1"
+                )
+                args.fips = [r[0] for r in cur.fetchall() if r[0]]
+                con.close()
+                print(f"  --all-counties: {len(args.fips)} counties from census_tracts table")
             if not args.fips:
-                print("Error: --fips required for bls-county mode.")
+                print("Error: --fips or --all-counties required for bls-county mode.")
                 sys.exit(1)
             rows = load_bls_counties(args.fips, args.bls_key or "", args.years)
             if rows:

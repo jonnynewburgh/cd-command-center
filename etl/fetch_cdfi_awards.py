@@ -32,9 +32,70 @@ import sys
 import os
 
 import pandas as pd
+import requests
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import db
+
+RAW_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "raw")
+
+
+def download_cdfi_awards(dest_dir: str = RAW_DIR) -> str:
+    """
+    Download the CDFI Fund awards dataset from data.gov (CKAN API).
+    Returns local file path.
+    """
+    os.makedirs(dest_dir, exist_ok=True)
+
+    # CDFI Fund awards data is published on data.gov
+    # Package slug: cdfi-fund-awards-data  (may vary — try CKAN search)
+    PACKAGE_IDS = [
+        "cdfi-fund-awards-data",
+        "cdfi-awards",
+        "community-development-financial-institutions-fund-awards",
+    ]
+
+    resource_url = None
+    for pkg_id in PACKAGE_IDS:
+        try:
+            r = requests.get(
+                f"https://catalog.data.gov/api/3/action/package_show?id={pkg_id}",
+                timeout=20,
+            )
+            if r.status_code == 200 and r.json().get("success"):
+                resources = r.json()["result"]["resources"]
+                for res in resources:
+                    fmt = (res.get("format") or "").lower()
+                    if fmt in ("csv", "xlsx", "xls"):
+                        resource_url = res["url"]
+                        break
+                if resource_url:
+                    break
+        except requests.RequestException:
+            continue
+
+    if not resource_url:
+        raise RuntimeError(
+            "Could not find CDFI Fund awards data on data.gov.\n"
+            "Download manually from: https://www.cdfifund.gov/research-and-resources/data-resources\n"
+            "Then run: python etl/fetch_cdfi_awards.py --file <downloaded_file>"
+        )
+
+    ext = resource_url.split(".")[-1].split("?")[0].lower()
+    dest_path = os.path.join(dest_dir, f"cdfi_awards.{ext}")
+
+    if os.path.exists(dest_path):
+        print(f"  Cached file found: {dest_path}")
+        return dest_path
+
+    print(f"  Downloading CDFI awards: {resource_url}")
+    r = requests.get(resource_url, stream=True, timeout=120)
+    r.raise_for_status()
+    with open(dest_path, "wb") as f:
+        for chunk in r.iter_content(chunk_size=512 * 1024):
+            f.write(chunk)
+    print(f"  Downloaded: {dest_path}")
+    return dest_path
 
 
 # ---------------------------------------------------------------------------
@@ -43,8 +104,8 @@ import db
 # ---------------------------------------------------------------------------
 
 COLUMN_CANDIDATES = {
-    "awardee_name":   ["Awardee Name", "Organization Name", "CDFI Name", "Recipient Name",
-                       "awardee_name", "org_name"],
+    "awardee_name":   ["Awardee", "Awardee Name", "Organization Name", "CDFI Name",
+                       "Recipient Name", "awardee_name", "org_name"],
     "awardee_state":  ["State", "Awardee State", "State Abbr", "state", "awardee_state"],
     "awardee_city":   ["City", "Awardee City", "city"],
     "award_year":     ["Award Year", "Fiscal Year", "Year", "award_year", "fiscal_year"],
@@ -102,7 +163,7 @@ def load_awards(filepath: str, sheet: str = None, states: list = None,
             sheet_name = xf.sheet_names[0]
             df = pd.read_excel(filepath, sheet_name=sheet_name, dtype=str)
     else:
-        df = pd.read_csv(filepath, dtype=str, encoding="utf-8", errors="replace")
+        df = pd.read_csv(filepath, dtype=str, encoding="latin-1")
 
     df.columns = [str(c).strip() for c in df.columns]
 
@@ -184,7 +245,9 @@ def main():
     parser = argparse.ArgumentParser(
         description="Load CDFI Fund award data into the CD Command Center database"
     )
-    parser.add_argument("--file",         required=True, help="Path to CDFI awards Excel or CSV file")
+    parser.add_argument("--file",         default=None, help="Path to CDFI awards Excel or CSV file")
+    parser.add_argument("--auto",         action="store_true",
+                        help="Auto-download CDFI awards data from data.gov")
     parser.add_argument("--sheet",        help="Sheet name (Excel only; default = first sheet)")
     parser.add_argument("--states",       nargs="+", metavar="ST",
                         help="Only load awards for these states (e.g. CA TX NY)")
@@ -193,20 +256,33 @@ def main():
     parser.add_argument("--verbose",      action="store_true", help="Print progress")
     args = parser.parse_args()
 
-    if not os.path.exists(args.file):
-        print(f"ERROR: File not found: {args.file}")
+    if not args.file and not args.auto:
+        print("Error: provide --file or --auto.")
+        sys.exit(1)
+
+    filepath = args.file
+
+    if args.auto:
+        try:
+            filepath = download_cdfi_awards()
+        except Exception as e:
+            print(f"Error downloading CDFI awards: {e}")
+            sys.exit(1)
+
+    if not os.path.exists(filepath):
+        print(f"ERROR: File not found: {filepath}")
         sys.exit(1)
 
     db.init_db()
 
     print("CD Command Center — CDFI Awards Loader")
-    print(f"  File: {args.file}")
+    print(f"  File: {filepath}")
     if args.states:
         print(f"  States: {args.states}")
     print()
 
     load_awards(
-        filepath=args.file,
+        filepath=filepath,
         sheet=args.sheet,
         states=args.states,
         columns_only=args.columns_only,

@@ -9,8 +9,8 @@ deal origination, this data is used to:
     - Find gaps where CDFI small-business lending is underserved
 
 Data source:
-    SBA publishes annual loan-level data files at:
-        https://data.sba.gov/dataset/sba-7-a-504-foia
+    SBA publishes loan-level data files at:
+        https://data.sba.gov/dataset/7-a-504-foia
 
     Files are large CSVs (7(a) is ~300MB per year; 504 is smaller).
     Download the file for the year(s) you want, then run this script.
@@ -40,10 +40,93 @@ import os
 import sys
 
 import pandas as pd
+import requests
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import db
+
+RAW_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "raw")
+
+
+def download_sba_file(program: str, fiscal_year: int, dest_dir: str = RAW_DIR) -> str:
+    """
+    Download an SBA FOIA loan file from data.sba.gov using the CKAN API.
+    Returns the local file path. Uses a cached copy if already downloaded.
+    """
+    api_url = "https://data.sba.gov/api/3/action/package_show?id=7-a-504-foia"
+    print(f"  Querying SBA data portal for {program.upper()} FY{fiscal_year} file...")
+    r = requests.get(api_url, timeout=30)
+    r.raise_for_status()
+    resources = r.json()["result"]["resources"]
+
+    program_terms = ["7(a)", "7a", "7A"] if program == "7a" else ["504"]
+    year_terms = [str(fiscal_year), f"FY{fiscal_year}", f"fy{fiscal_year}",
+                  f"FY {fiscal_year}", f"fy {fiscal_year}"]
+
+    # Only consider CSV resources (skip data dictionaries, XLSX, etc.)
+    csv_resources = [r for r in resources if (r.get("format") or "").upper() == "CSV"]
+
+    # Try exact year match first (e.g. "FY2024" in name)
+    match = None
+    for res in csv_resources:
+        name = (res.get("name") or "") + " " + (res.get("description") or "")
+        if any(pt in name for pt in program_terms) and any(yt in name for yt in year_terms):
+            match = res
+            break
+
+    # SBA now publishes era-split files (FY2020-Present, FY2010-FY2019, etc.)
+    # For recent fiscal years, prefer the "Present" file over older era files.
+    if not match:
+        present_res = None
+        fallback_res = None
+        for res in csv_resources:
+            name = (res.get("name") or "") + " " + (res.get("description") or "")
+            if any(pt in name for pt in program_terms):
+                if "present" in name.lower():
+                    present_res = res
+                elif fallback_res is None:
+                    fallback_res = res
+        match = present_res or fallback_res
+        if match:
+            print(f"  No exact FY{fiscal_year} file; using era file: {match.get('name')}")
+
+    if not match:
+        names = [r.get("name") for r in resources]
+        raise RuntimeError(
+            f"Could not find a {program.upper()} CSV resource on data.sba.gov.\n"
+            f"Available resources: {names}"
+        )
+
+    url = match["url"]
+    filename = url.split("/")[-1].split("?")[0] or f"foia-{program}fy{fiscal_year}.csv"
+    dest_path = os.path.join(dest_dir, filename)
+
+    if os.path.exists(dest_path):
+        print(f"  Cached file found: {dest_path}")
+        return dest_path
+
+    print(f"  Downloading: {url}")
+    print(f"  -> {dest_path}")
+    print(f"  (SBA files can be 300+ MB — this may take several minutes)")
+    os.makedirs(dest_dir, exist_ok=True)
+
+    with requests.get(url, stream=True, timeout=600) as resp:
+        resp.raise_for_status()
+        total = int(resp.headers.get("Content-Length", 0))
+        downloaded = 0
+        with open(dest_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                f.write(chunk)
+                downloaded += len(chunk)
+                if total:
+                    print(f"\r  {downloaded / 1e6:.0f} MB / {total / 1e6:.0f} MB "
+                          f"({downloaded / total * 100:.0f}%)", end="", flush=True)
+        if total:
+            print()
+
+    print(f"  Download complete: {dest_path}")
+    return dest_path
 
 # ---------------------------------------------------------------------------
 # Column mapping — SBA file headers vary slightly between fiscal years.
@@ -51,38 +134,43 @@ import db
 # ---------------------------------------------------------------------------
 
 SEVEN_A_COLS = {
+    # Note: l2locid in the FY2020-Present file is a lender location ID (not unique per loan).
+    # Old files had LoanNbr which was unique. New era files have no single unique loan ID.
     "loan_number":             ["LoanNbr", "Loan Number", "loan_number"],
-    "borrower_name":           ["BorrName", "BorrowerName", "Borrower Name"],
-    "borrower_city":           ["BorrCity", "BorrowerCity", "Borrower City"],
-    "borrower_state":          ["BorrState", "BorrowerState", "Borrower State"],
-    "borrower_zip":            ["BorrZip", "BorrowerZip", "Borrower Zip"],
+    "borrower_name":           ["BorrName", "BorrowerName", "Borrower Name", "borrname"],
+    "borrower_city":           ["BorrCity", "BorrowerCity", "Borrower City", "borrcity"],
+    "borrower_state":          ["BorrState", "BorrowerState", "Borrower State", "borrstate"],
+    "borrower_zip":            ["BorrZip", "BorrowerZip", "Borrower Zip", "borrzip"],
     "borrower_county":         ["BorrCounty", "BorrowerCounty", "Borrower County",
-                                "ProjectCounty", "Project County"],
-    "naics_code":              ["NaicsCode", "NAICS", "naics_code"],
-    "business_type":           ["BusinessType", "Business Type", "business_type"],
-    "approval_date":           ["ApprovalDate", "Approval Date", "approval_date"],
-    "gross_approval":          ["GrossApproval", "Gross Approval", "gross_approval"],
-    "sba_guaranteed_portion":  ["SBAGuaranteedApproval", "SBA Guaranteed", "sba_guaranteed"],
-    "lender_name":             ["BankName", "LenderName", "Lender Name", "bank_name"],
-    "lender_state":            ["BankState", "LenderState", "Lender State"],
-    "jobs_supported":          ["JobsSupported", "Jobs Supported", "jobs_supported"],
+                                "ProjectCounty", "Project County", "projectcounty"],
+    "naics_code":              ["NaicsCode", "NAICS", "naics_code", "naicscode"],
+    "business_type":           ["BusinessType", "Business Type", "business_type", "businesstype"],
+    "approval_date":           ["ApprovalDate", "Approval Date", "approval_date", "approvaldate"],
+    "gross_approval":          ["GrossApproval", "Gross Approval", "gross_approval", "grossapproval"],
+    "sba_guaranteed_portion":  ["SBAGuaranteedApproval", "SBA Guaranteed", "sba_guaranteed",
+                                "sbaguaranteedapproval"],
+    "lender_name":             ["BankName", "LenderName", "Lender Name", "bank_name", "bankname"],
+    "lender_state":            ["BankState", "LenderState", "Lender State", "bankstate"],
+    "jobs_supported":          ["JobsSupported", "Jobs Supported", "jobs_supported", "jobssupported"],
 }
 
 FIVE_O_FOUR_COLS = {
     "loan_number":             ["CDC_Loan_Number", "LoanNbr", "Loan Number"],
-    "borrower_name":           ["Borrower_Name", "BorrName"],
-    "borrower_city":           ["Borrower_City", "BorrCity"],
-    "borrower_state":          ["Borrower_State", "BorrState"],
-    "borrower_zip":            ["Borrower_Zip", "BorrZip"],
-    "borrower_county":         ["Borrower_County", "BorrCounty", "Project_County"],
-    "naics_code":              ["NAICS_Code", "NaicsCode"],
-    "business_type":           ["Business_Type"],
-    "approval_date":           ["Approval_Date", "ApprovalDate"],
-    "gross_approval":          ["Gross_Approval", "GrossApproval", "Total_Project_Amount"],
-    "sba_guaranteed_portion":  ["CDC_Gross_Debenture_Amount", "SBA_Guaranteed"],
-    "lender_name":             ["CDC_Name", "BankName", "Lender_Name"],
-    "lender_state":            ["CDC_State", "BankState"],
-    "jobs_supported":          ["JobsSupported", "Jobs_Supported"],
+    "borrower_name":           ["Borrower_Name", "BorrName", "borrname"],
+    "borrower_city":           ["Borrower_City", "BorrCity", "borrcity"],
+    "borrower_state":          ["Borrower_State", "BorrState", "borrstate"],
+    "borrower_zip":            ["Borrower_Zip", "BorrZip", "borrzip"],
+    "borrower_county":         ["Borrower_County", "BorrCounty", "Project_County", "projectcounty"],
+    "naics_code":              ["NAICS_Code", "NaicsCode", "naicscode"],
+    "business_type":           ["Business_Type", "businesstype"],
+    "approval_date":           ["Approval_Date", "ApprovalDate", "approvaldate"],
+    "gross_approval":          ["Gross_Approval", "GrossApproval", "Total_Project_Amount",
+                                "grossapproval"],
+    "sba_guaranteed_portion":  ["CDC_Gross_Debenture_Amount", "SBA_Guaranteed",
+                                "sbaguaranteedapproval"],
+    "lender_name":             ["CDC_Name", "BankName", "Lender_Name", "cdc_name"],
+    "lender_state":            ["CDC_State", "BankState", "cdc_state"],
+    "jobs_supported":          ["JobsSupported", "Jobs_Supported", "jobssupported"],
 }
 
 
@@ -114,7 +202,14 @@ def parse_approval_year(date_str):
     if not date_str:
         return None
     try:
-        return int(str(date_str).strip()[:4])
+        s = str(date_str).strip()
+        # ISO format: YYYY-MM-DD -> first 4 chars
+        if len(s) >= 4 and s[4:5] == "-":
+            return int(s[:4])
+        # M/D/YYYY or MM/DD/YYYY -> last 4 chars after last slash
+        if "/" in s:
+            return int(s.rsplit("/", 1)[-1])
+        return int(s[:4])
     except (ValueError, TypeError):
         return None
 
@@ -154,12 +249,19 @@ def load_file(filepath: str, program: str, states: list[str], year_filter: int,
             state_col = col.get("borrower_state")
             date_col  = col.get("approval_date")
 
-            missing_required = [k for k in ("loan_number",) if col.get(k) is None]
+            # loan_number is preferred but not strictly required —
+            # the FY2020-Present era file uses 'l2locid' which maps to it above.
+            # Warn if missing but continue (upsert will use borrower+date as key).
+            missing_required = [k for k in ("borrower_name", "approval_date", "borrower_state")
+                                 if col.get(k) is None]
             if missing_required:
                 raise ValueError(
                     f"Could not find required columns: {missing_required}. "
                     f"Available: {list(chunk.columns)}. Use --columns-only."
                 )
+            if col.get("loan_number") is None:
+                print("  Note: no loan_number column found; upsert key falls back to "
+                      "borrower+date+state.")
 
         # State filter
         if states and state_col and state_col in chunk.columns:
@@ -204,9 +306,17 @@ def load_file(filepath: str, program: str, states: list[str], year_filter: int,
                 "jobs_supported":         to_int(get(row, "jobs_supported")),
             })
 
-        rows = [r for r in rows if r["loan_number"]]
+        # Filter out rows with no identifying info at all
+        rows = [r for r in rows if r["borrower_name"] or r["loan_number"]]
         if rows:
-            n = db.upsert_rows("sba_loans", rows, unique_cols=["loan_number"])
+            # Use loan_number as unique key if available (old annual files have LoanNbr).
+            # FY2020-Present era files have no per-loan unique ID, so use a composite
+            # key that's practically unique: borrower + date + amount + state.
+            has_loan_num = any(r["loan_number"] for r in rows)
+            unique_cols = (["loan_number"] if has_loan_num
+                           else ["borrower_name", "approval_date",
+                                 "gross_approval", "borrower_state"])
+            n = db.upsert_rows("sba_loans", rows, unique_cols=unique_cols)
             total += n
 
         if chunk_num % 10 == 0:
@@ -216,13 +326,26 @@ def load_file(filepath: str, program: str, states: list[str], year_filter: int,
 
 
 def main():
+    import datetime
     parser = argparse.ArgumentParser(
         description="Load SBA 7(a) and 504 loan data into the sba_loans table"
     )
     parser.add_argument(
         "--file",
-        required=True,
+        default=None,
         help="Path to the SBA loan CSV file. Download from https://data.sba.gov/dataset/sba-7-a-504-foia",
+    )
+    parser.add_argument(
+        "--auto",
+        action="store_true",
+        help="Auto-download from data.sba.gov via CKAN API. Requires --program.",
+    )
+    parser.add_argument(
+        "--fiscal-year",
+        type=int,
+        default=None,
+        dest="fiscal_year",
+        help="Fiscal year to download when using --auto (default: current year - 1).",
     )
     parser.add_argument(
         "--program",
@@ -240,7 +363,7 @@ def main():
         "--year",
         type=int,
         default=None,
-        help="Filter to a specific approval year (optional; for multi-year files).",
+        help="Filter to a specific approval year within the file (optional).",
     )
     parser.add_argument(
         "--columns-only",
@@ -249,12 +372,27 @@ def main():
     )
     args = parser.parse_args()
 
-    if not os.path.exists(args.file):
-        print(f"Error: file not found: {args.file}")
+    if not args.file and not args.auto:
+        print("Error: provide --file or --auto.")
+        sys.exit(1)
+
+    filepath = args.file
+
+    if args.auto:
+        fiscal_year = args.fiscal_year or (datetime.datetime.now().year - 1)
+        try:
+            filepath = download_sba_file(program=args.program, fiscal_year=fiscal_year)
+        except Exception as e:
+            print(f"Error downloading SBA file: {e}")
+            sys.exit(1)
+
+    if not os.path.exists(filepath):
+        print(f"Error: file not found: {filepath}")
         sys.exit(1)
 
     print("CD Command Center — SBA Loan Load")
     print(f"  Program: SBA {args.program}")
+    print(f"  File: {filepath}")
     if args.states:
         print(f"  States: {', '.join(args.states)}")
     if args.year:
@@ -267,7 +405,7 @@ def main():
 
     try:
         total_loaded = load_file(
-            filepath=args.file,
+            filepath=filepath,
             program=args.program,
             states=args.states or [],
             year_filter=args.year,

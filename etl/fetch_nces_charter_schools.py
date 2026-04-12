@@ -40,7 +40,6 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import db
-from models.charter_survival import CharterSurvivalModel
 
 # ---------------------------------------------------------------------------
 # State / Territory FIPS codes (all 50 states + DC + territories)
@@ -130,93 +129,110 @@ def decode_grade(code) -> str | None:
         return None
 
 
-def fetch_state_demographics(year: int, fips: int, charter_ncessch_set: set) -> dict:
+def _fetch_enrollment_endpoint(url: str, fips: int, id_set: set, count_key: str) -> dict:
     """
-    Fetch race/ethnicity enrollment data for charter schools in a single state.
+    Generic helper to fetch a paginated enrollment endpoint and return
+    {ncessch: {code: count}} filtered to schools in id_set.
 
-    Uses the enrollment endpoint with race disaggregation, then filters to only
-    the charter school IDs we already fetched from the directory. This avoids
-    needing a charter filter on the enrollment endpoint (which isn't available).
-
-    The endpoint returns all race × sex combinations. We filter to sex=99
-    (total across sexes) to get the race-level totals per school.
-
-    Race codes: 1=White, 2=Black, 3=Hispanic, 99=All races (used as denominator)
-
-    Args:
-        year: CCD data year
-        fips: state FIPS code as int
-        charter_ncessch_set: set of ncessch strings for the charter schools we fetched,
-            used to filter enrollment data to only our schools of interest
-
-    Returns:
-        dict keyed by ncessch → {'pct_black': float|None, 'pct_hispanic': float|None,
-                                   'pct_white': float|None}
+    count_key is the field name for the enrollment/count value in each row.
     """
     results = []
     page = 1
-
-    # The /grade-99/race-2/ path returns all schools with all race × sex combinations.
-    # 'grade-99' means total across all grades; 'race-2' means disaggregate by race.
-    url = f"{BASE_ENROLLMENT_URL}/{year}/grade-99/race-2/"
-
     while True:
-        params = {
-            "fips": fips,
-            "per_page": PER_PAGE,
-            "page": page,
-        }
+        params = {"fips": fips, "per_page": PER_PAGE, "page": page}
         try:
             resp = requests.get(url, params=params, timeout=30)
             resp.raise_for_status()
             data = resp.json()
         except requests.RequestException as e:
-            print(f"    Enrollment API error on page {page}: {e}")
+            print(f"    API error on page {page}: {e}")
             break
-
         results.extend(data.get("results", []))
-
         if not data.get("next"):
             break
         page += 1
         time.sleep(PAGE_SLEEP)
+    return results
 
-    # Build a lookup: ncessch → {race_code: enrollment_count}
-    # Only include rows where sex=99 (total across sexes) and school is a charter
-    raw = {}
-    for row in results:
+
+def fetch_state_demographics(year: int, fips: int, charter_ncessch_set: set) -> dict:
+    """
+    Fetch race/ethnicity, ELL, and SPED enrollment data for charter schools
+    in a single state.
+
+    Race codes: 1=White, 2=Black, 3=Hispanic, 4=Asian, 7=Two or more, 99=All
+    LEP codes: 1=ELL, 2=Non-ELL, 99=All students (denominator)
+    Disability codes: 1=Disabled (IDEA), 2=Non-disabled, 99=All (denominator)
+
+    Returns:
+        dict keyed by ncessch → demographic fields dict
+    """
+    # ── Race / ethnicity ───────────────────────────────────────────────────
+    race_url  = f"{BASE_ENROLLMENT_URL}/{year}/grade-99/race-2/"
+    race_rows = _fetch_enrollment_endpoint(race_url, fips, charter_ncessch_set, "enrollment")
+
+    raw_race = {}
+    for row in race_rows:
         ncessch = row.get("ncessch")
         if ncessch not in charter_ncessch_set:
-            continue  # skip non-charter schools
+            continue
         if row.get("sex") != 99:
-            continue  # skip individual-sex rows; we only want the sex=99 totals
+            continue
+        code  = row.get("race")
+        count = max(row.get("enrollment") or 0, 0)
+        raw_race.setdefault(ncessch, {})[code] = count
 
-        race_code = row.get("race")
-        enrollment_count = row.get("enrollment") or 0
-        # NCES uses negative values for suppressed/missing data
-        if enrollment_count < 0:
-            enrollment_count = 0
+    # ── English Language Learners ──────────────────────────────────────────
+    lep_url  = f"{BASE_ENROLLMENT_URL}/{year}/grade-99/lep-status-2/"
+    lep_rows = _fetch_enrollment_endpoint(lep_url, fips, charter_ncessch_set, "enrollment")
 
-        if ncessch not in raw:
-            raw[ncessch] = {}
-        raw[ncessch][race_code] = enrollment_count
+    raw_lep = {}
+    for row in lep_rows:
+        ncessch = row.get("ncessch")
+        if ncessch not in charter_ncessch_set:
+            continue
+        if row.get("sex") != 99:
+            continue
+        code  = row.get("lep_status")
+        count = max(row.get("enrollment") or 0, 0)
+        raw_lep.setdefault(ncessch, {})[code] = count
 
-    # Compute percentages from raw counts
+    # ── Special Education / Disability ─────────────────────────────────────
+    dis_url  = f"{BASE_ENROLLMENT_URL}/{year}/grade-99/disability-status-2/"
+    dis_rows = _fetch_enrollment_endpoint(dis_url, fips, charter_ncessch_set, "enrollment")
+
+    raw_dis = {}
+    for row in dis_rows:
+        ncessch = row.get("ncessch")
+        if ncessch not in charter_ncessch_set:
+            continue
+        if row.get("sex") != 99:
+            continue
+        code  = row.get("disability_status")
+        count = max(row.get("enrollment") or 0, 0)
+        raw_dis.setdefault(ncessch, {})[code] = count
+
+    # ── Combine into per-school dict ───────────────────────────────────────
+    all_ids = charter_ncessch_set | set(raw_race) | set(raw_lep) | set(raw_dis)
     demographics = {}
-    for ncessch, counts in raw.items():
-        total = counts.get(99, 0)  # race=99 is the all-races total
-        if total and total > 0:
-            demographics[ncessch] = {
-                "pct_black":    _safe_pct(counts.get(2, 0), total),
-                "pct_hispanic": _safe_pct(counts.get(3, 0), total),
-                "pct_white":    _safe_pct(counts.get(1, 0), total),
-            }
-        else:
-            demographics[ncessch] = {
-                "pct_black": None,
-                "pct_hispanic": None,
-                "pct_white": None,
-            }
+    for ncessch in all_ids:
+        rc = raw_race.get(ncessch, {})
+        lc = raw_lep.get(ncessch, {})
+        dc = raw_dis.get(ncessch, {})
+
+        total_race = rc.get(99, 0)
+        total_lep  = lc.get(99, 0) or (lc.get(1, 0) + lc.get(2, 0))  # fallback if 99 missing
+        total_dis  = dc.get(99, 0) or (dc.get(1, 0) + dc.get(2, 0))
+
+        demographics[ncessch] = {
+            "pct_black":      _safe_pct(rc.get(2, 0), total_race),
+            "pct_hispanic":   _safe_pct(rc.get(3, 0), total_race),
+            "pct_white":      _safe_pct(rc.get(1, 0), total_race),
+            "pct_asian":      _safe_pct(rc.get(4, 0), total_race),
+            "pct_multiracial":_safe_pct(rc.get(7, 0), total_race),
+            "pct_ell":        _safe_pct(lc.get(1, 0), total_lep),
+            "pct_sped":       _safe_pct(dc.get(1, 0), total_dis),
+        }
 
     return demographics
 
@@ -295,6 +311,9 @@ def map_record(api_row: dict, year: int, demographics: dict = None) -> dict:
 
     # Compute FRL percentage; None if no enrollment or count data
     pct_frl = round(frl_count / enrollment * 100, 1) if (enrollment > 0 and frl_count is not None) else None
+    # NCES sometimes reports FRL counts higher than enrollment (career tech centers, CEP schools)
+    if pct_frl is not None and pct_frl > 100:
+        pct_frl = 100.0
 
     # Build a 5-digit county FIPS string from state FIPS + county code
     # e.g. fips=6, county_code='037' → '06037'
@@ -310,6 +329,7 @@ def map_record(api_row: dict, year: int, demographics: dict = None) -> dict:
 
     return {
         "nces_id": str(api_row.get("ncessch", "") or "").strip() or None,
+        "seasch": str(api_row.get("seasch", "") or "").strip() or None,
         "school_name": api_row.get("school_name"),
         "lea_name": api_row.get("lea_name"),
         "lea_id": str(api_row.get("leaid", "") or "").strip() or None,
@@ -325,12 +345,14 @@ def map_record(api_row: dict, year: int, demographics: dict = None) -> dict:
         "grade_low": decode_grade(api_row.get("lowest_grade_offered")),
         "grade_high": decode_grade(api_row.get("highest_grade_offered")),
         "pct_free_reduced_lunch": pct_frl,
-        "pct_ell": None,                 # not in directory endpoint
-        "pct_sped": None,                # not in directory endpoint
-        # Race/ethnicity: populated from enrollment endpoint when --demographics is used
-        "pct_black":    (demographics or {}).get(api_row.get("ncessch"), {}).get("pct_black"),
-        "pct_hispanic": (demographics or {}).get(api_row.get("ncessch"), {}).get("pct_hispanic"),
-        "pct_white":    (demographics or {}).get(api_row.get("ncessch"), {}).get("pct_white"),
+        # Demographics: populated from enrollment endpoints when --demographics is used
+        "pct_ell":        (demographics or {}).get(api_row.get("ncessch"), {}).get("pct_ell"),
+        "pct_sped":       (demographics or {}).get(api_row.get("ncessch"), {}).get("pct_sped"),
+        "pct_black":      (demographics or {}).get(api_row.get("ncessch"), {}).get("pct_black"),
+        "pct_hispanic":   (demographics or {}).get(api_row.get("ncessch"), {}).get("pct_hispanic"),
+        "pct_white":      (demographics or {}).get(api_row.get("ncessch"), {}).get("pct_white"),
+        "pct_asian":      (demographics or {}).get(api_row.get("ncessch"), {}).get("pct_asian"),
+        "pct_multiracial":(demographics or {}).get(api_row.get("ncessch"), {}).get("pct_multiracial"),
         "school_status": decode_status(api_row.get("school_status")),
         "year_opened": None,             # not in directory endpoint
         "year_closed": None,             # not in directory endpoint
@@ -341,26 +363,7 @@ def map_record(api_row: dict, year: int, demographics: dict = None) -> dict:
 
 
 def score_records(records: list) -> list:
-    """
-    Run the charter survival model on a list of mapped records.
-    Adds survival_score and survival_risk_tier to each record in place.
-    """
-    model = CharterSurvivalModel()
-
-    model_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "models", "charter_survival.pkl",
-    )
-    if os.path.exists(model_path):
-        model.load(model_path)
-
-    df = pd.DataFrame(records)
-    scores = model.predict_batch(df)
-
-    for i, record in enumerate(records):
-        record["survival_score"] = scores["survival_score"].iloc[i]
-        record["survival_risk_tier"] = scores["survival_risk_tier"].iloc[i]
-
+    """Survival model removed. Returns records unchanged (survival fields stay NULL)."""
     return records
 
 
@@ -403,7 +406,8 @@ def main():
     parser.add_argument(
         "--demographics",
         action="store_true",
-        help="Also fetch race/ethnicity enrollment data (pct_black, pct_hispanic, pct_white). "
+        help="Also fetch demographics: race/ethnicity (pct_black, pct_hispanic, pct_white, "
+             "pct_asian, pct_multiracial), ELL (pct_ell), and SPED (pct_sped). "
              "Adds ~3 extra API calls per state.",
     )
     args = parser.parse_args()

@@ -48,8 +48,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import db
 
-BLS_QCEW_API_BASE = "https://data.bls.gov/cew/data/api"
-REQUEST_DELAY = 0.5
+# The old data.bls.gov/cew/data/api endpoint is no longer accessible.
+# We now use the BLS public timeseries API, which supports QCEW employment series.
+# Note: the timeseries API only provides employment counts (ENU series).
+# Wages and establishment counts are not available via this endpoint.
+# For full metrics, download the annual CSV from bls.gov/cew/downloadable-data.htm
+# and use --file mode.
+BLS_TIMESERIES_API = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
+# Without a key: 25 queries/day limit. With a free key: 500 queries/day.
+# Register free at: https://data.bls.gov/registrationEngine/
+# Pass via --bls-key or BLS_API_KEY env var.
+BLS_API_BATCH_SIZE = 50   # max series per request (same with or without key)
+REQUEST_DELAY = 0.3
 
 # State abbreviation → 2-digit FIPS string (used to filter CSV rows by state)
 STATE_ABBREV_TO_FIPS = {
@@ -79,46 +89,100 @@ TOTAL_INDUSTRY_CODE = "10"  # Total, all industries
 # BLS API fetch
 # ---------------------------------------------------------------------------
 
+def _qcew_series_id(area_fips: str, ownership: str, industry: str) -> str:
+    """
+    Build a BLS QCEW employment series ID for the timeseries API.
+
+    Format: ENU + fips(5) + size(1=5, all sizes) + ownership(1) + industry(3 padded)
+    Ownership: "0"=total all, "5"=private sector
+    Industry:  "10"=total all industries, "510"=private sector total
+
+    Known working series:
+      ENU{fips}50010 -> total employment, all industries, all ownerships
+      ENU{fips}50510 -> total employment, all industries, private sector
+    """
+    ind_padded = industry.zfill(3)
+    return f"ENU{area_fips}5{ownership}{ind_padded}"
+
+
+def fetch_qcew_areas(fips_list: list[str], year: int, bls_key: str = None) -> dict[str, list[dict]]:
+    """
+    Fetch annual QCEW employment totals for a batch of counties via the BLS
+    public timeseries API.
+
+    Returns {area_fips: [row_dict, ...]} — two rows per county (total + private).
+
+    Note: the BLS timeseries API only provides employment counts for QCEW.
+    Wages and establishment counts are only available via CSV download.
+    """
+    # Build series IDs: total (own=0, ind=010) and private (own=0, ind=510)
+    series_map = {}   # series_id -> (fips, ownership_code, industry_code)
+    for fips in fips_list:
+        for own, ind in [("0", "10"), ("0", "510")]:
+            sid = _qcew_series_id(fips, own, ind)
+            series_map[sid] = (fips, own, ind)
+
+    results: dict[str, list[dict]] = {f: [] for f in fips_list}
+
+    # BLS allows up to 50 series per request without a key
+    series_ids = list(series_map.keys())
+    for i in range(0, len(series_ids), BLS_API_BATCH_SIZE):
+        batch = series_ids[i:i + BLS_API_BATCH_SIZE]
+        payload = {
+            "seriesid": batch,
+            "startyear": str(year),
+            "endyear": str(year),
+        }
+        if bls_key:
+            payload["registrationkey"] = bls_key
+        resp = requests.post(
+            BLS_TIMESERIES_API,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        d = resp.json()
+
+        for series in d.get("Results", {}).get("series", []):
+            sid = series["seriesID"]
+            fips, own, ind = series_map.get(sid, (None, None, None))
+            if not fips:
+                continue
+            # Annual data has period="A01"
+            annual = [pt for pt in series.get("data", []) if pt.get("period") == "A01"]
+            if not annual:
+                continue
+            emp_val = _to_int(annual[0]["value"])
+            row = {
+                "area_fips":       fips,
+                "area_name":       None,   # not returned by timeseries API
+                "state":           fips[:2],
+                "year":            year,
+                "quarter":         0,      # 0 = annual
+                "industry_code":   ind,
+                "industry_title":  "Total, all industries" if ind == "10" else "Private sector",
+                "ownership_code":  own,
+                "establishments":  None,   # not available via timeseries API
+                "employment":      emp_val,
+                "total_wages":     None,   # not available via timeseries API
+                "avg_weekly_wage": None,   # not available via timeseries API
+            }
+            results[fips].append(row)
+
+        time.sleep(REQUEST_DELAY)
+
+    return results
+
+
 def fetch_qcew_area(area_fips: str, year: int, quarter: int | str) -> list[dict]:
     """
-    Fetch QCEW data for one county/area from the BLS API.
-
-    quarter: 1-4 for quarterly, or 'a' for annual averages.
-    Returns a list of row dicts ready for upsert into bls_qcew.
+    Fetch QCEW employment for a single county. Wrapper around fetch_qcew_areas.
+    quarter is accepted for API compatibility but annual data is always returned
+    (the BLS timeseries API only publishes annual QCEW aggregates).
     """
-    q = str(quarter)
-    url = f"{BLS_QCEW_API_BASE}/{year}/q{q}/area/{area_fips}.json"
-
-    resp = requests.get(url, timeout=30)
-    if resp.status_code == 404:
-        return []
-    resp.raise_for_status()
-
-    data = resp.json()
-    # BLS QCEW API returns: {"quarterly_data": [...]} or {"annual_data": [...]}
-    records = data.get("quarterly_data") or data.get("annual_data") or []
-
-    quarter_num = 0 if q == "a" else int(q)
-    state_fips = area_fips[:2] if len(area_fips) >= 2 else None
-
-    rows = []
-    for rec in records:
-        rows.append({
-            "area_fips":      area_fips,
-            "area_name":      rec.get("area_title"),
-            "state":          state_fips,
-            "year":           year,
-            "quarter":        quarter_num,
-            "industry_code":  str(rec.get("industry_code", "")),
-            "industry_title": rec.get("industry_title"),
-            "ownership_code": str(rec.get("own_code", "")),
-            "establishments": _to_int(rec.get("qtrly_estabs") or rec.get("annual_avg_estabs")),
-            "employment":     _to_int(rec.get("month3_emplvl") or rec.get("annual_avg_emplvl")),
-            "total_wages":    _to_float(rec.get("total_qtrly_wages") or rec.get("total_annual_wages")),
-            "avg_weekly_wage": _to_float(rec.get("avg_wkly_wage")),
-        })
-
-    return rows
+    results = fetch_qcew_areas([area_fips], year)
+    return results.get(area_fips, [])
 
 
 def _to_int(val):
@@ -264,6 +328,12 @@ def main():
         help="5-digit county FIPS codes to fetch from the BLS API. E.g. --fips 06037 17031",
     )
     parser.add_argument(
+        "--all-counties",
+        action="store_true",
+        dest="all_counties",
+        help="Fetch all counties found in the census_tracts table (national load via API).",
+    )
+    parser.add_argument(
         "--year",
         type=int,
         required=True,
@@ -304,10 +374,40 @@ def main():
         action="store_true",
         help="Print column names from the CSV and exit (use with --file).",
     )
+    parser.add_argument(
+        "--bls-key",
+        default=os.environ.get("BLS_API_KEY", ""),
+        dest="bls_key",
+        metavar="KEY",
+        help="BLS API registration key (free at data.bls.gov/registrationEngine/). "
+             "Required for national loads (25 req/day without key, 500 with). "
+             "Also reads from BLS_API_KEY env var.",
+    )
     args = parser.parse_args()
 
+    # --all-counties: pull every county FIPS from the census_tracts table
+    if args.all_counties:
+        db.init_db()
+        import sqlite3
+        DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               "data", "cd_command_center.sqlite")
+        con = sqlite3.connect(DB_PATH)
+        cur = con.cursor()
+        cur.execute(
+            "SELECT DISTINCT SUBSTR(census_tract_id, 1, 5) FROM census_tracts "
+            "WHERE census_tract_id IS NOT NULL AND LENGTH(census_tract_id) >= 5 "
+            "ORDER BY 1"
+        )
+        county_fips = [r[0] for r in cur.fetchall() if r[0]]
+        con.close()
+        if not county_fips:
+            print("Error: no census tracts in DB. Run load_census_tracts.py first.")
+            sys.exit(1)
+        args.fips = county_fips
+        print(f"  --all-counties: {len(args.fips)} counties found in census_tracts table")
+
     if not args.fips and not args.file:
-        print("Error: provide --fips (API mode) or --file (CSV mode).")
+        print("Error: provide --fips / --all-counties (API mode) or --file (CSV mode).")
         sys.exit(1)
 
     if args.fips and not args.annual and not args.quarter:
@@ -343,24 +443,25 @@ def main():
                 return
 
         else:
-            quarter = "a" if args.annual else args.quarter
-            for fips in args.fips:
-                print(f"  County {fips}...", end=" ", flush=True)
-                try:
-                    rows = fetch_qcew_area(fips, args.year, quarter)
-                except requests.RequestException as e:
-                    print(f"Error: {e}")
-                    continue
+            print(f"  Fetching {len(args.fips)} counties via BLS timeseries API...")
+            print("  (Note: API provides employment only; wages/establishments require CSV)")
+            try:
+                area_results = fetch_qcew_areas(args.fips, args.year,
+                                                bls_key=args.bls_key or None)
+            except requests.RequestException as e:
+                raise RuntimeError(f"BLS API request failed: {e}") from e
 
+            counties_done = 0
+            for fips, rows in area_results.items():
                 if not rows:
-                    print("no data")
+                    counties_done += 1
                     continue
 
                 if args.totals_only:
                     rows = [
                         r for r in rows
                         if r.get("ownership_code") in (OWNERSHIP_TOTAL, OWNERSHIP_PRIVATE)
-                        and r.get("industry_code") == TOTAL_INDUSTRY_CODE
+                        and r.get("industry_code") in (TOTAL_INDUSTRY_CODE, "510")
                     ]
 
                 n = db.upsert_rows(
@@ -368,8 +469,13 @@ def main():
                     unique_cols=["area_fips", "year", "quarter", "industry_code", "ownership_code"]
                 )
                 total_loaded += n
-                print(f"{len(rows):,} rows")
-                time.sleep(REQUEST_DELAY)
+                counties_done += 1
+                if len(area_results) > 50:
+                    # For large loads, print a summary every 100 counties instead of every county
+                    if counties_done % 100 == 0 or counties_done == len(area_results):
+                        print(f"  {counties_done}/{len(area_results)} counties done, {total_loaded:,} rows loaded")
+                else:
+                    print(f"  County {fips}: {n} rows")
 
     except Exception as e:
         db.log_load_finish(run_id, rows_loaded=total_loaded, error=str(e))
