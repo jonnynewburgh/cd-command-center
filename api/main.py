@@ -36,6 +36,9 @@ from api.routers import (
     cdfis,
     lending,
     housing,
+    audits,
+    headstart,
+    accountability,
 )
 
 app = FastAPI(
@@ -77,7 +80,10 @@ app.include_router(orgs.router,    prefix="/orgs",     tags=["Organizations / 99
 app.include_router(notes.router,   prefix="/notes",    tags=["Notes & Bookmarks"])
 app.include_router(cdfis.router,   prefix="/cdfis",    tags=["CDFIs & Awards"])
 app.include_router(lending.router, prefix="/lending",  tags=["Lending & Credit"])
-app.include_router(housing.router, prefix="/housing",  tags=["Housing & Labor"])
+app.include_router(housing.router,        prefix="/housing",        tags=["Housing & Labor"])
+app.include_router(audits.router,         prefix="/audits",         tags=["Federal Audits"])
+app.include_router(headstart.router,      prefix="/headstart",      tags=["Head Start"])
+app.include_router(accountability.router, prefix="/accountability", tags=["Accountability"])
 
 
 # ---------------------------------------------------------------------------

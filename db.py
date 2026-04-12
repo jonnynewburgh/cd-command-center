@@ -4061,3 +4061,175 @@ def link_nmtc_coalition_to_projects():
     n = cur.rowcount
     conn.close()
     return n
+
+
+# ---------------------------------------------------------------------------
+# Federal Audit Clearinghouse (Single Audit)
+# ---------------------------------------------------------------------------
+
+def get_federal_audits(state=None, audit_year=None, ein=None, entity_type=None,
+                       has_findings=None, is_going_concern=None, limit=500):
+    """
+    Return federal Single Audit records.
+
+    Args:
+        state:            2-letter state abbreviation
+        audit_year:       fiscal year of audit
+        ein:              auditee EIN
+        entity_type:      'non-profit', 'state', 'local', 'tribal', 'higher-ed'
+        has_findings:     if True, only audits with material weakness or noncompliance
+        is_going_concern: if True, only going-concern opinions
+        limit:            max rows
+    """
+    conditions, params = [], []
+    if state:
+        conditions.append("auditee_state = ?"); params.append(state.upper())
+    if audit_year is not None:
+        conditions.append("audit_year = ?"); params.append(audit_year)
+    if ein:
+        conditions.append("auditee_ein = ?"); params.append(ein)
+    if entity_type:
+        conditions.append("entity_type = ?"); params.append(entity_type)
+    if has_findings:
+        conditions.append("(is_material_weakness = 1 OR is_material_noncompliance = 1)")
+    if is_going_concern:
+        conditions.append("is_going_concern = 1")
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    limit_clause = f"LIMIT {int(limit)}" if limit else ""
+    query = f"""
+        SELECT report_id, auditee_ein, auditee_uei, auditee_name, entity_type,
+               auditee_city, auditee_state, auditee_zip,
+               auditee_contact_name, auditee_email, auditee_phone,
+               audit_year, fy_start_date, fy_end_date,
+               total_amount_expended, gaap_results,
+               is_going_concern, is_material_weakness,
+               is_significant_deficiency, is_material_noncompliance,
+               is_low_risk_auditee, auditor_firm_name,
+               submitted_date, fac_accepted_date
+        FROM federal_audits {where}
+        ORDER BY audit_year DESC, auditee_state, auditee_name
+        {limit_clause}
+    """
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(_adapt_sql(query), conn, params=params)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+def get_federal_audit_by_id(report_id):
+    """Return full detail for a single audit by report_id."""
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(
+            _adapt_sql("SELECT * FROM federal_audits WHERE report_id = ?"),
+            conn, params=[report_id],
+        )
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    if df.empty:
+        return None
+    return df.iloc[0].to_dict()
+
+
+def get_federal_audit_programs(report_id):
+    """Return program-level line items for a single audit."""
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(
+            _adapt_sql("""
+                SELECT award_reference, aln, federal_program_name,
+                       amount_expended, federal_program_total,
+                       is_major, is_loan, loan_balance,
+                       is_direct, is_passthrough_award, passthrough_amount,
+                       cluster_name, findings_count, audit_report_type
+                FROM federal_audit_programs
+                WHERE report_id = ?
+                ORDER BY amount_expended DESC
+            """),
+            conn, params=[report_id],
+        )
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Head Start PIR
+# ---------------------------------------------------------------------------
+
+def get_headstart_programs(state=None, program_type=None, pir_year=None,
+                           grantee_name=None, zip_code=None,
+                           census_tract_id=None, limit=500):
+    """
+    Return Head Start / Early Head Start programs.
+
+    Args:
+        state:           2-letter state abbreviation
+        program_type:    'HS', 'EHS', 'Migrant', 'AIAN'
+        pir_year:        PIR reporting year
+        grantee_name:    substring match on grantee name
+        zip_code:        ZIP code filter
+        census_tract_id: census tract filter
+        limit:           max rows
+    """
+    conditions, params = [], []
+    if state:
+        conditions.append("state = ?"); params.append(state.upper())
+    if program_type:
+        conditions.append("program_type = ?"); params.append(program_type)
+    if pir_year is not None:
+        conditions.append("pir_year = ?"); params.append(pir_year)
+    if grantee_name:
+        conditions.append("grantee_name LIKE ?"); params.append(f"%{grantee_name}%")
+    if zip_code:
+        conditions.append("zip_code = ?"); params.append(zip_code)
+    if census_tract_id:
+        conditions.append("census_tract_id = ?"); params.append(census_tract_id)
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    limit_clause = f"LIMIT {int(limit)}" if limit else ""
+    query = f"""
+        SELECT grant_number, program_number, pir_year,
+               region, state, program_type, grantee_name, program_name,
+               agency_type, city, zip_code, census_tract_id,
+               latitude, longitude,
+               funded_enrollment, total_cumulative_enrollment,
+               total_slots_center_based, total_classes,
+               home_based_slots, family_child_care_slots,
+               total_staff, classroom_teachers,
+               children_with_insurance_end, children_no_insurance_start,
+               children_at_fqhc_start, child_care_partners, leas_in_service_area
+        FROM headstart_programs {where}
+        ORDER BY state, grantee_name, pir_year DESC
+        {limit_clause}
+    """
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(_adapt_sql(query), conn, params=params)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+def get_headstart_by_id(grant_number, program_number, pir_year):
+    """Return full detail for a single Head Start program."""
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(
+            _adapt_sql("""
+                SELECT * FROM headstart_programs
+                WHERE grant_number = ? AND program_number = ? AND pir_year = ?
+            """),
+            conn, params=[grant_number, program_number, pir_year],
+        )
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    if df.empty:
+        return None
+    return df.iloc[0].to_dict()

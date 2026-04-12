@@ -1,5 +1,5 @@
 """
-api/routers/nmtc.py — NMTC project and CDE allocation endpoints.
+api/routers/nmtc.py — NMTC project, CDE allocation, and Coalition project endpoints.
 """
 
 from typing import Optional, List
@@ -75,3 +75,22 @@ def list_cdes(
     """Return CDE allocation records, optionally filtered by state."""
     df = db.get_cde_allocations(states=states)
     return df_to_records(df)
+
+
+@router.get("/coalition")
+def list_coalition_projects(
+    state:           Optional[str]  = Query(None, description="2-letter state"),
+    cde_name:        Optional[str]  = Query(None, description="Substring match on CDE name"),
+    investment_year: Optional[int]  = Query(None),
+    matched_only:    bool           = Query(False, description="Only projects matched to CDFI Fund records"),
+    limit:           int            = Query(500),
+):
+    """Return NMTC Coalition transaction-level project records."""
+    df = db.get_nmtc_coalition_projects(
+        state=state,
+        cde_name=cde_name,
+        investment_year=investment_year,
+        matched_only=matched_only,
+        limit=limit,
+    )
+    return {"data": df_to_records(df), "total": len(df)}
