@@ -1,44 +1,61 @@
 """
-utils/db_backup.py -Table-level backup/restore helpers for the ETL pipeline.
+utils/db_backup.py — Table-level backup/restore helpers for the ETL pipeline.
 
 Before each ETL stage, call backup_tables() to snapshot the affected tables.
 After the stage completes, call validate_and_finalize() to either:
   - keep the new data (drop backups) if no data was lost
   - restore from backups if the load failed or row counts dropped below threshold
 
+Supports both SQLite and PostgreSQL via db.get_connection().
+
 Usage in run_pipeline.py:
     from utils.db_backup import backup_tables, validate_and_finalize
 
-    backups = backup_tables(db_path, ["schools", "charter_schools"])
+    backups = backup_tables(["schools", "charter_schools"])
     ok = run_subprocess(cmd)
-    validate_and_finalize(db_path, backups, load_succeeded=ok)
+    validate_and_finalize(backups, load_succeeded=ok)
 """
 
-import sqlite3
+import os
+import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import db
 
-def backup_tables(db_path: str, tables: list[str]) -> list[dict]:
+
+def _table_exists(cur, table):
+    """Check if a table exists (works for both SQLite and PostgreSQL)."""
+    if db._IS_POSTGRES:
+        cur.execute(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema='public' AND table_name=%s",
+            (table,),
+        )
+    else:
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        )
+    return cur.fetchone() is not None
+
+
+def backup_tables(db_path_unused, tables: list[str]) -> list[dict]:
     """
     Snapshot each table by copying it to a timestamped backup table.
 
+    db_path_unused: kept for backwards compatibility; ignored (uses db.get_connection()).
+
     Returns a list of backup records:
         [{"table": "schools", "backup": "schools_bak_1712345678", "pre_count": 97735}, ...]
-
-    If a table doesn't exist yet (first-ever load), it is recorded with
-    backup=None and pre_count=0 -no backup is needed because there's nothing to lose.
     """
-    conn = sqlite3.connect(db_path)
+    conn = db.get_connection()
     records = []
     try:
         cur = conn.cursor()
         ts = int(time.time())
         for table in tables:
-            cur.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
-            )
-            if not cur.fetchone():
-                # Table doesn't exist yet -nothing to back up
+            if not _table_exists(cur, table):
                 records.append({"table": table, "backup": None, "pre_count": 0})
                 continue
 
@@ -55,7 +72,7 @@ def backup_tables(db_path: str, tables: list[str]) -> list[dict]:
 
 
 def validate_and_finalize(
-    db_path: str,
+    db_path_unused,
     backups: list[dict],
     load_succeeded: bool,
     min_fraction: float = 0.90,
@@ -73,12 +90,12 @@ def validate_and_finalize(
     if not backups:
         return load_succeeded
 
-    conn = sqlite3.connect(db_path)
+    conn = db.get_connection()
     try:
         cur = conn.cursor()
 
         if not load_succeeded:
-            print("  [guard] Load failed -restoring all backups.")
+            print("  [guard] Load failed — restoring all backups.")
             _restore_all(cur, backups)
             conn.commit()
             return False
@@ -89,11 +106,7 @@ def validate_and_finalize(
             table = rec["table"]
             pre_count = rec["pre_count"]
             if pre_count == 0:
-                # First load -any outcome is acceptable
-                cur.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
-                )
-                if cur.fetchone():
+                if _table_exists(cur, table):
                     cur.execute(f"SELECT COUNT(*) FROM {table}")
                     post_count = cur.fetchone()[0]
                     print(f"  [guard] {table}: first load -> {post_count:,} rows")
@@ -115,32 +128,31 @@ def validate_and_finalize(
                 )
 
         if problems:
-            print("  [guard] Data loss detected -restoring all backups:")
+            print("  [guard] Data loss detected — restoring all backups:")
             for p in problems:
                 print(f"    - {p}")
             _restore_all(cur, backups)
             conn.commit()
             return False
 
-        # All good -drop backups
+        # All good — drop backups
         for rec in backups:
             if rec["backup"]:
                 cur.execute(f"DROP TABLE IF EXISTS {rec['backup']}")
         conn.commit()
-        print("  [guard] Validation passed -backups dropped.")
+        print("  [guard] Validation passed — backups dropped.")
         return True
 
     finally:
         conn.close()
 
 
-def _restore_all(cur: sqlite3.Cursor, backups: list[dict]):
-    """Drop current tables and rename backups back. Called inside an open connection."""
+def _restore_all(cur, backups: list[dict]):
+    """Drop current tables and rename backups back."""
     for rec in backups:
         table = rec["table"]
         backup = rec["backup"]
         if backup is None:
-            # No backup existed (first load that failed) -just drop whatever was loaded
             cur.execute(f"DROP TABLE IF EXISTS {table}")
             print(f"  [restore] {table}: dropped (no prior data to restore)")
         else:
@@ -149,32 +161,37 @@ def _restore_all(cur: sqlite3.Cursor, backups: list[dict]):
             print(f"  [restore] {table}: restored from {backup}")
 
 
-def list_orphaned_backups(db_path: str) -> list[str]:
-    """
-    Return names of any leftover _bak_* tables (e.g. from a crashed run).
-    Run this manually to inspect or clean up stranded backups.
-    """
-    conn = sqlite3.connect(db_path)
+def list_orphaned_backups() -> list[str]:
+    """Return names of any leftover _bak_* tables."""
+    conn = db.get_connection()
     try:
         cur = conn.cursor()
-        cur.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%_bak_%'"
-        )
-        return [r[0] for r in cur.fetchall()]
+        if db._IS_POSTGRES:
+            cur.execute(
+                "SELECT tablename FROM pg_tables "
+                "WHERE schemaname='public' AND tablename LIKE '%\\_bak\\_%'"
+            )
+            return [r[0] for r in cur.fetchall()]
+        else:
+            cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%_bak_%'"
+            )
+            return [r[0] for r in cur.fetchall()]
     finally:
         conn.close()
 
 
-def drop_orphaned_backups(db_path: str):
-    """Drop all leftover _bak_* tables. Use after confirming you don't need them."""
-    names = list_orphaned_backups(db_path)
+def drop_orphaned_backups():
+    """Drop all leftover _bak_* tables."""
+    names = list_orphaned_backups()
     if not names:
         print("No orphaned backup tables found.")
         return
-    conn = sqlite3.connect(db_path)
+    conn = db.get_connection()
     try:
+        cur = conn.cursor()
         for name in names:
-            conn.execute(f"DROP TABLE IF EXISTS {name}")
+            cur.execute(f"DROP TABLE IF EXISTS {name}")
             print(f"  Dropped: {name}")
         conn.commit()
     finally:

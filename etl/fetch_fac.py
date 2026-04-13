@@ -145,18 +145,29 @@ def fac_request(endpoint: str, params: dict, api_key: str) -> list[dict]:
     """
     Hit a FAC PostgREST endpoint and return parsed JSON.
     Caller is responsible for pagination via 'offset' / 'limit' params.
+    Retries up to 3 times on connection errors and rate limits.
     """
     url = f"{FAC_BASE}/{endpoint}"
     headers = {
         "X-Api-Key": api_key,
         "Accept": "application/json",
     }
-    resp = requests.get(url, params=params, headers=headers, timeout=60)
-    if resp.status_code == 429:
-        # Rate limited — back off and retry once
-        print("  WARNING: rate limited (429), sleeping 60s and retrying...", file=sys.stderr)
-        time.sleep(60)
-        resp = requests.get(url, params=params, headers=headers, timeout=60)
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, params=params, headers=headers, timeout=90)
+            if resp.status_code == 429:
+                wait = 60 * (attempt + 1)
+                print(f"  WARNING: rate limited (429), sleeping {wait}s (attempt {attempt+1}/3)...", file=sys.stderr)
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            wait = 30 * (attempt + 1)
+            print(f"  WARNING: {type(e).__name__}, sleeping {wait}s (attempt {attempt+1}/3)...", file=sys.stderr)
+            time.sleep(wait)
+    # Final attempt — let it raise
+    resp = requests.get(url, params=params, headers=headers, timeout=120)
     resp.raise_for_status()
     return resp.json()
 

@@ -29,7 +29,9 @@ Stages (in order):
     cdfi-awards     CDFI Fund award data (data.gov, auto)
     cdfi-dir        CDFI certified institution directory (data.gov, auto)
     scsc            SCSC CPF charter accountability scores (charters repo)
-    edfacts         EDFacts proficiency/graduation data (Ed.gov, auto)
+    fred            FRED market rates — SOFR, Treasuries, etc. (needs FRED_API_KEY)
+    fac             Federal Audit Clearinghouse Single Audits (needs FAC_API_KEY)
+    headstart       Head Start PIR program data (from HSES Excel exports in data/raw/childcare)
 
 Manual-only stages (require --file):
     nmtc-data       NMTC project data (CDFI Fund Excel — download manually)
@@ -76,6 +78,8 @@ STAGE_TABLES = {
     "cdfi-dir":    ["cdfi_directory"],
     "scsc":        ["scsc_cpf"],
     "fred":        ["market_rates"],
+    "fac":         ["federal_audits", "federal_audit_programs"],
+    "headstart":   ["headstart_programs"],
 }
 
 # ---------------------------------------------------------------------------
@@ -213,6 +217,45 @@ def build_stages(args):
     else:
         stages.append(("scsc", None))   # charters repo not present
 
+    # ── FRED market rates ────────────────────────────────────────────────────
+    if fred_key:
+        stages.append(("fred", [
+            sys.executable, os.path.join(ETL_DIR, "fetch_fred_rates.py"),
+            "--api-key", fred_key, "--latest",
+        ]))
+    else:
+        stages.append(("fred", None))  # needs FRED_API_KEY
+
+    # ── Federal Audit Clearinghouse ──────────────────────────────────────────
+    fac_key = os.environ.get("FAC_API_KEY", "")
+    if fac_key:
+        if args.states:
+            for st in args.states:
+                stages.append(("fac", [
+                    sys.executable, os.path.join(ETL_DIR, "fetch_fac.py"),
+                    "--state", st, "--year", year,
+                ]))
+        else:
+            stages.append(("fac", [
+                sys.executable, os.path.join(ETL_DIR, "fetch_fac.py"),
+                "--all-states", "--year", year,
+            ]))
+    else:
+        stages.append(("fac", None))  # needs FAC_API_KEY
+
+    # ── Head Start PIR ───────────────────────────────────────────────────────
+    pir_dir = os.path.join(REPO_ROOT, "data", "raw", "childcare")
+    if os.path.isdir(pir_dir):
+        hs_cmd = [
+            sys.executable, os.path.join(ETL_DIR, "load_headstart_pir.py"),
+            "--dir", pir_dir,
+        ]
+        if args.states:
+            hs_cmd += ["--states"] + args.states
+        stages.append(("headstart", hs_cmd))
+    else:
+        stages.append(("headstart", None))
+
     return stages
 
 
@@ -346,9 +389,12 @@ def main():
         # Stage has no command (requires manual setup)
         if cmd is None:
             skip_reason = {
-                "bls-unemp": "Set FRED_API_KEY env var to enable BLS unemployment download",
-                "bls-qcew":  "Provide --fips args or bulk file; run fetch_bls_qcew.py manually",
-                "scsc":      "charters repo not found at ../charters/data/cpf_all_years.csv",
+                "bls-unemp":  "Set FRED_API_KEY env var to enable BLS unemployment download",
+                "bls-qcew":   "Provide --fips args or bulk file; run fetch_bls_qcew.py manually",
+                "scsc":       "charters repo not found at ../charters/data/cpf_all_years.csv",
+                "fred":       "Set FRED_API_KEY env var to enable market rates download",
+                "fac":        "Set FAC_API_KEY env var to enable Federal Audit Clearinghouse download",
+                "headstart":  "No PIR files found in data/raw/childcare/",
             }.get(name, "manual setup required")
             print(f"\n  [SKIP] {name}: {skip_reason}")
             skipped.append(name)

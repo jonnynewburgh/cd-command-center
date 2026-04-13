@@ -19,7 +19,7 @@ This is NOT a reporting tool. It's a working tool for finding, evaluating, and c
 - **Backend API:** FastAPI (`api/` directory in this repo) — wraps `db.py`, runs on port 8000
 - **Database:** SQLite for development; designed for migration to PostgreSQL for production multi-user deployment
 - **Data access:** All database queries go through a shared `db.py` module so the SQLite→PostgreSQL migration is a single-file change
-- **Modeling:** (survival model removed — replaced by SCSC CPF accountability scores for GA charters)
+- **Modeling:** SCSC CPF accountability scores for GA charters
 - **Deployment (future):** Render or similar
 
 ## Project Structure
@@ -48,8 +48,6 @@ cd-command-center/
 ├── data/
 │   ├── cd_command_center.sqlite  # Main database
 │   └── raw/                      # Raw source files (CSV, etc.) — NOT committed to Git
-├── models/
-│   └── charter_survival.py  # Charter school survival prediction model
 ├── utils/
 │   ├── geo.py             # Geography helpers (census tract lookups, distance calculations)
 │   ├── maps.py            # Map rendering functions
@@ -94,6 +92,9 @@ The database (`cd_command_center.sqlite`) consolidates all data sources. Key tab
 - `cra_sb_aggr` — FFIEC CRA A2-1 all-bank aggregate small business lending by tract (2004-2024; ~560K rows)
 - `scsc_cpf` — SCSC Comprehensive Performance Framework scores for GA charter schools
 - `nmtc_coalition_projects` — NMTC Coalition transaction-level project database, matched to nmtc_projects
+- `federal_audits` — GSA FAC Single Audit submissions (64K+ audits, 2023-2024); EIN-keyed, joins to all entity tables
+- `federal_audit_programs` — per-ALN line items from Single Audits (1.2M+ rows); federal program detail, findings, amounts
+- `headstart_programs` — Head Start PIR program-level data (46K+ records, 2008-2025); enrollment, staffing, health, demographics
 
 Every facility table has `latitude`, `longitude`, and `census_tract_id` columns for geographic joins.
 
@@ -103,8 +104,7 @@ Build in this order. Each phase should produce a working, usable version of the 
 
 ### Phase 1: Schools + LEA data ✅
 - Import all public school data (charter + traditional) from NCES via Urban Institute API
-- Charter school survival model integration (heuristic scoring)
-- Map view: schools by location, colored by risk/survival score (charters) or blue (traditional)
+- Map view: schools by location, colored by type (charter vs. traditional)
 - Filter by state, district, enrollment, demographics, school type
 - Census tract assignment via batch geocoding
 
@@ -160,7 +160,6 @@ Build in this order. Each phase should produce a working, usable version of the 
 - Authentication and user permissions
 - Migrate to PostgreSQL
 - Performance optimization for concurrent users
-- Train real survival model from historical closure data
 
 ## Key Features (All Phases)
 
@@ -367,6 +366,21 @@ python etl/load_nmtc_coalition.py --file data/raw/nmtc_transaction_report_2024.x
 python etl/load_nmtc_coalition.py --file data/raw/nmtc_transaction_report_2024.xlsx --columns-only
 python etl/load_nmtc_coalition.py --file data/raw/nmtc_transaction_report_2024.xlsx --dry-run
 python etl/load_nmtc_coalition.py --match-only              # re-run matching on loaded records
+
+# Load Federal Audit Clearinghouse (FAC) Single Audit data
+# Free API key at: https://api.data.gov/signup/ — set FAC_API_KEY env var
+python etl/fetch_fac.py --state GA --year 2024             # single state test
+python etl/fetch_fac.py --state GA --years 2023 2024       # multiple years
+python etl/fetch_fac.py --all-states --year 2024           # all states (slow — rate limited)
+python etl/fetch_fac.py --state GA --year 2024 --dry-run   # preview without writing
+
+# Load Head Start PIR (Program Information Report) from HSES Excel export
+# Requires HSES account (https://hses.ohs.acf.hhs.gov) — set HSES_USERNAME/HSES_PASSWORD env vars
+python etl/load_headstart_pir.py --file data/raw/childcare/PIR_Export_2025.xlsx
+python etl/load_headstart_pir.py --dir data/raw/childcare                     # batch all PIR files
+python etl/load_headstart_pir.py --dir data/raw/childcare --states GA TX      # filter by state
+python etl/load_headstart_pir.py --file data/raw/childcare/PIR_Export_2025.xlsx --columns-only
+python etl/load_headstart_pir.py --file data/raw/childcare/PIR_Export_2025.xlsx --dry-run
 
 # Run full ETL pipeline (auto-downloads everything it can)
 python etl/run_pipeline.py                         # all auto-downloadable stages

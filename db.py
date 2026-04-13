@@ -128,9 +128,6 @@ def init_db():
             school_status TEXT,            -- e.g. 'Open', 'Closed', 'Pending'
             year_opened INTEGER,
             year_closed INTEGER,
-            -- Survival model output (charter schools only)
-            survival_score REAL,           -- 0–1 probability of remaining open
-            survival_risk_tier TEXT,       -- 'Low', 'Medium', 'High'
             -- Metadata
             data_year INTEGER,             -- School year the data represents
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -154,7 +151,7 @@ def init_db():
                         grade_low, grade_high, is_charter,
                         pct_free_reduced_lunch, pct_ell, pct_sped, pct_black, pct_hispanic, pct_white,
                         school_status, year_opened, year_closed,
-                        survival_score, survival_risk_tier, data_year, created_at, updated_at
+                        data_year, created_at, updated_at
                     )
                     SELECT
                         nces_id, school_name, lea_name, lea_id, state, city, address,
@@ -162,7 +159,7 @@ def init_db():
                         grade_low, grade_high, 1,
                         pct_free_reduced_lunch, pct_ell, pct_sped, pct_black, pct_hispanic, pct_white,
                         school_status, year_opened, year_closed,
-                        survival_score, survival_risk_tier, data_year, created_at, updated_at
+                        data_year, created_at, updated_at
                     FROM charter_schools
                 """)
                 print(f"  Migrated {old_count:,} records from charter_schools → schools table")
@@ -361,7 +358,6 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_schools_state      ON schools(state)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_schools_is_charter ON schools(is_charter)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_schools_status     ON schools(school_status)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_schools_risk_tier  ON schools(survival_risk_tier)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_schools_lea_id     ON schools(lea_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_schools_name       ON schools(school_name)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_schools_city       ON schools(city)")
@@ -1333,9 +1329,6 @@ def get_schools(
     states=None,
     min_enrollment=None,
     max_enrollment=None,
-    risk_tiers=None,
-    min_survival_score=None,
-    max_survival_score=None,
     school_status=None,
     county=None,
     census_tract_id=None,
@@ -1354,9 +1347,6 @@ def get_schools(
         states: list of state abbreviations, e.g. ['CA', 'TX']
         min_enrollment: minimum enrollment (inclusive)
         max_enrollment: maximum enrollment (inclusive)
-        risk_tiers: list of risk tier labels, e.g. ['High', 'Medium']
-        min_survival_score: minimum survival score 0–1
-        max_survival_score: maximum survival score 0–1
         school_status: list of status strings, e.g. ['Open']
         county: county name substring match
         census_tract_id: exact census tract FIPS code
@@ -1381,19 +1371,6 @@ def get_schools(
     if max_enrollment is not None:
         conditions.append("s.enrollment <= ?")
         params.append(max_enrollment)
-
-    if risk_tiers:
-        placeholders = ",".join("?" * len(risk_tiers))
-        conditions.append(f"s.survival_risk_tier IN ({placeholders})")
-        params.extend(risk_tiers)
-
-    if min_survival_score is not None:
-        conditions.append("s.survival_score >= ?")
-        params.append(min_survival_score)
-
-    if max_survival_score is not None:
-        conditions.append("s.survival_score <= ?")
-        params.append(max_survival_score)
 
     if school_status:
         placeholders = ",".join("?" * len(school_status))
@@ -1479,23 +1456,6 @@ def get_charter_schools(**kwargs) -> pd.DataFrame:
     return get_schools(**kwargs)
 
 
-def bulk_update_survival_scores(df: pd.DataFrame):
-    """
-    Update survival_score and survival_risk_tier for a batch of charter schools.
-
-    Args:
-        df: DataFrame with columns: nces_id, survival_score, survival_risk_tier
-    """
-    conn = get_connection()
-    cur  = conn.cursor()
-    rows = df[["survival_score", "survival_risk_tier", "nces_id"]].values.tolist()
-    cur.executemany(
-        "UPDATE schools SET survival_score = ?, survival_risk_tier = ? WHERE nces_id = ?",
-        rows,
-    )
-    conn.commit()
-    conn.close()
-
 
 @_cached(ttl=300)
 def get_school_by_id(school_id: int) -> dict:
@@ -1555,8 +1515,6 @@ def get_school_summary(charter_only=False) -> dict:
                 SELECT
                     COUNT(*) as total_schools,
                     SUM(CASE WHEN school_status = 'Open' THEN 1 ELSE 0 END) as open_schools,
-                    SUM(CASE WHEN survival_risk_tier = 'High' THEN 1 ELSE 0 END) as high_risk_schools,
-                    AVG(survival_score) as avg_survival_score,
                     SUM(enrollment) as total_enrollment
                 FROM {table}
                 {charter_filter}
@@ -4233,3 +4191,192 @@ def get_headstart_by_id(grant_number, program_number, pir_year):
     if df.empty:
         return None
     return df.iloc[0].to_dict()
+
+
+# ---------------------------------------------------------------------------
+# Tear sheet — aggregated data for a single school PDF report
+# ---------------------------------------------------------------------------
+
+def get_school_tearsheet_data(nces_id: str) -> dict:
+    """
+    Return all data needed to render a one-page tear sheet for a school.
+
+    Queries multiple tables and returns a single dict with keys:
+      school, enrollment_history, demographics, accountability,
+      cpf_scores, financials, nearby_schools, census_tract
+    Each section degrades gracefully if data is missing (returns None or empty list).
+    """
+    from utils.geo import filter_by_radius
+    import sqlite3 as _sqlite3
+
+    conn = get_connection()
+    conn.row_factory = _sqlite3.Row
+    cur = conn.cursor()
+
+    result = {}
+
+    # --- School record ---
+    cur.execute("SELECT * FROM schools WHERE nces_id = ?", (nces_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return None  # School not found
+    school = dict(row)
+    result["school"] = school
+
+    # --- Enrollment history ---
+    try:
+        df = pd.read_sql_query(
+            "SELECT school_year, enrollment, pct_free_reduced_lunch "
+            "FROM enrollment_history WHERE nces_id = ? ORDER BY school_year ASC",
+            conn, params=[nces_id],
+        )
+        result["enrollment_history"] = df.to_dict("records") if not df.empty else []
+    except Exception:
+        result["enrollment_history"] = []
+
+    # --- Demographics (from current school record) ---
+    result["demographics"] = {
+        "pct_free_reduced_lunch": school.get("pct_free_reduced_lunch"),
+        "pct_sped": school.get("pct_sped"),
+        "pct_ell": school.get("pct_ell"),
+        "pct_black": school.get("pct_black"),
+        "pct_hispanic": school.get("pct_hispanic"),
+        "pct_white": school.get("pct_white"),
+        "pct_asian": school.get("pct_asian"),
+        "pct_multiracial": school.get("pct_multiracial"),
+    }
+
+    # --- LEA accountability (proficiency + graduation) ---
+    lea_id = school.get("lea_id")
+    if lea_id:
+        try:
+            df = pd.read_sql_query(
+                "SELECT * FROM lea_accountability WHERE lea_id = ? ORDER BY data_year DESC",
+                conn, params=[lea_id],
+            )
+            result["accountability"] = df.to_dict("records") if not df.empty else []
+        except Exception:
+            result["accountability"] = []
+    else:
+        result["accountability"] = []
+
+    # --- State and district comparison baselines ---
+    try:
+        cur.execute("""
+            SELECT AVG(proficiency_reading) as state_avg_reading,
+                   AVG(proficiency_math) as state_avg_math,
+                   AVG(graduation_rate) as state_avg_graduation
+            FROM lea_accountability WHERE state = ?
+        """, (school.get("state", "GA"),))
+        state_row = cur.fetchone()
+        result["state_averages"] = dict(state_row) if state_row else {}
+    except Exception:
+        result["state_averages"] = {}
+
+    # --- SCSC CPF scores (GA charter accountability) ---
+    try:
+        df = pd.read_sql_query(
+            "SELECT school_year, academic_designation, financial_designation, "
+            "operations_score, operations_designation "
+            "FROM scsc_cpf WHERE nces_id = ? ORDER BY school_year DESC",
+            conn, params=[nces_id],
+        )
+        result["cpf_scores"] = df.to_dict("records") if not df.empty else []
+    except Exception:
+        result["cpf_scores"] = []
+
+    # --- Financial data (990 + ratios) ---
+    ein = school.get("ein")
+    if ein:
+        try:
+            df = pd.read_sql_query(
+                "SELECT tax_year, total_revenue, total_expenses, total_assets, "
+                "total_liabilities, unrestricted_net_assets, cash_savings "
+                "FROM irs_990_history WHERE ein = ? ORDER BY tax_year DESC",
+                conn, params=[ein],
+            )
+            result["financials_990"] = df.to_dict("records") if not df.empty else []
+        except Exception:
+            result["financials_990"] = []
+
+        try:
+            df = pd.read_sql_query(
+                "SELECT * FROM financial_ratios WHERE ein = ? ORDER BY fiscal_year DESC LIMIT 1",
+                conn, params=[ein],
+            )
+            result["financial_ratios"] = df.iloc[0].to_dict() if not df.empty else {}
+        except Exception:
+            result["financial_ratios"] = {}
+    else:
+        result["financials_990"] = []
+        result["financial_ratios"] = {}
+
+    # --- Nearby schools (within 10 miles) ---
+    lat, lon = school.get("latitude"), school.get("longitude")
+    if lat and lon:
+        try:
+            all_schools = pd.read_sql_query(
+                "SELECT nces_id, school_name, enrollment, is_charter, "
+                "pct_free_reduced_lunch, pct_black, pct_hispanic, pct_white, "
+                "latitude, longitude FROM schools "
+                "WHERE state = ? AND school_status = 'Open' AND nces_id != ?",
+                conn, params=[school.get("state", "GA"), nces_id],
+            )
+            if not all_schools.empty:
+                nearby = filter_by_radius(all_schools, lat, lon, radius_miles=10.0)
+                if not nearby.empty:
+                    nearby = nearby.nsmallest(8, "distance_miles")
+                    nearby_list = nearby.to_dict("records")
+                    for ns in nearby_list:
+                        ns_nces = ns.get("nces_id")
+                        if ns_nces:
+                            cur.execute(
+                                "SELECT s.lea_id FROM schools s WHERE s.nces_id = ?",
+                                (ns_nces,),
+                            )
+                            ns_row = cur.fetchone()
+                            if ns_row:
+                                ns_lea_id = dict(ns_row).get("lea_id")
+                                if ns_lea_id:
+                                    cur.execute(
+                                        "SELECT accountability_rating, graduation_rate "
+                                        "FROM lea_accountability WHERE lea_id = ? "
+                                        "ORDER BY data_year DESC LIMIT 1",
+                                        (ns_lea_id,),
+                                    )
+                                    acct = cur.fetchone()
+                                    if acct:
+                                        acct_d = dict(acct)
+                                        ns["accountability_rating"] = acct_d.get("accountability_rating")
+                                        ns["graduation_rate"] = acct_d.get("graduation_rate")
+                    result["nearby_schools"] = nearby_list
+                else:
+                    result["nearby_schools"] = []
+            else:
+                result["nearby_schools"] = []
+        except Exception:
+            result["nearby_schools"] = []
+    else:
+        result["nearby_schools"] = []
+
+    # --- Census tract context ---
+    tract_id = school.get("census_tract_id")
+    if tract_id:
+        try:
+            cur.execute(
+                "SELECT total_population, median_household_income, poverty_rate, "
+                "pct_minority, unemployment_rate, is_nmtc_eligible, "
+                "nmtc_eligibility_tier, is_opportunity_zone "
+                "FROM census_tracts WHERE census_tract_id = ?",
+                (tract_id,),
+            )
+            tract_row = cur.fetchone()
+            result["census_tract"] = dict(tract_row) if tract_row else {}
+        except Exception:
+            result["census_tract"] = {}
+    else:
+        result["census_tract"] = {}
+
+    conn.close()
+    return result
