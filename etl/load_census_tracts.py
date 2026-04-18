@@ -33,6 +33,7 @@ Usage:
 """
 
 import argparse
+import logging
 import sys
 import os
 import time
@@ -43,30 +44,9 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import db
+from utils.state_fips import STATE_FIPS, FIPS_STATE
 
-# ---------------------------------------------------------------------------
-# State FIPS codes
-# ---------------------------------------------------------------------------
-
-# Maps 2-letter abbreviation → 2-digit FIPS string (Census API uses string format)
-STATE_FIPS = {
-    "AL": "01", "AK": "02", "AZ": "04", "AR": "05", "CA": "06",
-    "CO": "08", "CT": "09", "DE": "10", "DC": "11", "FL": "12",
-    "GA": "13", "HI": "15", "ID": "16", "IL": "17", "IN": "18",
-    "IA": "19", "KS": "20", "KY": "21", "LA": "22", "ME": "23",
-    "MD": "24", "MA": "25", "MI": "26", "MN": "27", "MS": "28",
-    "MO": "29", "MT": "30", "NE": "31", "NV": "32", "NH": "33",
-    "NJ": "34", "NM": "35", "NY": "36", "NC": "37", "ND": "38",
-    "OH": "39", "OK": "40", "OR": "41", "PA": "42", "RI": "44",
-    "SC": "45", "SD": "46", "TN": "47", "TX": "48", "UT": "49",
-    "VT": "50", "VA": "51", "WA": "53", "WV": "54", "WI": "55",
-    "WY": "56",
-    # Territories with ACS data
-    "PR": "72",
-}
-
-# Reverse map: FIPS string → abbreviation
-FIPS_STATE = {v: k for k, v in STATE_FIPS.items()}
+log = logging.getLogger(__name__)
 
 # ACS variables to fetch
 ACS_VARIABLES = [
@@ -160,7 +140,7 @@ def fetch_state_tracts(state_fips: str, year: int, api_key: str = None) -> list[
         resp.raise_for_status()
         data = resp.json()
     except requests.RequestException as e:
-        print(f"    Census API error for state {state_fips}: {e}")
+        log.info(f"    Census API error for state {state_fips}: {e}")
         return []
 
     if not data or len(data) < 2:
@@ -291,7 +271,7 @@ def fetch_state_tracts_historical(state_fips: str, year: int, api_key: str = Non
         resp.raise_for_status()
         data = resp.json()
     except requests.RequestException as e:
-        print(f"    Census API error for state {state_fips} (year {year}): {e}")
+        log.info(f"    Census API error for state {state_fips} (year {year}): {e}")
         return []
 
     if not data or len(data) < 2:
@@ -428,6 +408,8 @@ def main():
     )
     args = parser.parse_args()
 
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+
     if not args.states and not args.all_states:
         parser.error("Specify --states CA TX ... or --all")
 
@@ -436,14 +418,14 @@ def main():
     else:
         unknown = [s for s in args.states if s.upper() not in STATE_FIPS]
         if unknown:
-            print(f"Error: unknown state(s): {', '.join(unknown)}")
+            log.error(f"Error: unknown state(s): {', '.join(unknown)}")
             sys.exit(1)
         states_to_fetch = {s.upper(): STATE_FIPS[s.upper()] for s in args.states}
 
-    print(f"CD Command Center — Census Tract ACS Data Load")
-    print(f"  ACS year: {args.year} (5-year estimates)")
-    print(f"  States: {len(states_to_fetch)} ({', '.join(states_to_fetch.keys())})")
-    print(f"  API key: {'provided' if args.api_key else 'not provided (rate limited)'}")
+    log.info(f"CD Command Center — Census Tract ACS Data Load")
+    log.info(f"  ACS year: {args.year} (5-year estimates)")
+    log.info(f"  States: {len(states_to_fetch)} ({', '.join(states_to_fetch.keys())})")
+    log.info(f"  API key: {'provided' if args.api_key else 'not provided (rate limited)'}")
     print()
 
     db.init_db()
@@ -456,7 +438,7 @@ def main():
         raw_records = fetch_state_tracts(fips, args.year, args.api_key)
 
         if not raw_records:
-            print(f" no data returned, skipping")
+            log.info(f" no data returned, skipping")
             continue
 
         print(f" {len(raw_records):,} tracts", end="", flush=True)
@@ -477,39 +459,39 @@ def main():
         time.sleep(PAGE_SLEEP)
 
     print()
-    print(f"Census tract load complete.")
-    print(f"  Total loaded: {total_loaded:,}")
+    log.info(f"Census tract load complete.")
+    log.info(f"  Total loaded: {total_loaded:,}")
     if total_errors:
-        print(f"  Errors: {total_errors:,}")
+        log.info(f"  Errors: {total_errors:,}")
 
     # Show NMTC summary
     summary = db.get_census_tract_summary()
     print()
-    print(f"Database now contains:")
-    print(f"  Total tracts:         {summary.get('total_tracts', 0):,}")
-    print(f"  LIC or better:        {summary.get('eligible_tracts', 0):,}")
-    print(f"  Severely Distressed:  {summary.get('severely_distressed', 0):,}")
-    print(f"  Deep Distress:        {summary.get('deep_distress', 0):,}")
+    log.info(f"Database now contains:")
+    log.info(f"  Total tracts:         {summary.get('total_tracts', 0):,}")
+    log.info(f"  LIC or better:        {summary.get('eligible_tracts', 0):,}")
+    log.info(f"  Severely Distressed:  {summary.get('severely_distressed', 0):,}")
+    log.info(f"  Deep Distress:        {summary.get('deep_distress', 0):,}")
 
     # --- Historical mode: load 5-years-ago data and compute change columns ---
     if args.historical:
         historical_year = args.year - 5
         print()
-        print(f"Loading historical ACS data for year {historical_year} (5 years prior)...")
+        log.info(f"Loading historical ACS data for year {historical_year} (5 years prior)...")
 
         total_historical = 0
         for abbr, fips in states_to_fetch.items():
             print(f"  Fetching {abbr} ({historical_year})...", end="", flush=True)
             hist_records = fetch_state_tracts_historical(fips, historical_year, args.api_key)
             if not hist_records:
-                print(" no data returned, skipping")
+                log.info(" no data returned, skipping")
                 continue
             updated = apply_historical_data(hist_records)
             total_historical += updated
-            print(f" {updated:,} tracts updated with historical data")
+            log.info(f" {updated:,} tracts updated with historical data")
             time.sleep(PAGE_SLEEP)
 
-        print(f"Historical data load complete. {total_historical:,} tracts updated with 5-year trend.")
+        log.info(f"Historical data load complete. {total_historical:,} tracts updated with 5-year trend.")
 
 
 if __name__ == "__main__":
