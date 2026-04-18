@@ -20,3 +20,11 @@ pyvenv.cfg
 
 # Streamlit secrets — never commit real passwords/keys
 .streamlit/secrets.toml
+
+# SQLite database — too large for GitHub (>100 MB); back up separately
+data/cd_command_center.sqlite
+data/cd_command_center.sqlite-shm
+data/cd_command_center.sqlite-wal
+data/cd_command_center.sqlite-journal
+data/*.sqlite
+data/*.db
