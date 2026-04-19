@@ -1845,7 +1845,11 @@ def get_fqhc_summary() -> dict:
             FROM fqhc
         """)
         row = cur.fetchone()
-        result = dict(row) if row else {}
+        if not row:
+            result = {}
+        else:
+            cols = [d[0] for d in cur.description]
+            result = dict(zip(cols, row))
     except Exception:
         result = {}
     conn.close()
@@ -2296,7 +2300,7 @@ def upsert_fqhc(record: dict):
         VALUES ({placeholders})
         ON CONFLICT(bhcmis_id) DO UPDATE SET {update_clause}
     """
-    cur.execute(sql, values)
+    cur.execute(_adapt_sql(sql), values)
     conn.commit()
     conn.close()
 
@@ -2331,10 +2335,15 @@ def get_fqhc_by_id(bhcmis_id: str) -> dict:
     conn = get_connection()
     cur = conn.cursor()
     try:
-        cur.execute("SELECT * FROM fqhc WHERE bhcmis_id = ?", (bhcmis_id,))
+        cur.execute(_adapt_sql("SELECT * FROM fqhc WHERE bhcmis_id = ?"), (bhcmis_id,))
         row = cur.fetchone()
+        if not row:
+            conn.close()
+            return {}
+        cols = [d[0] for d in cur.description]
+        result = dict(zip(cols, row))
         conn.close()
-        return dict(row) if row else {}
+        return result
     except Exception:
         conn.close()
         return {}
