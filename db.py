@@ -1521,7 +1521,10 @@ def get_school_summary(charter_only=False) -> dict:
             """)
             row = cur.fetchone()
             conn.close()
-            return dict(row) if row else {}
+            if not row:
+                return {}
+            cols = [d[0] for d in cur.description]
+            return dict(zip(cols, row))
         except Exception:
             continue
     conn.close()
@@ -2071,7 +2074,7 @@ def upsert_school(record: dict):
                 VALUES ({placeholders})
                 ON CONFLICT(nces_id) DO UPDATE SET {update_clause}, updated_at=CURRENT_TIMESTAMP
             """
-            cur.execute(sql, values)
+            cur.execute(_adapt_sql(sql), values)
             conn.commit()
             conn.close()
             return
