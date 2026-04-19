@@ -1945,7 +1945,11 @@ def get_ece_summary() -> dict:
             FROM ece_centers
         """)
         row = cur.fetchone()
-        result = dict(row) if row else {}
+        if row:
+            cols = [d[0] for d in cur.description]
+            result = dict(zip(cols, row))
+        else:
+            result = {}
     except Exception:
         result = {}
     conn.close()
@@ -2253,7 +2257,7 @@ def upsert_ece(record: dict):
         VALUES ({placeholders})
         ON CONFLICT(license_id) DO UPDATE SET {update_clause}
     """
-    cur.execute(sql, values)
+    cur.execute(_adapt_sql(sql), values)
     conn.commit()
     conn.close()
 
@@ -2354,10 +2358,15 @@ def get_ece_by_id(license_id: str) -> dict:
     conn = get_connection()
     cur = conn.cursor()
     try:
-        cur.execute("SELECT * FROM ece_centers WHERE license_id = ?", (license_id,))
+        cur.execute(_adapt_sql("SELECT * FROM ece_centers WHERE license_id = ?"), (license_id,))
         row = cur.fetchone()
+        if not row:
+            conn.close()
+            return {}
+        cols = [d[0] for d in cur.description]
+        result = dict(zip(cols, row))
         conn.close()
-        return dict(row) if row else {}
+        return result
     except Exception:
         conn.close()
         return {}
