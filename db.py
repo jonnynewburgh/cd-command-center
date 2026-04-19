@@ -1640,7 +1640,10 @@ def get_census_tract_summary() -> dict:
     """)
     row = cur.fetchone()
     conn.close()
-    return dict(row) if row else {}
+    if not row:
+        return {}
+    cols = [d[0] for d in cur.description]
+    return dict(zip(cols, row))
 
 
 @_cached(ttl=3600)   # state lists change rarely — cache for 1 hour
@@ -2211,7 +2214,7 @@ def upsert_census_tract(record: dict):
             continue
         if col in preserve_if_null:
             # COALESCE: keep existing value if incoming is NULL
-            update_parts.append(f"{col}=COALESCE(excluded.{col}, {col})")
+            update_parts.append(f"{col}=COALESCE(excluded.{col}, census_tracts.{col})")
         else:
             update_parts.append(f"{col}=excluded.{col}")
     update_clause = ",".join(update_parts)
@@ -2221,7 +2224,7 @@ def upsert_census_tract(record: dict):
         VALUES ({placeholders})
         ON CONFLICT(census_tract_id) DO UPDATE SET {update_clause}
     """
-    cur.execute(sql, values)
+    cur.execute(_adapt_sql(sql), values)
     conn.commit()
     conn.close()
 
