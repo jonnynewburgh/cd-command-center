@@ -1960,6 +1960,23 @@ def get_ece_summary() -> dict:
 # Global search — across schools, NMTC projects, CDEs, FQHCs, ECE
 # ---------------------------------------------------------------------------
 
+def _search_table(conn, table: str, columns: list, term: str,
+                  order_by: str = None) -> pd.DataFrame:
+    """Run a LIKE search across columns in a table, returning up to 200 rows.
+
+    Returns an empty DataFrame if the query fails (e.g. table doesn't exist).
+    Wraps SQL through _adapt_sql() so ? placeholders are converted to %s on Postgres.
+    """
+    where = " OR ".join(f"{col} LIKE ?" for col in columns)
+    order = order_by or columns[0]
+    sql = _adapt_sql(f"SELECT * FROM {table} WHERE {where} ORDER BY {order} LIMIT 200")
+    params = [term] * len(columns)
+    try:
+        return pd.read_sql_query(sql, conn, params=params)
+    except Exception:
+        return pd.DataFrame()
+
+
 @_cached(ttl=60)
 def search_all(query_text: str) -> dict:
     """
@@ -1978,73 +1995,16 @@ def search_all(query_text: str) -> dict:
     like = f"%{query_text.strip()}%"
     conn = get_connection()
 
-    # Search schools
-    school_table = "schools"
-    try:
-        schools_df = pd.read_sql_query(
-            f"""SELECT * FROM {school_table}
-                WHERE school_name LIKE ? OR city LIKE ? OR lea_name LIKE ?
-                  OR nces_id LIKE ? OR state LIKE ?
-                ORDER BY school_name LIMIT 200""",
-            conn, params=[like, like, like, like, like],
-        )
-    except Exception:
-        school_table = "charter_schools"
-        schools_df = pd.read_sql_query(
-            f"""SELECT * FROM {school_table}
-                WHERE school_name LIKE ? OR city LIKE ? OR lea_name LIKE ?
-                  OR nces_id LIKE ? OR state LIKE ?
-                ORDER BY school_name LIMIT 200""",
-            conn, params=[like, like, like, like, like],
-        )
-
-    # Search NMTC projects
-    try:
-        projects_df = pd.read_sql_query(
-            """SELECT * FROM nmtc_projects
-               WHERE project_name LIKE ? OR cde_name LIKE ? OR city LIKE ?
-                 OR state LIKE ? OR census_tract_id LIKE ?
-               ORDER BY project_name LIMIT 200""",
-            conn, params=[like, like, like, like, like],
-        )
-    except Exception:
-        projects_df = pd.DataFrame()
-
-    # Search CDEs
-    try:
-        cdes_df = pd.read_sql_query(
-            """SELECT * FROM cde_allocations
-               WHERE cde_name LIKE ? OR city LIKE ? OR state LIKE ?
-                 OR service_areas LIKE ?
-               ORDER BY cde_name LIMIT 200""",
-            conn, params=[like, like, like, like],
-        )
-    except Exception:
-        cdes_df = pd.DataFrame()
-
-    # Search FQHCs
-    try:
-        fqhc_df = pd.read_sql_query(
-            """SELECT * FROM fqhc
-               WHERE health_center_name LIKE ? OR site_name LIKE ?
-                 OR city LIKE ? OR state LIKE ?
-               ORDER BY health_center_name LIMIT 200""",
-            conn, params=[like, like, like, like],
-        )
-    except Exception:
-        fqhc_df = pd.DataFrame()
-
-    # Search ECE centers
-    try:
-        ece_df = pd.read_sql_query(
-            """SELECT * FROM ece_centers
-               WHERE provider_name LIKE ? OR operator_name LIKE ?
-                 OR city LIKE ? OR state LIKE ?
-               ORDER BY provider_name LIMIT 200""",
-            conn, params=[like, like, like, like],
-        )
-    except Exception:
-        ece_df = pd.DataFrame()
+    schools_df = _search_table(conn, "schools",
+        ["school_name", "city", "lea_name", "nces_id", "state"], like, order_by="school_name")
+    projects_df = _search_table(conn, "nmtc_projects",
+        ["project_name", "cde_name", "city", "state", "census_tract_id"], like, order_by="project_name")
+    cdes_df = _search_table(conn, "cde_allocations",
+        ["cde_name", "city", "state", "service_areas"], like, order_by="cde_name")
+    fqhc_df = _search_table(conn, "fqhc",
+        ["health_center_name", "site_name", "city", "state"], like, order_by="health_center_name")
+    ece_df = _search_table(conn, "ece_centers",
+        ["provider_name", "operator_name", "city", "state"], like, order_by="provider_name")
 
     conn.close()
     return {
