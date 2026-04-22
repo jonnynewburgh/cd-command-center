@@ -633,10 +633,10 @@ def main():
 
     conn = db.get_connection()
     cur  = conn.cursor()
-    total_rows = cur.execute("SELECT COUNT(*) FROM irs_990").fetchone()[0]
-    from_irs   = cur.execute(
-        "SELECT COUNT(*) FROM irs_990 WHERE data_source = 'IRS'"
-    ).fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM irs_990")
+    total_rows = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM irs_990 WHERE data_source = 'IRS'")
+    from_irs   = cur.fetchone()[0]
     conn.close()
 
     print(f"Done.")
