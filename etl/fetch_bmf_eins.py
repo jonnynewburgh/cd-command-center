@@ -600,14 +600,14 @@ def main():
     # Step 4: Summary
     conn = db.get_connection()
     cur = conn.cursor()
-    total_charters   = cur.execute("SELECT COUNT(*) FROM schools WHERE is_charter = 1").fetchone()[0]
-    linked_charters  = cur.execute(
-        "SELECT COUNT(*) FROM schools WHERE is_charter = 1 AND ein IS NOT NULL AND ein != ''"
-    ).fetchone()[0]
-    total_990        = cur.execute("SELECT COUNT(*) FROM irs_990").fetchone()[0]
-    bmf_source_count = cur.execute(
-        "SELECT COUNT(*) FROM irs_990 WHERE data_source = 'IRS BMF'"
-    ).fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM schools WHERE is_charter = 1")
+    total_charters   = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM schools WHERE is_charter = 1 AND ein IS NOT NULL AND ein != ''")
+    linked_charters  = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM irs_990")
+    total_990        = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM irs_990 WHERE data_source = 'IRS BMF'")
+    bmf_source_count = cur.fetchone()[0]
     conn.close()
 
     if args.dry_run:
