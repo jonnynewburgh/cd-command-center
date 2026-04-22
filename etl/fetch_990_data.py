@@ -346,8 +346,10 @@ def fetch_990_for_charter_schools(states=None, limit=None, overwrite=False, verb
     # Fetch all rows and deduplicate BEFORE applying the limit so we don't
     # accidentally process the same LEA operator multiple times.
     cur.execute(
-        f"SELECT DISTINCT lea_id, lea_name, school_name, state "
-        f"FROM schools {where} ORDER BY state, lea_name",
+        db.adapt_sql(
+            f"SELECT DISTINCT lea_id, lea_name, school_name, state "
+            f"FROM schools {where} ORDER BY state, lea_name"
+        ),
         params,
     )
     rows = cur.fetchall()
@@ -446,14 +448,18 @@ def fetch_990_for_charter_schools(states=None, limit=None, overwrite=False, verb
         cur = conn.cursor()
         if org["lea_id"]:
             cur.execute(
-                "UPDATE schools SET ein = ?, updated_at = CURRENT_TIMESTAMP "
-                "WHERE lea_id = ? AND is_charter = 1",
+                db.adapt_sql(
+                    "UPDATE schools SET ein = ?, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE lea_id = ? AND is_charter = 1"
+                ),
                 (ein, org["lea_id"]),
             )
         else:
             cur.execute(
-                "UPDATE schools SET ein = ?, updated_at = CURRENT_TIMESTAMP "
-                "WHERE school_name = ? AND state = ? AND is_charter = 1",
+                db.adapt_sql(
+                    "UPDATE schools SET ein = ?, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE school_name = ? AND state = ? AND is_charter = 1"
+                ),
                 (ein, org["name"], org["state"]),
             )
         conn.commit()
@@ -489,8 +495,10 @@ def fetch_990_for_fqhc(states=None, limit=None, overwrite=False, verbose=False, 
 
     # Fetch all then apply limit after dedup (same pattern as charter schools)
     cur.execute(
-        f"SELECT DISTINCT health_center_name, state "
-        f"FROM fqhc {where} ORDER BY state, health_center_name",
+        db.adapt_sql(
+            f"SELECT DISTINCT health_center_name, state "
+            f"FROM fqhc {where} ORDER BY state, health_center_name"
+        ),
         params,
     )
     rows = cur.fetchall()
@@ -549,7 +557,7 @@ def fetch_990_for_fqhc(states=None, limit=None, overwrite=False, verbose=False, 
         conn = db.get_connection()
         cur = conn.cursor()
         cur.execute(
-            "UPDATE fqhc SET ein = ? WHERE health_center_name = ? AND state = ?",
+            db.adapt_sql("UPDATE fqhc SET ein = ? WHERE health_center_name = ? AND state = ?"),
             (ein, hc_name, state),
         )
         conn.commit()
@@ -738,7 +746,8 @@ def main():
 
     summary = db.get_990_summary()
     _conn = db.get_connection(); _cur = _conn.cursor()
-    cde_linked = (_cur.execute("SELECT COUNT(*) FROM cde_allocations WHERE ein IS NOT NULL").fetchone() or [0])[0]
+    _cur.execute("SELECT COUNT(*) FROM cde_allocations WHERE ein IS NOT NULL")
+    cde_linked = (_cur.fetchone() or [0])[0]
     _conn.close()
     print("Database now contains:")
     print(f"  Total 990 records:          {summary['total_990_records']:,}")

@@ -2468,8 +2468,10 @@ def upsert_990(record: dict):
         f"{col}=excluded.{col}" for col in columns if col != "ein"
     )
     cur.execute(
-        f"INSERT INTO irs_990 ({','.join(columns)}) VALUES ({placeholders}) "
-        f"ON CONFLICT(ein) DO UPDATE SET {update_clause}, updated_at=CURRENT_TIMESTAMP",
+        adapt_sql(
+            f"INSERT INTO irs_990 ({','.join(columns)}) VALUES ({placeholders}) "
+            f"ON CONFLICT(ein) DO UPDATE SET {update_clause}, updated_at=CURRENT_TIMESTAMP"
+        ),
         values,
     )
     conn.commit()
@@ -2480,7 +2482,7 @@ def get_990_by_ein(ein: str) -> dict:
     """Look up a single 990 record by EIN. Returns a dict or empty dict."""
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM irs_990 WHERE ein = ?", (ein,))
+    cur.execute(adapt_sql("SELECT * FROM irs_990 WHERE ein = ?"), (ein,))
     row = cur.fetchone()
     conn.close()
     if not row:
@@ -2496,7 +2498,7 @@ def get_990_for_school(nces_id: str) -> dict:
     """
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT ein FROM schools WHERE nces_id = ?", (nces_id,))
+    cur.execute(adapt_sql("SELECT ein FROM schools WHERE nces_id = ?"), (nces_id,))
     row = cur.fetchone()
     conn.close()
     if not row or not row[0]:
@@ -2511,7 +2513,7 @@ def get_990_for_fqhc(bhcmis_id: str) -> dict:
     """
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT ein FROM fqhc WHERE bhcmis_id = ?", (bhcmis_id,))
+    cur.execute(adapt_sql("SELECT ein FROM fqhc WHERE bhcmis_id = ?"), (bhcmis_id,))
     row = cur.fetchone()
     conn.close()
     if not row or not row[0]:
@@ -2524,7 +2526,7 @@ def link_ein_to_school(nces_id: str, ein: str):
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
-        "UPDATE schools SET ein = ?, updated_at = CURRENT_TIMESTAMP WHERE nces_id = ?",
+        adapt_sql("UPDATE schools SET ein = ?, updated_at = CURRENT_TIMESTAMP WHERE nces_id = ?"),
         (ein, nces_id),
     )
     conn.commit()
@@ -2535,7 +2537,7 @@ def link_ein_to_fqhc(bhcmis_id: str, ein: str):
     """Store an EIN on a FQHC record so it can be joined to irs_990."""
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("UPDATE fqhc SET ein = ? WHERE bhcmis_id = ?", (ein, bhcmis_id))
+    cur.execute(adapt_sql("UPDATE fqhc SET ein = ? WHERE bhcmis_id = ?"), (ein, bhcmis_id))
     conn.commit()
     conn.close()
 
@@ -2676,8 +2678,10 @@ def upsert_990_history(record: dict):
         f"{col}=excluded.{col}" for col in columns if col not in ("ein", "tax_year")
     )
     cur.execute(
-        f"INSERT INTO irs_990_history ({','.join(columns)}) VALUES ({placeholders}) "
-        f"ON CONFLICT(ein, tax_year) DO UPDATE SET {update_clause}",
+        adapt_sql(
+            f"INSERT INTO irs_990_history ({','.join(columns)}) VALUES ({placeholders}) "
+            f"ON CONFLICT(ein, tax_year) DO UPDATE SET {update_clause}"
+        ),
         values,
     )
     conn.commit()
@@ -2694,7 +2698,7 @@ def get_990_history(ein: str) -> pd.DataFrame:
     conn = get_connection()
     try:
         df = pd.read_sql_query(
-            "SELECT * FROM irs_990_history WHERE ein = ? ORDER BY tax_year ASC",
+            adapt_sql("SELECT * FROM irs_990_history WHERE ein = ? ORDER BY tax_year ASC"),
             conn, params=[ein],
         )
     except Exception:

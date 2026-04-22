@@ -439,8 +439,10 @@ def _upsert_irs_record(record: dict):
         if c not in {"ein"} | preserve
     )
     cur.execute(
-        f"INSERT INTO irs_990 ({','.join(cols)}) VALUES ({placeholders}) "
-        f"ON CONFLICT(ein) DO UPDATE SET {update}, updated_at=CURRENT_TIMESTAMP",
+        db.adapt_sql(
+            f"INSERT INTO irs_990 ({','.join(cols)}) VALUES ({placeholders}) "
+            f"ON CONFLICT(ein) DO UPDATE SET {update}, updated_at=CURRENT_TIMESTAMP"
+        ),
         vals,
     )
     conn.commit()
