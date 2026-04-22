@@ -89,7 +89,7 @@ def _make_batch_update(table: str, id_col: str):
         conn = db.get_connection()
         cur = conn.cursor()
         cur.executemany(
-            db._adapt_sql(
+            db.adapt_sql(
                 f"UPDATE {table} SET census_tract_id = ? WHERE {id_col} = ?"
             ),
             [(r["census_tract_id"], r[id_col]) for r in records],
@@ -201,7 +201,7 @@ def get_records_without_tracts(config: dict, states: list[str] | None, limit: in
     conn = db.get_connection()
     cur = conn.cursor()
     cur.execute(
-        db._adapt_sql(
+        db.adapt_sql(
             f"SELECT {id_col}, latitude, longitude, state FROM {table} {where} "
             f"ORDER BY state {limit_clause}"
         ),

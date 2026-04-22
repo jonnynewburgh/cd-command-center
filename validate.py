@@ -37,7 +37,7 @@ def _scalar(sql, params=None):
     """Run a query that returns a single value."""
     conn = _conn()
     cur = conn.cursor()
-    cur.execute(db._adapt_sql(sql), params or [])
+    cur.execute(db.adapt_sql(sql), params or [])
     row = cur.fetchone()
     conn.close()
     return row[0] if row else None

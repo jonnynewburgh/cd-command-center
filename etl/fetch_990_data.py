@@ -583,7 +583,7 @@ def fetch_990_for_cde(states=None, limit=None, overwrite=False, verbose=False, y
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     cur.execute(
-        db._adapt_sql(f"SELECT DISTINCT cde_name, state FROM cde_allocations {where} ORDER BY state, cde_name"),
+        db.adapt_sql(f"SELECT DISTINCT cde_name, state FROM cde_allocations {where} ORDER BY state, cde_name"),
         params,
     )
     rows = cur.fetchall()
@@ -642,7 +642,7 @@ def fetch_990_for_cde(states=None, limit=None, overwrite=False, verbose=False, y
         conn = db.get_connection()
         cur = conn.cursor()
         cur.execute(
-            db._adapt_sql("UPDATE cde_allocations SET ein = ? WHERE cde_name = ?"),
+            db.adapt_sql("UPDATE cde_allocations SET ein = ? WHERE cde_name = ?"),
             (ein, cde_name),
         )
         conn.commit()

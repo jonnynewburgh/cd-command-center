@@ -186,7 +186,7 @@ def get_ungeocoded(config: dict, states: list[str] | None, limit: int | None, fo
     conn = db.get_connection()
     cur = conn.cursor()
     cur.execute(
-        db._adapt_sql(f"SELECT {select_clause} FROM {table} {where} ORDER BY state {limit_clause}"),
+        db.adapt_sql(f"SELECT {select_clause} FROM {table} {where} ORDER BY state {limit_clause}"),
         params,
     )
     rows = [dict(zip(select_cols, r)) for r in cur.fetchall()]

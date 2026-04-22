@@ -399,7 +399,7 @@ def run_match_only(threshold: float):
         proj_id, conf = match_project(match_rec, index)
         if conf >= threshold:
             cur.execute(
-                db._adapt_sql(
+                db.adapt_sql(
                     "UPDATE nmtc_coalition_projects "
                     "SET nmtc_project_id=?, match_confidence=? "
                     "WHERE coalition_project_id=?"

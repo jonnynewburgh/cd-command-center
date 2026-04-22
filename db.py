@@ -33,7 +33,7 @@ def get_connection():
     PostgreSQL: used in production when DATABASE_URL is a postgres:// URL.
 
     NOTE: All queries in this file use ? as the parameter placeholder (SQLite style).
-    When Postgres is active, _placeholder() and _adapt_sql() convert ? → %s automatically.
+    When Postgres is active, _placeholder() and adapt_sql() convert ? → %s automatically.
     """
     if _IS_POSTGRES:
         import psycopg2
@@ -46,7 +46,7 @@ def get_connection():
         return conn
 
 
-def _adapt_sql(sql: str) -> str:
+def adapt_sql(sql: str) -> str:
     """Convert SQLite-style SQL to PostgreSQL-compatible SQL."""
     if _IS_POSTGRES:
         sql = sql.replace("?", "%s")
@@ -60,7 +60,7 @@ def _try_exec(cur, sql: str):
     PostgreSQL aborts the entire transaction when any statement fails, so we use
     SAVEPOINTs to isolate the failure. SQLite just uses try/except.
     """
-    sql = _adapt_sql(sql)
+    sql = adapt_sql(sql)
     if _IS_POSTGRES:
         cur.execute("SAVEPOINT _safe")
         try:
@@ -87,7 +87,7 @@ def init_db():
     # adapts SQL for the active backend (e.g. AUTOINCREMENT → SERIAL for PostgreSQL).
     class _Cur:
         def execute(self, sql, params=None):
-            sql = _adapt_sql(sql)
+            sql = adapt_sql(sql)
             return _raw_cur.execute(sql, params) if params is not None else _raw_cur.execute(sql)
         def fetchone(self):
             return _raw_cur.fetchone()
@@ -1262,7 +1262,7 @@ def upsert_rows(table: str, rows: list[dict], unique_cols: list[str]) -> int:
         else:
             conflict_clause = f"ON CONFLICT ({', '.join(unique_cols)}) DO NOTHING"
 
-        sql = _adapt_sql(
+        sql = adapt_sql(
             f"INSERT INTO {table} ({col_names}) VALUES ({placeholders}) {conflict_clause}"
         )
         cur.execute(sql, vals)
@@ -1286,7 +1286,7 @@ def log_load_start(pipeline: str) -> int:
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
-        _adapt_sql("INSERT INTO data_loads (pipeline, status) VALUES (?, 'running')"),
+        adapt_sql("INSERT INTO data_loads (pipeline, status) VALUES (?, 'running')"),
         [pipeline],
     )
     run_id = cur.lastrowid
@@ -1308,7 +1308,7 @@ def log_load_finish(run_id: int, rows_loaded: int = 0, error: str = None):
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
-        _adapt_sql("""
+        adapt_sql("""
             UPDATE data_loads
             SET status = ?, rows_loaded = ?, error_message = ?,
                 finished_at = CURRENT_TIMESTAMP
@@ -1965,11 +1965,11 @@ def _search_table(conn, table: str, columns: list, term: str,
     """Run a LIKE search across columns in a table, returning up to 200 rows.
 
     Returns an empty DataFrame if the query fails (e.g. table doesn't exist).
-    Wraps SQL through _adapt_sql() so ? placeholders are converted to %s on Postgres.
+    Wraps SQL through adapt_sql() so ? placeholders are converted to %s on Postgres.
     """
     where = " OR ".join(f"{col} LIKE ?" for col in columns)
     order = order_by or columns[0]
-    sql = _adapt_sql(f"SELECT * FROM {table} WHERE {where} ORDER BY {order} LIMIT 200")
+    sql = adapt_sql(f"SELECT * FROM {table} WHERE {where} ORDER BY {order} LIMIT 200")
     params = [term] * len(columns)
     try:
         return pd.read_sql_query(sql, conn, params=params)
@@ -2042,7 +2042,7 @@ def upsert_school(record: dict):
                 VALUES ({placeholders})
                 ON CONFLICT(nces_id) DO UPDATE SET {update_clause}, updated_at=CURRENT_TIMESTAMP
             """
-            cur.execute(_adapt_sql(sql), values)
+            cur.execute(adapt_sql(sql), values)
             conn.commit()
             conn.close()
             return
@@ -2195,7 +2195,7 @@ def upsert_census_tract(record: dict):
         VALUES ({placeholders})
         ON CONFLICT(census_tract_id) DO UPDATE SET {update_clause}
     """
-    cur.execute(_adapt_sql(sql), values)
+    cur.execute(adapt_sql(sql), values)
     conn.commit()
     conn.close()
 
@@ -2217,7 +2217,7 @@ def upsert_ece(record: dict):
         VALUES ({placeholders})
         ON CONFLICT(license_id) DO UPDATE SET {update_clause}
     """
-    cur.execute(_adapt_sql(sql), values)
+    cur.execute(adapt_sql(sql), values)
     conn.commit()
     conn.close()
 
@@ -2235,7 +2235,7 @@ def batch_update_ece_geo(records: list[dict]):
     conn = get_connection()
     cur = conn.cursor()
     cur.executemany(
-        _adapt_sql("""
+        adapt_sql("""
             UPDATE ece_centers
             SET latitude = ?, longitude = ?, census_tract_id = ?
             WHERE license_id = ?
@@ -2264,7 +2264,7 @@ def upsert_fqhc(record: dict):
         VALUES ({placeholders})
         ON CONFLICT(bhcmis_id) DO UPDATE SET {update_clause}
     """
-    cur.execute(_adapt_sql(sql), values)
+    cur.execute(adapt_sql(sql), values)
     conn.commit()
     conn.close()
 
@@ -2282,7 +2282,7 @@ def batch_update_fqhc_geo(records: list[dict]):
     conn = get_connection()
     cur = conn.cursor()
     cur.executemany(
-        _adapt_sql("""
+        adapt_sql("""
             UPDATE fqhc
             SET latitude = ?, longitude = ?, census_tract_id = ?
             WHERE bhcmis_id = ?
@@ -2299,7 +2299,7 @@ def get_fqhc_by_id(bhcmis_id: str) -> dict:
     conn = get_connection()
     cur = conn.cursor()
     try:
-        cur.execute(_adapt_sql("SELECT * FROM fqhc WHERE bhcmis_id = ?"), (bhcmis_id,))
+        cur.execute(adapt_sql("SELECT * FROM fqhc WHERE bhcmis_id = ?"), (bhcmis_id,))
         row = cur.fetchone()
         if not row:
             conn.close()
@@ -2318,7 +2318,7 @@ def get_ece_by_id(license_id: str) -> dict:
     conn = get_connection()
     cur = conn.cursor()
     try:
-        cur.execute(_adapt_sql("SELECT * FROM ece_centers WHERE license_id = ?"), (license_id,))
+        cur.execute(adapt_sql("SELECT * FROM ece_centers WHERE license_id = ?"), (license_id,))
         row = cur.fetchone()
         if not row:
             conn.close()
@@ -2440,7 +2440,7 @@ def batch_update_school_census_tracts(records: list[dict]):
     for table in ["schools", "charter_schools"]:
         try:
             cur.executemany(
-                _adapt_sql(
+                adapt_sql(
                     f"UPDATE {table} SET census_tract_id = ?, updated_at = CURRENT_TIMESTAMP WHERE nces_id = ?"
                 ),
                 [(r["census_tract_id"], r["nces_id"]) for r in records],
@@ -3410,7 +3410,7 @@ def get_market_rates(
 
     conn = get_connection()
     try:
-        df = pd.read_sql_query(_adapt_sql(query), conn, params=params)
+        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
         df = pd.DataFrame()
     conn.close()
@@ -3503,7 +3503,7 @@ def get_hud_ami(fiscal_year=None, state=None, fips=None):
     """
     conn = get_connection()
     try:
-        df = pd.read_sql_query(_adapt_sql(query), conn, params=params)
+        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
         df = pd.DataFrame()
     conn.close()
@@ -3539,7 +3539,7 @@ def get_hud_fmr(fiscal_year=None, state=None, fips=None):
     """
     conn = get_connection()
     try:
-        df = pd.read_sql_query(_adapt_sql(query), conn, params=params)
+        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
         df = pd.DataFrame()
     conn.close()
@@ -3580,7 +3580,7 @@ def get_cra_institutions(state=None, report_year=None, asset_size=None, search=N
     """
     conn = get_connection()
     try:
-        df = pd.read_sql_query(_adapt_sql(query), conn, params=params)
+        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
         df = pd.DataFrame()
     conn.close()
@@ -3622,7 +3622,7 @@ def get_cra_assessment_areas(state=None, report_year=None, respondent_id=None, c
     """
     conn = get_connection()
     try:
-        df = pd.read_sql_query(_adapt_sql(query), conn, params=params)
+        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
         df = pd.DataFrame()
     conn.close()
@@ -3674,7 +3674,7 @@ def get_sba_loans(state=None, year=None, program=None, census_tract_id=None,
     """
     conn = get_connection()
     try:
-        df = pd.read_sql_query(_adapt_sql(query), conn, params=params)
+        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
         df = pd.DataFrame()
     conn.close()
@@ -3697,7 +3697,7 @@ def get_sba_summary(state=None, year=None):
     """
     conn = get_connection()
     try:
-        row = pd.read_sql_query(_adapt_sql(query), conn, params=params).iloc[0]
+        row = pd.read_sql_query(adapt_sql(query), conn, params=params).iloc[0]
         result = {k: (None if pd.isna(v) else v) for k, v in row.items()}
     except Exception:
         result = {}
@@ -3746,7 +3746,7 @@ def get_hmda_activity(census_tract_id=None, state=None, county_fips=None,
     """
     conn = get_connection()
     try:
-        df = pd.read_sql_query(_adapt_sql(query), conn, params=params)
+        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
         df = pd.DataFrame()
     conn.close()
@@ -3797,7 +3797,7 @@ def get_bls_unemployment(area_fips=None, state=None, area_type=None,
     """
     conn = get_connection()
     try:
-        df = pd.read_sql_query(_adapt_sql(query), conn, params=params)
+        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
         df = pd.DataFrame()
     conn.close()
@@ -3847,7 +3847,7 @@ def get_bls_qcew(area_fips=None, state=None, year=None, quarter=None,
     """
     conn = get_connection()
     try:
-        df = pd.read_sql_query(_adapt_sql(query), conn, params=params)
+        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
         df = pd.DataFrame()
     conn.close()
@@ -3871,7 +3871,7 @@ def upsert_scsc_cpf(record: dict):
         ON CONFLICT(school_name, school_year) DO UPDATE SET {update_clause}
     """
     conn = get_connection()
-    conn.cursor().execute(_adapt_sql(sql), values)
+    conn.cursor().execute(adapt_sql(sql), values)
     conn.commit()
     conn.close()
 
@@ -3907,7 +3907,7 @@ def get_scsc_cpf(school_year=None, nces_id=None, school_name=None, designation=N
     """
     conn = get_connection()
     try:
-        df = pd.read_sql_query(_adapt_sql(query), conn, params=params)
+        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
         df = pd.DataFrame()
     conn.close()
@@ -3931,7 +3931,7 @@ def upsert_nmtc_coalition_project(record: dict):
         ON CONFLICT(coalition_project_id) DO UPDATE SET {update_clause}
     """
     conn = get_connection()
-    conn.cursor().execute(_adapt_sql(sql), values)
+    conn.cursor().execute(adapt_sql(sql), values)
     conn.commit()
     conn.close()
 
@@ -3970,7 +3970,7 @@ def get_nmtc_coalition_projects(state=None, cde_name=None, investment_year=None,
     """
     conn = get_connection()
     try:
-        df = pd.read_sql_query(_adapt_sql(query), conn, params=params)
+        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
         df = pd.DataFrame()
     conn.close()
@@ -3985,7 +3985,7 @@ def link_nmtc_coalition_to_projects():
     """
     conn = get_connection()
     cur  = conn.cursor()
-    cur.execute(_adapt_sql("""
+    cur.execute(adapt_sql("""
         UPDATE nmtc_projects
         SET coalition_id = (
             SELECT cp.id
@@ -4054,7 +4054,7 @@ def get_federal_audits(state=None, audit_year=None, ein=None, entity_type=None,
     """
     conn = get_connection()
     try:
-        df = pd.read_sql_query(_adapt_sql(query), conn, params=params)
+        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
         df = pd.DataFrame()
     conn.close()
@@ -4066,7 +4066,7 @@ def get_federal_audit_by_id(report_id):
     conn = get_connection()
     try:
         df = pd.read_sql_query(
-            _adapt_sql("SELECT * FROM federal_audits WHERE report_id = ?"),
+            adapt_sql("SELECT * FROM federal_audits WHERE report_id = ?"),
             conn, params=[report_id],
         )
     except Exception:
@@ -4082,7 +4082,7 @@ def get_federal_audit_programs(report_id):
     conn = get_connection()
     try:
         df = pd.read_sql_query(
-            _adapt_sql("""
+            adapt_sql("""
                 SELECT award_reference, aln, federal_program_name,
                        amount_expended, federal_program_total,
                        is_major, is_loan, loan_balance,
@@ -4151,7 +4151,7 @@ def get_headstart_programs(state=None, program_type=None, pir_year=None,
     """
     conn = get_connection()
     try:
-        df = pd.read_sql_query(_adapt_sql(query), conn, params=params)
+        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
         df = pd.DataFrame()
     conn.close()
@@ -4163,7 +4163,7 @@ def get_headstart_by_id(grant_number, program_number, pir_year):
     conn = get_connection()
     try:
         df = pd.read_sql_query(
-            _adapt_sql("""
+            adapt_sql("""
                 SELECT * FROM headstart_programs
                 WHERE grant_number = ? AND program_number = ? AND pir_year = ?
             """),

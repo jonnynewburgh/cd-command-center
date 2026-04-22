@@ -285,13 +285,13 @@ def main():
 
                 # Check if CDE already exists (from project-data derivation, year=0)
                 existing = cur.execute(
-                    db._adapt_sql("SELECT id FROM cde_allocations WHERE cde_name = ? AND allocation_year = ?"),
+                    db.adapt_sql("SELECT id FROM cde_allocations WHERE cde_name = ? AND allocation_year = ?"),
                     (rec["cde_name"], year)
                 ).fetchone()
 
                 if existing:
                     cur.execute(
-                        db._adapt_sql(
+                        db.adapt_sql(
                             "UPDATE cde_allocations SET allocation_amount=?, city=?, state=?, "
                             "service_areas=? WHERE cde_name=? AND allocation_year=?"
                         ),
