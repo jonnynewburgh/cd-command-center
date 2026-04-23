@@ -117,3 +117,135 @@ Two templates became reliable during this session and are worth preserving:
 2. Loader run on Postgres — exit 0, zero `DB error` lines, count delta matches expectation
 3. Loader run on SQLite (`env -u DATABASE_URL python ...`) — identical delta, no regression
 4. Cross-backend spot-check on one real row — field-by-field dict comparison
+
+---
+
+# Addendum — 2026-04-21 — Phase 6/7 progress and `adapt_sql` bug class discovery
+
+Three follow-on sessions between 2026-04-18 and 2026-04-21 continued the Postgres-compat sweep and started Phase 7 (chained `cursor.execute(...).fetch*` cleanup). Phase 7 was stopped mid-sweep after verification uncovered a much larger `adapt_sql` bug surface than the Phase 7 inventory had assumed. This addendum captures what shipped, what stopped, and what's now on deck.
+
+## A1. What shipped (2026-04-19 through 2026-04-21)
+
+| Commit | Scope |
+|---|---|
+| `342186f` | Add FAC + Head Start PIR data sources; updates to `run_pipeline.py` and `utils/db_backup.py` |
+| `805127e` | Wire up missing API routes: audits, Head Start, SCSC CPF, NMTC Coalition |
+| `4fd42be` | Rename `_adapt_sql` → `adapt_sql` for cross-module use (prep for ETL scripts calling it directly) |
+| `e859218` | Extract `_search_table` helper, fix Postgres crash in `search_all` |
+| `aac71a6` | Track diagnosis docs, env template, ops schedule, state FIPS util (7 untracked files from the 2026-04-18 triage list) |
+| `c1c562c` | 990 pipeline Postgres-compat sweep — 15 fixes: raw-`?` wraps in `upsert_990`, `upsert_990_history`, `get_990_by_ein`, `get_990_for_school`, `get_990_for_fqhc`, `link_ein_to_school`, `link_ein_to_fqhc`, `get_990_summary`, `get_990_history`, `_upsert_irs_record` (in `fetch_990_irs.py`), plus four sites in `fetch_990_data.py`, plus one chained `.execute().fetchone()` split at `fetch_990_data.py:749` |
+| `fbda9c9` | Phase 7 COMMIT A — 2 chained-execute sites in `etl/fetch_990_irs.py::main` summary block |
+| `9917c99` | Phase 7 COMMIT B — 4 chained-execute sites in `etl/fetch_bmf_eins.py::main` summary block. Commit body flags 3 raw-`?` sites (357, 395, 401) discovered in the same file as out-of-scope follow-up |
+
+`c1c562c` is the biggest commit in this run — it fully Postgres-hardens the 990 ingestion path that had been flagged in the 2026-04-18 summary's § 4.1 as "has COALESCE — extra care on column qualification."
+
+## A2. Phase 7 status — stopped at 2 of 6 commits
+
+Phase 7 was a pre-inventoried sweep of 14 chained `cursor.execute(...).fetch*` sites across 6 ETL files (see `docs/debug/chained_execute_inventory_2026-04-21.md` — committed this session, not shipped live yet at inventory time). Six planned commits, ACTIVE-first:
+
+| Commit | File | Sites | Status |
+|---|---|---:|---|
+| A | `etl/fetch_990_irs.py` | 2 | **Shipped** — `fbda9c9` |
+| B | `etl/fetch_bmf_eins.py` | 4 | **Shipped** — `9917c99`, verification sidestepped `--states` due to unrelated raw-`?` crash |
+| C | `etl/compute_financial_ratios.py` | 1 | **Deferred** (ACTIVE, `--limit` branch) |
+| D | `etl/fetch_lea_accountability.py` | 2 | **Deferred** (LATENT, upstream API 500s) |
+| E | `etl/fetch_nmtc_award_books.py` | 3 | **Deferred** (LATENT, annual PDF job) |
+| F | `etl/patch_pct_asian.py` | 2 | **Deferred** (LATENT, one is CHAIN+PLACEHOLDER) |
+
+8 chained-execute sites still latent in the tree. All are in `main()` end-of-run summary blocks except one (`fetch_nmtc_award_books.py:287-290`, already `adapt_sql`-wrapped, needs only the chain split). Restart cost for Phase 7 is low — the inventory doc has the full diff targets — but the stop decision was driven by Phase 7 verification exposing a much bigger bug class, not by the remaining chained sites being hard.
+
+## A3. The `adapt_sql` bug class — broader than assumed
+
+Phase 7 COMMIT B's Postgres verification failed with `--states GA` because `etl/fetch_bmf_eins.py:357` (`_get_unlinked_operators`) uses raw `?` placeholders without `adapt_sql` wrapping. This prompted a fresh full-repo grep, which uncovered a far larger raw-`?` surface than anyone had been tracking.
+
+**Approximate inventory: ~28 raw-`?` sites across the repo** (multi-line grep, approximate within ±3). Per-exposure breakdown:
+
+| Exposure | Count | Sites |
+|---|---:|---|
+| **FastAPI endpoints LOUDLY crashing on Postgres (500 errors on every request)** | 7 | User notes CRUD at `db.py:3049, 3065, 3079, 3091` (hit by `api/routers/notes.py` GET/POST/PUT/DELETE) + bookmarks at `db.py:3117, 3129, 3142` (hit by `api/routers/notes.py` bookmark endpoints) + `get_census_tract` at `db.py:1548` (hit by `api/routers/tracts.py:78`) |
+| **FastAPI endpoints SILENTLY 404'ing on Postgres** | 2 | `get_school_by_id` at `db.py:1467` (`api/routers/schools.py:66` → `GET /schools/{nces_id}`) + `get_nmtc_project_by_id` at `db.py:2340` (`api/routers/nmtc.py:43`). Both wrapped in `try/except: continue` or `try/except: return {}` — the silent swallowing is why these have been returning 404 on Postgres for an unknown duration without anyone noticing |
+| **Active ETL paths blocking real Postgres runs** | 6 | `fetch_bmf_eins.py:357, 395, 401`; `load_census_tracts.py:338, 357` (hit by `--historical` flag); `load_ejscreen.py:392`; `load_opportunity_zones.py:185`; `patch_pct_asian.py:117, 152` (one of the `patch_pct_asian` sites is Phase 7's CHAIN+PLACEHOLDER at 117; the 152 site is an *additional* raw-`?` find not in the chained inventory) |
+| **Dead code or archived Streamlit only** | 8 | `get_school_tearsheet_data` body at `db.py:4207, 4258, 4323, 4332, 4359` (5 sites — function has no callers anywhere) + `update_document_data` / `delete_document` trio at `db.py:3205, 3217, 3220` (archived Streamlit `archive/app.py` only) |
+
+Full site-by-site table: see `docs/debug/chained_execute_inventory_2026-04-21.md` § "Phase 8 adapt_sql backlog" (added as part of this commit).
+
+## A4. Silent-exception-handler pattern — promoted in priority
+
+The 2026-04-18 summary's § 4.3 flagged silent `except Exception: ...` handlers as an architectural concern for a future audit ("could do one pipeline at a time"). Phase 7's diagnosis showed that this isn't just a code-hygiene issue — it's the mechanism that has been hiding `adapt_sql` bugs from verification across multiple commits:
+
+- `get_school_by_id` (`db.py:1461`) has `for table in ["schools", "charter_schools"]: try: ... except: continue; ... return {}`. On Postgres the raw-`?` SyntaxError is swallowed in both iterations; the function returns `{}` silently. `c87742b`'s schools verification almost certainly didn't exercise this reader (it exercised `upsert_school` and `get_school_summary` specifically), so the bug was never touched and no error ever logged.
+- `get_nmtc_project_by_id` (`db.py:2335`) — same `try/except: return {}` shape, same silent 404 on Postgres.
+- `upsert_financial_ratios`'s audit-preservation read at `db.py:3330` — same pattern, silently drops audit-based values.
+
+**Implication for Phase 8:** a bare `adapt_sql` sweep without a silent-exception audit will ship "verified" fixes that can't actually be verified — the silent-swallow mask means even a broken fix can look clean. The two workstreams need to run concurrently, or silent-exception hardening needs to run first.
+
+Promoting from "future hygiene" to "should run concurrently with or before Phase 8."
+
+## A5. Cross-backend drift — pattern, not one-off
+
+Every verification this session observed small drift between the Postgres and SQLite databases:
+
+| Table / metric | Postgres | SQLite | Delta |
+|---|---:|---:|---:|
+| `irs_990` total rows (via `fetch_990_irs.py` verification) | 4,126 | 4,123 | +3 |
+| `irs_990` IRS-sourced rows | 3,447 | 3,450 | −3 |
+| `schools WHERE is_charter=1` (via `fetch_bmf_eins.py` verification) | 8,358 | 8,358 | 0 |
+| charter schools with EIN linked | 5,190 | 5,187 | +3 |
+| 990 data from IRS BMF | 33 | 33 | 0 |
+
+Small deltas (±3 rows), consistent across tables, direction not uniform. Not introduced by this session's fixes — the drift existed before any commit tonight.
+
+Root cause is unidentified but the pattern is clear: the two backend databases are not being kept in sync. Most likely the user has been running some ETL jobs against Postgres (via `~/.bashrc`'s `DATABASE_URL`) and others against SQLite (via ad-hoc `env -u DATABASE_URL python ...`), without a periodic reconciliation step.
+
+**This is its own future workstream.** Not scoped here; flagged so it doesn't keep showing up as noise in every verification run.
+
+## A6. Phase 8 — sketch for the next session
+
+**Scope:** proper repo-wide `adapt_sql` sweep. Same diagnose-first, commit-per-file discipline as Phase 7.
+
+**Starting material:**
+- Inventory paste in `docs/debug/chained_execute_inventory_2026-04-21.md` § "Phase 8 adapt_sql backlog" — approximate at ~28 sites but needs to be treated as starting material only.
+- The `9917c99` commit body's mention of raw-`?` sites at `fetch_bmf_eins.py:357, 395, 401`.
+
+**Mandatory first step at session start: fresh full grep.** The multi-line regex used to produce the ~28 count (`\.execute\([\s\S]{0,300}?\?`) can drift — the 300-char non-greedy window misses raw-`?` sites where the SQL is stored in a variable and the placeholder appears >300 chars before the execute. Restart with a cleaner inventory pass rather than trusting the ±3-approximate count.
+
+**Sequencing:**
+1. Silent-exception audit of the FastAPI reader functions (`get_school_by_id`, `get_nmtc_project_by_id`, and any similar) — replace `except Exception: continue` with `except Exception: log + raise` or equivalent — so Phase 8's verification can actually surface errors.
+2. Full fresh raw-`?` inventory.
+3. Per-file commits, prioritizing FastAPI-hit sites (user notes, bookmarks, census tract reader) over ETL-hit sites, over dead code.
+
+**Out of scope for Phase 8 as currently sketched:**
+- Phase 7's remaining 4 chained-execute commits — finish after Phase 8 stabilizes, or bundle into the per-file commits if any Phase 8 file overlap.
+- Cross-backend drift reconciliation — separate workstream (see A5).
+- The `db/` package refactor — still blocked per 2026-04-18 § 4.5 decision point.
+
+## A7. User-facing impact right now
+
+If the dashboard is currently being served against Postgres:
+
+- **User notes feature is 500-erroring.** Every `GET /notes/{type}/{id}`, `POST /notes/{type}/{id}`, `PUT /notes/{type}/{id}`, `DELETE /notes/{...}` call crashes on the raw-`?` in `db.py:3049/3065/3079/3091`.
+- **Bookmarks feature is 500-erroring.** Every `POST /bookmarks`, `DELETE /bookmarks/{...}`, `GET /bookmarks/check` call crashes on `db.py:3117/3129/3142`.
+- **`GET /schools/{nces_id}` returns 404 for every school on Postgres.** Silent via try/except swallow. A user trying to open a specific school detail page would see "school not found" regardless of whether the school exists.
+- **`GET /nmtc/projects/{id}` returns 404 for every NMTC project on Postgres.** Same silent pattern.
+- **`GET /tracts/{id}` returns 500 for every tract on Postgres.** Loud crash via `get_census_tract`.
+
+If no one is currently hitting the dashboard against Postgres, these are latent. If someone is — they're live-broken and should be prioritized into whatever backlog exists ahead of Phase 8's broader scope.
+
+**Needs confirmation:** is anyone actually hitting the Postgres-backed FastAPI right now? Answer determines Phase 8 urgency.
+
+## A8. What this addendum does NOT change
+
+- § 4.1's `upsert_*` remaining list is unchanged — none of those 11 were touched this session. Four of them (`upsert_nmtc_project`, `upsert_cde_allocation`, `upsert_cdfi`, `upsert_cdfi_award`) likely contain raw-`?` sites that'd get swept by Phase 8 anyway. The Phase 8 raw-`?` sweep and the § 4.1 `upsert_*` sweep may turn out to be the same workstream; decide at Phase 8 kickoff.
+- § 4.3's silent-exception concern is escalated in priority but the list of affected files is unchanged.
+- § 4.5's `db/` refactor decision is still open.
+- § 4.6's untracked-files list is partially cleared — `aac71a6` committed the 7 files from § 4.6 plus added ops schedule and FIPS util.
+
+## A9. Suggested next session
+
+From § 5's list, the picks that this session's work pushes toward:
+
+1. **Silent-exception audit of FastAPI reader set, concurrently with Phase 8 kickoff.** Concrete, bounded (10-15 reader functions), unblocks Phase 8 verification reliability.
+2. **Phase 8 raw-`?` sweep.** ~28 sites, per-file commits, FastAPI-hit first. Would close the dashboard-broken-on-Postgres issue from A7.
+3. **Finish Phase 7's remaining 4 chained-execute commits.** Small — can fold into Phase 8's per-file commits opportunistically if Phase 8 touches the same files, otherwise as a quick cleanup session.
+
+Not suggested as priorities for the immediately-next session (unchanged from 2026-04-18 § 5): UDS ingestion, GA ECE, PRI/990-PF pipeline, `db/` refactor decision — all still valid but larger-scope and not dependency-entangled with the current unblocking work.
