@@ -3238,9 +3238,11 @@ def upsert_financial_ratios(record: dict):
         f"{col}=excluded.{col}" for col in columns if col not in ("ein", "fiscal_year")
     )
     cur.execute(
-        f"INSERT INTO financial_ratios ({','.join(columns)}) VALUES ({placeholders}) "
-        f"ON CONFLICT(ein, fiscal_year) DO UPDATE SET {update_clause}, "
-        f"calculated_at=CURRENT_TIMESTAMP",
+        adapt_sql(
+            f"INSERT INTO financial_ratios ({','.join(columns)}) VALUES ({placeholders}) "
+            f"ON CONFLICT(ein, fiscal_year) DO UPDATE SET {update_clause}, "
+            f"calculated_at=CURRENT_TIMESTAMP"
+        ),
         values,
     )
     conn.commit()
@@ -3253,7 +3255,7 @@ def get_financial_ratios(ein: str) -> pd.DataFrame:
     conn = get_connection()
     try:
         df = pd.read_sql_query(
-            "SELECT * FROM financial_ratios WHERE ein = ? ORDER BY fiscal_year DESC",
+            adapt_sql("SELECT * FROM financial_ratios WHERE ein = ? ORDER BY fiscal_year DESC"),
             conn, params=[ein],
         )
     except Exception:
