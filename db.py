@@ -3117,7 +3117,11 @@ def save_bookmark(entity_type: str, entity_id: str, label: str):
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
-        "INSERT OR IGNORE INTO user_bookmarks (entity_type, entity_id, label) VALUES (?, ?, ?)",
+        adapt_sql(
+            "INSERT INTO user_bookmarks (entity_type, entity_id, label) "
+            "VALUES (?, ?, ?) "
+            "ON CONFLICT(entity_type, entity_id) DO NOTHING"
+        ),
         (entity_type, str(entity_id), label),
     )
     conn.commit()
@@ -3129,7 +3133,7 @@ def delete_bookmark(entity_type: str, entity_id: str):
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
-        "DELETE FROM user_bookmarks WHERE entity_type = ? AND entity_id = ?",
+        adapt_sql("DELETE FROM user_bookmarks WHERE entity_type = ? AND entity_id = ?"),
         (entity_type, str(entity_id)),
     )
     conn.commit()
@@ -3142,7 +3146,7 @@ def is_bookmarked(entity_type: str, entity_id: str) -> bool:
     cur = conn.cursor()
     try:
         cur.execute(
-            "SELECT 1 FROM user_bookmarks WHERE entity_type = ? AND entity_id = ?",
+            adapt_sql("SELECT 1 FROM user_bookmarks WHERE entity_type = ? AND entity_id = ?"),
             (entity_type, str(entity_id)),
         )
         found = cur.fetchone() is not None
