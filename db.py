@@ -2977,8 +2977,10 @@ def upsert_cdfi_award(record: dict):
         if col not in ("award_year", "program", "awardee_name")
     )
     cur.execute(
-        f"INSERT INTO cdfi_awards ({','.join(columns)}) VALUES ({placeholders}) "
-        f"ON CONFLICT(award_year, program, awardee_name) DO UPDATE SET {update_clause}",
+        adapt_sql(
+            f"INSERT INTO cdfi_awards ({','.join(columns)}) VALUES ({placeholders}) "
+            f"ON CONFLICT(award_year, program, awardee_name) DO UPDATE SET {update_clause}"
+        ),
         values,
     )
     conn.commit()
@@ -3013,7 +3015,7 @@ def get_cdfi_awards(states=None, programs=None, min_year=None) -> pd.DataFrame:
 
     conn = get_connection()
     try:
-        df = pd.read_sql_query(query, conn, params=params)
+        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
         df = pd.DataFrame()
     conn.close()
