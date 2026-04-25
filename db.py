@@ -1482,7 +1482,7 @@ def get_census_tract(census_tract_id: str) -> dict:
     """Return demographic data for a single census tract."""
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM census_tracts WHERE census_tract_id = ?", (census_tract_id,))
+    cur.execute(adapt_sql("SELECT * FROM census_tracts WHERE census_tract_id = ?"), (census_tract_id,))
     row = cur.fetchone()
     conn.close()
     return dict(row) if row else {}
@@ -2267,7 +2267,7 @@ def get_nmtc_project_by_id(cdfi_project_id: str) -> dict:
     conn = get_connection()
     cur = conn.cursor()
     try:
-        cur.execute("SELECT * FROM nmtc_projects WHERE cdfi_project_id = ?", (cdfi_project_id,))
+        cur.execute(adapt_sql("SELECT * FROM nmtc_projects WHERE cdfi_project_id = ?"), (cdfi_project_id,))
         row = cur.fetchone()
         conn.close()
         return dict(row) if row else {}
@@ -2973,8 +2973,10 @@ def get_user_notes(entity_type: str, entity_id: str) -> list:
     cur = conn.cursor()
     try:
         cur.execute(
-            "SELECT * FROM user_notes WHERE entity_type = ? AND entity_id = ? "
-            "ORDER BY updated_at DESC",
+            adapt_sql(
+                "SELECT * FROM user_notes WHERE entity_type = ? AND entity_id = ? "
+                "ORDER BY updated_at DESC"
+            ),
             (entity_type, str(entity_id)),
         )
         notes = [dict(row) for row in cur.fetchall()]
@@ -2989,7 +2991,7 @@ def save_user_note(entity_type: str, entity_id: str, note_text: str) -> int:
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO user_notes (entity_type, entity_id, note_text) VALUES (?, ?, ?)",
+        adapt_sql("INSERT INTO user_notes (entity_type, entity_id, note_text) VALUES (?, ?, ?)"),
         (entity_type, str(entity_id), note_text),
     )
     note_id = cur.lastrowid
@@ -3003,7 +3005,7 @@ def update_user_note(note_id: int, note_text: str):
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
-        "UPDATE user_notes SET note_text = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        adapt_sql("UPDATE user_notes SET note_text = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"),
         (note_text, note_id),
     )
     conn.commit()
@@ -3014,7 +3016,7 @@ def delete_user_note(note_id: int):
     """Delete a note by its id."""
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("DELETE FROM user_notes WHERE id = ?", (note_id,))
+    cur.execute(adapt_sql("DELETE FROM user_notes WHERE id = ?"), (note_id,))
     conn.commit()
     conn.close()
 
