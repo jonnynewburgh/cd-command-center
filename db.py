@@ -1255,10 +1255,10 @@ def log_load_start(pipeline: str) -> int:
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
-        adapt_sql("INSERT INTO data_loads (pipeline, status) VALUES (?, 'running')"),
+        adapt_sql("INSERT INTO data_loads (pipeline, status) VALUES (?, 'running') RETURNING id"),
         [pipeline],
     )
-    run_id = cur.lastrowid
+    run_id = cur.fetchone()[0]
     conn.commit()
     conn.close()
     return run_id
