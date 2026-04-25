@@ -135,37 +135,6 @@ def init_db():
         )
     """)
 
-    # Migrate from old charter_schools table if it exists (SQLite only)
-    if not _IS_POSTGRES:
-        try:
-            cur.execute("SELECT COUNT(*) FROM charter_schools")
-            old_count = cur.fetchone()[0]
-            cur.execute("SELECT COUNT(*) FROM schools")
-            new_count = cur.fetchone()[0]
-            if old_count > 0 and new_count == 0:
-                # Copy data from old table, setting is_charter=1 since old table was charter-only
-                cur.execute("""
-                    INSERT INTO schools (
-                        nces_id, school_name, lea_name, lea_id, state, city, address,
-                        zip_code, county, census_tract_id, latitude, longitude, enrollment,
-                        grade_low, grade_high, is_charter,
-                        pct_free_reduced_lunch, pct_ell, pct_sped, pct_black, pct_hispanic, pct_white,
-                        school_status, year_opened, year_closed,
-                        data_year, created_at, updated_at
-                    )
-                    SELECT
-                        nces_id, school_name, lea_name, lea_id, state, city, address,
-                        zip_code, county, census_tract_id, latitude, longitude, enrollment,
-                        grade_low, grade_high, 1,
-                        pct_free_reduced_lunch, pct_ell, pct_sped, pct_black, pct_hispanic, pct_white,
-                        school_status, year_opened, year_closed,
-                        data_year, created_at, updated_at
-                    FROM charter_schools
-                """)
-                print(f"  Migrated {old_count:,} records from charter_schools → schools table")
-        except Exception:
-            pass  # charter_schools doesn't exist, that's fine
-
     # Add is_charter column to schools table if it was created without it
     _try_exec(cur, "ALTER TABLE schools ADD COLUMN is_charter INTEGER DEFAULT 0")
 
@@ -1391,8 +1360,6 @@ def get_schools(
 
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
 
-    # Try to query from the 'schools' table; fall back to 'charter_schools' for old DBs.
-    #
     # The LEA join uses a CTE (WITH latest_lea ...) instead of a correlated subquery.
     # A correlated subquery runs once per school row; the CTE runs once and is reused,
     # making it O(schools + districts) instead of O(schools * districts).
@@ -1400,61 +1367,49 @@ def get_schools(
     # We also LEFT JOIN census_tracts to expose NMTC eligibility tier on each row,
     # and compute has_990 (1 if the school has an EIN linked, 0 otherwise) so the
     # dashboard can quickly flag which schools have financial data available.
-    for table_name in ["schools", "charter_schools"]:
-        try:
-            t = table_name[0]   # alias: 's' for schools, 'c' for charter_schools
-            query = f"""
-                WITH latest_lea AS (
-                    SELECT lea_id, MAX(data_year) AS max_year
-                    FROM lea_accountability
-                    GROUP BY lea_id
-                )
-                SELECT
-                    {t}.*,
-                    la.accountability_score,
-                    la.accountability_rating,
-                    la.proficiency_reading,
-                    la.proficiency_math,
-                    -- Use detailed tier when available, otherwise fall back to
-                    -- is_nmtc_eligible flag so schools in older/partial tract
-                    -- data still show as eligible/not-eligible
-                    CASE
-                        WHEN ct.nmtc_eligibility_tier IS NOT NULL THEN ct.nmtc_eligibility_tier
-                        WHEN ct.is_nmtc_eligible = 1 THEN 'Eligible'
-                        WHEN ct.is_nmtc_eligible = 0 THEN 'Not Eligible'
-                        ELSE NULL
-                    END AS nmtc_eligibility_tier,
-                    ct.is_nmtc_eligible,
-                    ct.poverty_rate       AS tract_poverty_rate,
-                    ct.median_household_income AS tract_median_income,
-                    CASE WHEN {t}.ein IS NOT NULL THEN 1 ELSE 0 END AS has_990
-                FROM {table_name} {t}
-                LEFT JOIN latest_lea ll
-                    ON {t}.lea_id = ll.lea_id
-                LEFT JOIN lea_accountability la
-                    ON la.lea_id = ll.lea_id
-                    AND la.data_year = ll.max_year
-                LEFT JOIN census_tracts ct
-                    ON {t}.census_tract_id = ct.census_tract_id
-                {where_clause}
-                ORDER BY {t}.school_name
-            """
-            conn = get_connection()
-            df = pd.read_sql_query(query, conn, params=params)
-            conn.close()
-            return df
-        except Exception:
-            continue
-
-    return pd.DataFrame()
+    query = f"""
+        WITH latest_lea AS (
+            SELECT lea_id, MAX(data_year) AS max_year
+            FROM lea_accountability
+            GROUP BY lea_id
+        )
+        SELECT
+            s.*,
+            la.accountability_score,
+            la.accountability_rating,
+            la.proficiency_reading,
+            la.proficiency_math,
+            -- Use detailed tier when available, otherwise fall back to
+            -- is_nmtc_eligible flag so schools in older/partial tract
+            -- data still show as eligible/not-eligible
+            CASE
+                WHEN ct.nmtc_eligibility_tier IS NOT NULL THEN ct.nmtc_eligibility_tier
+                WHEN ct.is_nmtc_eligible = 1 THEN 'Eligible'
+                WHEN ct.is_nmtc_eligible = 0 THEN 'Not Eligible'
+                ELSE NULL
+            END AS nmtc_eligibility_tier,
+            ct.is_nmtc_eligible,
+            ct.poverty_rate       AS tract_poverty_rate,
+            ct.median_household_income AS tract_median_income,
+            CASE WHEN s.ein IS NOT NULL THEN 1 ELSE 0 END AS has_990
+        FROM schools s
+        LEFT JOIN latest_lea ll
+            ON s.lea_id = ll.lea_id
+        LEFT JOIN lea_accountability la
+            ON la.lea_id = ll.lea_id
+            AND la.data_year = ll.max_year
+        LEFT JOIN census_tracts ct
+            ON s.census_tract_id = ct.census_tract_id
+        {where_clause}
+        ORDER BY s.school_name
+    """
+    conn = get_connection()
+    df = pd.read_sql_query(adapt_sql(query), conn, params=params)
+    conn.close()
+    return df
 
 
 # Backward-compatible wrappers for code that still uses old names
-def get_charter_schools(**kwargs) -> pd.DataFrame:
-    """Backward-compatible wrapper: calls get_schools(charter_only=True)."""
-    kwargs["charter_only"] = True
-    return get_schools(**kwargs)
-
 
 
 @_cached(ttl=300)
@@ -1462,17 +1417,10 @@ def get_school_by_id(school_id: int) -> dict:
     """Return a single school by its primary key id."""
     conn = get_connection()
     cur = conn.cursor()
-    for table in ["schools", "charter_schools"]:
-        try:
-            cur.execute(f"SELECT * FROM {table} WHERE id = ?", (school_id,))
-            row = cur.fetchone()
-            if row:
-                conn.close()
-                return dict(row)
-        except Exception:
-            continue
+    cur.execute(adapt_sql("SELECT * FROM schools WHERE id = ?"), (school_id,))
+    row = cur.fetchone()
     conn.close()
-    return {}
+    return dict(row) if row else {}
 
 
 def get_charter_school_by_id(school_id: int) -> dict:
@@ -1485,16 +1433,10 @@ def get_school_states() -> list:
     """Return sorted list of states that have school data."""
     conn = get_connection()
     cur = conn.cursor()
-    for table in ["schools", "charter_schools"]:
-        try:
-            cur.execute(f"SELECT DISTINCT state FROM {table} WHERE state IS NOT NULL ORDER BY state")
-            states = [row[0] for row in cur.fetchall()]
-            conn.close()
-            return states
-        except Exception:
-            continue
+    cur.execute("SELECT DISTINCT state FROM schools WHERE state IS NOT NULL ORDER BY state")
+    states = [row[0] for row in cur.fetchall()]
     conn.close()
-    return []
+    return states
 
 
 def get_charter_school_states() -> list:
@@ -1509,26 +1451,21 @@ def get_school_summary(charter_only=False) -> dict:
     cur = conn.cursor()
     charter_filter = "WHERE is_charter = 1" if charter_only else ""
 
-    for table in ["schools", "charter_schools"]:
-        try:
-            cur.execute(f"""
-                SELECT
-                    COUNT(*) as total_schools,
-                    SUM(CASE WHEN school_status = 'Open' THEN 1 ELSE 0 END) as open_schools,
-                    SUM(enrollment) as total_enrollment
-                FROM {table}
-                {charter_filter}
-            """)
-            row = cur.fetchone()
-            conn.close()
-            if not row:
-                return {}
-            cols = [d[0] for d in cur.description]
-            return dict(zip(cols, row))
-        except Exception:
-            continue
+    cur.execute(f"""
+        SELECT
+            COUNT(*) as total_schools,
+            SUM(CASE WHEN school_status = 'Open' THEN 1 ELSE 0 END) as open_schools,
+            SUM(enrollment) as total_enrollment
+        FROM schools
+        {charter_filter}
+    """)
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return {}
+    cols = [d[0] for d in cur.description]
     conn.close()
-    return {}
+    return dict(zip(cols, row))
 
 
 def get_charter_school_summary() -> dict:
@@ -2034,20 +1971,13 @@ def upsert_school(record: dict):
     placeholders = ",".join("?" * len(values))
     update_clause = ",".join(f"{col}=excluded.{col}" for col in columns if col != "nces_id")
 
-    # Try schools table first, fall back to charter_schools for old DBs
-    for table in ["schools", "charter_schools"]:
-        try:
-            sql = f"""
-                INSERT INTO {table} ({",".join(columns)})
-                VALUES ({placeholders})
-                ON CONFLICT(nces_id) DO UPDATE SET {update_clause}, updated_at=CURRENT_TIMESTAMP
-            """
-            cur.execute(adapt_sql(sql), values)
-            conn.commit()
-            conn.close()
-            return
-        except Exception:
-            continue
+    sql = f"""
+        INSERT INTO schools ({",".join(columns)})
+        VALUES ({placeholders})
+        ON CONFLICT(nces_id) DO UPDATE SET {update_clause}, updated_at=CURRENT_TIMESTAMP
+    """
+    cur.execute(adapt_sql(sql), values)
+    conn.commit()
     conn.close()
 
 
@@ -2437,19 +2367,13 @@ def batch_update_school_census_tracts(records: list[dict]):
         return
     conn = get_connection()
     cur = conn.cursor()
-    for table in ["schools", "charter_schools"]:
-        try:
-            cur.executemany(
-                adapt_sql(
-                    f"UPDATE {table} SET census_tract_id = ?, updated_at = CURRENT_TIMESTAMP WHERE nces_id = ?"
-                ),
-                [(r["census_tract_id"], r["nces_id"]) for r in records],
-            )
-            conn.commit()
-            conn.close()
-            return
-        except Exception:
-            continue
+    cur.executemany(
+        adapt_sql(
+            "UPDATE schools SET census_tract_id = ?, updated_at = CURRENT_TIMESTAMP WHERE nces_id = ?"
+        ),
+        [(r["census_tract_id"], r["nces_id"]) for r in records],
+    )
+    conn.commit()
     conn.close()
 
 
