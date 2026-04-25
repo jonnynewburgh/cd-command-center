@@ -21,7 +21,10 @@ current needs, not enshrined in the doc.
 
 cd-command-center project pipeline
 
-**Postgres readiness:** see `docs/debug/postgres_readiness_inventory_2026-04-22.md` for full bug class inventory (9 known bug classes, ~70 confirmed sites, ~28-44 hours estimated remaining). Do not start new fix sessions without consulting this doc — it prevents rediscovery. Sessions have been surfacing a new bug class each time because silent exception handlers (bug class 7) hide every other class from verification. Recommended sequence: close class 7 first or concurrently with class 1.
+**Postgres readiness:**
+- **Execution sequence: see `docs/postgres-migration-plan.md`** — 6-phase plan, 22-37 hours across 7-9 dedicated sessions. Phase order: silent handlers → operational logging → raw-? sweep → lastrowid+dict(row) → SQLite-only functions → schema/data reconciliation. Working agreement requires 3-6 hour dedicated sessions, not weeknight slots.
+- Audit evidence: `docs/debug/postgres_readiness_inventory_2026-04-22.md` (9 known bug classes, ~70 confirmed sites). When the plan and the inventory disagree, re-run the inventory.
+- **B1, B2, B4, B5, B6 below are now consolidated under the phased plan.** They remain in this doc as detail (sites, line numbers, decisions) but the execution sequence lives in the migration plan, not here. Do not start any of them as standalone sessions without first consulting the plan to confirm prerequisites are met.
 
 Category A — Shipped pipelines that are broken or incompletePipelines with known gaps or bugs blocking real use today. Highest urgency by default.
 A1. FastAPI endpoints currently broken on Postgres. User-notes CRUD (GET/POST/PUT/DELETE) and get_census_tract raise psycopg2 syntax errors on raw ? placeholders — return HTTP 500 on any request. get_school_by_id and get_nmtc_project_by_id silently return 404 (silent-exception handler swallows the same bug). get_bookmarks (GET /notes/bookmarks/all) silently returns [] due to dict(row) on psycopg2's default tuple cursor (different bug class — see B6). Bookmarks write/check/delete paths fixed in d7855ee (POST, DELETE, is_bookmarked). Live user-facing impact if the dashboard is being served against Postgres. Priority depends on whether the dashboard is actually deployed against Postgres today.
