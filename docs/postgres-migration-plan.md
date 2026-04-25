@@ -217,8 +217,9 @@ convergence reliability.
   before the loaders are reliable just sets up the next
   divergence.
 - **Success criteria.**
-  - `charter_schools` table dropped (A4); for-table fallback
-    loops in `db.py` (H1, H5, H10) removed.
+  - `charter_schools` for-table fallback loops in `db.py`
+    (H1, H5, H10) removed in `bf4ed8a`. Live SQLite table drop
+    still pending — do as part of this phase's resync.
   - Per-table audit complete for the 6 known drifted tables;
     canonical-source decision recorded; resync runs executed.
   - `validate.py` reports parity for every shared table on
