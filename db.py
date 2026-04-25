@@ -11,7 +11,10 @@ update get_connection(), and the SQL syntax differences (e.g., ? → %s for para
 
 import sqlite3
 import os
+import logging
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 # DATABASE_URL controls which backend is used:
 #   - Not set (default): SQLite at data/cd_command_center.sqlite
@@ -1747,6 +1750,7 @@ def get_fqhc(
     try:
         df = pd.read_sql_query(query, conn, params=params)
     except Exception:
+        logger.exception("get_fqhc failed")
         df = pd.DataFrame()
     conn.close()
     return df
@@ -1761,6 +1765,7 @@ def get_fqhc_states() -> list:
         cur.execute("SELECT DISTINCT state FROM fqhc WHERE state IS NOT NULL ORDER BY state")
         states = [row[0] for row in cur.fetchall()]
     except Exception:
+        logger.exception("get_fqhc_states failed")
         states = []
     conn.close()
     return states
@@ -1788,6 +1793,7 @@ def get_fqhc_summary() -> dict:
             cols = [d[0] for d in cur.description]
             result = dict(zip(cols, row))
     except Exception:
+        logger.exception("get_fqhc_summary failed")
         result = {}
     conn.close()
     return result
@@ -1845,6 +1851,7 @@ def get_ece_centers(
     try:
         df = pd.read_sql_query(query, conn, params=params)
     except Exception:
+        logger.exception("get_ece_centers failed")
         df = pd.DataFrame()
     conn.close()
     return df
@@ -1861,6 +1868,7 @@ def get_ece_states() -> list:
         )
         states = [row[0] for row in cur.fetchall()]
     except Exception:
+        logger.exception("get_ece_states failed")
         states = []
     conn.close()
     return states
@@ -1888,6 +1896,7 @@ def get_ece_summary() -> dict:
         else:
             result = {}
     except Exception:
+        logger.exception("get_ece_summary failed")
         result = {}
     conn.close()
     return result
@@ -1911,6 +1920,7 @@ def _search_table(conn, table: str, columns: list, term: str,
     try:
         return pd.read_sql_query(sql, conn, params=params)
     except Exception:
+        logger.exception("_search_table failed")
         return pd.DataFrame()
 
 
@@ -2239,8 +2249,9 @@ def get_fqhc_by_id(bhcmis_id: str) -> dict:
         conn.close()
         return result
     except Exception:
+        logger.exception("get_fqhc_by_id failed for bhcmis_id=%s", bhcmis_id)
         conn.close()
-        return {}
+        raise
 
 
 def get_ece_by_id(license_id: str) -> dict:
@@ -2258,8 +2269,9 @@ def get_ece_by_id(license_id: str) -> dict:
         conn.close()
         return result
     except Exception:
+        logger.exception("get_ece_by_id failed for license_id=%s", license_id)
         conn.close()
-        return {}
+        raise
 
 
 def get_nmtc_project_by_id(cdfi_project_id: str) -> dict:
@@ -2272,8 +2284,9 @@ def get_nmtc_project_by_id(cdfi_project_id: str) -> dict:
         conn.close()
         return dict(row) if row else {}
     except Exception:
+        logger.exception("get_nmtc_project_by_id failed for cdfi_project_id=%s", cdfi_project_id)
         conn.close()
-        return {}
+        raise
 
 
 def get_nmtc_projects_by_cde(cde_name: str) -> pd.DataFrame:
@@ -2285,6 +2298,7 @@ def get_nmtc_projects_by_cde(cde_name: str) -> pd.DataFrame:
             conn, params=[cde_name],
         )
     except Exception:
+        logger.exception("get_nmtc_projects_by_cde failed for cde_name=%s", cde_name)
         df = pd.DataFrame()
     conn.close()
     return df
@@ -2315,7 +2329,7 @@ def get_nearby_facilities(lat: float, lon: float, radius_miles: float = 1.0) -> 
         if not schools.empty:
             results["schools"] = filter_by_radius(schools, lat, lon, radius_miles)
     except Exception:
-        pass
+        logger.exception("get_nearby_facilities: schools branch failed (lat=%s lon=%s)", lat, lon)
 
     # FQHCs
     try:
@@ -2323,7 +2337,7 @@ def get_nearby_facilities(lat: float, lon: float, radius_miles: float = 1.0) -> 
         if not fqhc.empty:
             results["fqhc"] = filter_by_radius(fqhc, lat, lon, radius_miles)
     except Exception:
-        pass
+        logger.exception("get_nearby_facilities: fqhc branch failed (lat=%s lon=%s)", lat, lon)
 
     # ECE centers
     try:
@@ -2331,7 +2345,7 @@ def get_nearby_facilities(lat: float, lon: float, radius_miles: float = 1.0) -> 
         if not ece.empty:
             results["ece"] = filter_by_radius(ece, lat, lon, radius_miles)
     except Exception:
-        pass
+        logger.exception("get_nearby_facilities: ece branch failed (lat=%s lon=%s)", lat, lon)
 
     # NMTC projects
     try:
@@ -2339,7 +2353,7 @@ def get_nearby_facilities(lat: float, lon: float, radius_miles: float = 1.0) -> 
         if not nmtc.empty:
             results["nmtc"] = filter_by_radius(nmtc, lat, lon, radius_miles)
     except Exception:
-        pass
+        logger.exception("get_nearby_facilities: nmtc branch failed (lat=%s lon=%s)", lat, lon)
 
     return results
 
@@ -2548,6 +2562,7 @@ def get_peer_nmtc_projects(
     try:
         df = pd.read_sql_query(query, conn, params=params)
     except Exception:
+        logger.exception("get_peer_nmtc_projects failed")
         df = pd.DataFrame()
     conn.close()
     return df
@@ -2567,6 +2582,7 @@ def get_operator_schools(ein: str) -> pd.DataFrame:
             conn, params=[ein],
         )
     except Exception:
+        logger.exception("get_operator_schools failed")
         df = pd.DataFrame()
     conn.close()
     return df
@@ -2582,6 +2598,7 @@ def get_operator_fqhc(ein: str) -> pd.DataFrame:
             conn, params=[ein],
         )
     except Exception:
+        logger.exception("get_operator_fqhc failed")
         df = pd.DataFrame()
     conn.close()
     return df
@@ -2626,6 +2643,7 @@ def get_990_history(ein: str) -> pd.DataFrame:
             conn, params=[ein],
         )
     except Exception:
+        logger.exception("get_990_history failed")
         df = pd.DataFrame()
     conn.close()
 
@@ -2682,6 +2700,7 @@ def get_cdfis(states=None, cdfi_type=None) -> pd.DataFrame:
     try:
         df = pd.read_sql_query(query, conn, params=params)
     except Exception:
+        logger.exception("get_cdfis failed")
         df = pd.DataFrame()
     conn.close()
     return df
@@ -2698,6 +2717,7 @@ def get_cdfi_states() -> list:
         )
         states = [row[0] for row in cur.fetchall()]
     except Exception:
+        logger.exception("get_cdfi_states failed")
         states = []
     conn.close()
     return states
@@ -2742,6 +2762,7 @@ def get_state_programs(state: str = None) -> pd.DataFrame:
     try:
         df = pd.read_sql_query(query, conn, params=params)
     except Exception:
+        logger.exception("get_state_programs failed")
         df = pd.DataFrame()
     conn.close()
     return df
@@ -2758,6 +2779,7 @@ def get_program_states() -> list:
         )
         states = [row[0] for row in cur.fetchall()]
     except Exception:
+        logger.exception("get_program_states failed")
         states = []
     conn.close()
     return states
@@ -2841,6 +2863,7 @@ def get_service_gaps(
     try:
         df = pd.read_sql_query(query, conn, params=params)
     except Exception:
+        logger.exception("get_service_gaps failed")
         df = pd.DataFrame()
     conn.close()
     return df
@@ -2879,6 +2902,7 @@ def get_enrollment_history(nces_id: str) -> pd.DataFrame:
             conn, params=[nces_id],
         )
     except Exception:
+        logger.exception("get_enrollment_history failed")
         df = pd.DataFrame()
     conn.close()
     return df
@@ -2941,6 +2965,7 @@ def get_cdfi_awards(states=None, programs=None, min_year=None) -> pd.DataFrame:
     try:
         df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
+        logger.exception("get_cdfi_awards failed")
         df = pd.DataFrame()
     conn.close()
     return df
@@ -2958,6 +2983,7 @@ def get_cdfi_award_states() -> list:
         )
         states = [row[0] for row in cur.fetchall()]
     except Exception:
+        logger.exception("get_cdfi_award_states failed")
         states = []
     conn.close()
     return states
@@ -2981,7 +3007,11 @@ def get_user_notes(entity_type: str, entity_id: str) -> list:
         )
         notes = [dict(row) for row in cur.fetchall()]
     except Exception:
-        notes = []
+        logger.exception(
+            "get_user_notes failed for entity_type=%s entity_id=%s", entity_type, entity_id
+        )
+        conn.close()
+        raise
     conn.close()
     return notes
 
@@ -3033,7 +3063,9 @@ def get_bookmarks() -> list:
         cur.execute("SELECT * FROM user_bookmarks ORDER BY created_at DESC")
         bookmarks = [dict(row) for row in cur.fetchall()]
     except Exception:
-        bookmarks = []
+        logger.exception("get_bookmarks failed")
+        conn.close()
+        raise
     conn.close()
     return bookmarks
 
@@ -3077,6 +3109,9 @@ def is_bookmarked(entity_type: str, entity_id: str) -> bool:
         )
         found = cur.fetchone() is not None
     except Exception:
+        logger.exception(
+            "is_bookmarked failed for entity_type=%s entity_id=%s", entity_type, entity_id
+        )
         found = False
     conn.close()
     return found
@@ -3125,6 +3160,7 @@ def get_documents(ein: str = None, entity_type: str = None, entity_id: str = Non
     try:
         df = pd.read_sql_query(query, conn, params=params)
     except Exception:
+        logger.exception("get_documents failed")
         df = pd.DataFrame()
     conn.close()
     return df
@@ -3191,6 +3227,7 @@ def get_financial_ratios(ein: str) -> pd.DataFrame:
             conn, params=[ein],
         )
     except Exception:
+        logger.exception("get_financial_ratios failed")
         df = pd.DataFrame()
     conn.close()
     return df
@@ -3273,7 +3310,10 @@ def compute_and_store_ratios(ein: str):
                 cl_audit   = _row[1]
                 has_audit  = _row[2] or 0
         except Exception:
-            pass
+            logger.exception(
+                "_compute_for_ein audit-ratios lookup failed for ein=%s fiscal_year=%s",
+                ein, fiscal_year,
+            )
 
         record = {
             "ein":                       ein,
@@ -3350,6 +3390,7 @@ def get_market_rates(
     try:
         df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
+        logger.exception("get_market_rates failed")
         df = pd.DataFrame()
     conn.close()
     return df
@@ -3378,6 +3419,7 @@ def get_latest_rates() -> pd.DataFrame:
             conn,
         )
     except Exception:
+        logger.exception("get_latest_rates failed")
         df = pd.DataFrame()
     conn.close()
     return df
@@ -3407,6 +3449,7 @@ def search_org(query_text: str) -> pd.DataFrame:
             conn, params=[like, like],
         )
     except Exception:
+        logger.exception("search_org failed")
         df = pd.DataFrame()
     conn.close()
     return df
@@ -3443,6 +3486,7 @@ def get_hud_ami(fiscal_year=None, state=None, fips=None):
     try:
         df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
+        logger.exception("get_hud_ami failed")
         df = pd.DataFrame()
     conn.close()
     return df
@@ -3479,6 +3523,7 @@ def get_hud_fmr(fiscal_year=None, state=None, fips=None):
     try:
         df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
+        logger.exception("get_hud_fmr failed")
         df = pd.DataFrame()
     conn.close()
     return df
@@ -3520,6 +3565,7 @@ def get_cra_institutions(state=None, report_year=None, asset_size=None, search=N
     try:
         df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
+        logger.exception("get_cra_institutions failed")
         df = pd.DataFrame()
     conn.close()
     return df
@@ -3562,6 +3608,7 @@ def get_cra_assessment_areas(state=None, report_year=None, respondent_id=None, c
     try:
         df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
+        logger.exception("get_cra_assessment_areas failed")
         df = pd.DataFrame()
     conn.close()
     return df
@@ -3614,6 +3661,7 @@ def get_sba_loans(state=None, year=None, program=None, census_tract_id=None,
     try:
         df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
+        logger.exception("get_sba_loans failed")
         df = pd.DataFrame()
     conn.close()
     return df
@@ -3638,6 +3686,7 @@ def get_sba_summary(state=None, year=None):
         row = pd.read_sql_query(adapt_sql(query), conn, params=params).iloc[0]
         result = {k: (None if pd.isna(v) else v) for k, v in row.items()}
     except Exception:
+        logger.exception("get_sba_summary failed")
         result = {}
     conn.close()
     return result
@@ -3686,6 +3735,7 @@ def get_hmda_activity(census_tract_id=None, state=None, county_fips=None,
     try:
         df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
+        logger.exception("get_hmda_activity failed")
         df = pd.DataFrame()
     conn.close()
     return df
@@ -3737,6 +3787,7 @@ def get_bls_unemployment(area_fips=None, state=None, area_type=None,
     try:
         df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
+        logger.exception("get_bls_unemployment failed")
         df = pd.DataFrame()
     conn.close()
     return df
@@ -3787,6 +3838,7 @@ def get_bls_qcew(area_fips=None, state=None, year=None, quarter=None,
     try:
         df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
+        logger.exception("get_bls_qcew failed")
         df = pd.DataFrame()
     conn.close()
     return df
@@ -3847,6 +3899,7 @@ def get_scsc_cpf(school_year=None, nces_id=None, school_name=None, designation=N
     try:
         df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
+        logger.exception("get_scsc_cpf failed")
         df = pd.DataFrame()
     conn.close()
     return df
@@ -3910,6 +3963,7 @@ def get_nmtc_coalition_projects(state=None, cde_name=None, investment_year=None,
     try:
         df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
+        logger.exception("get_nmtc_coalition_projects failed")
         df = pd.DataFrame()
     conn.close()
     return df
@@ -3994,6 +4048,7 @@ def get_federal_audits(state=None, audit_year=None, ein=None, entity_type=None,
     try:
         df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
+        logger.exception("get_federal_audits failed")
         df = pd.DataFrame()
     conn.close()
     return df
@@ -4008,7 +4063,9 @@ def get_federal_audit_by_id(report_id):
             conn, params=[report_id],
         )
     except Exception:
-        df = pd.DataFrame()
+        logger.exception("get_federal_audit_by_id failed for report_id=%s", report_id)
+        conn.close()
+        raise
     conn.close()
     if df.empty:
         return None
@@ -4033,6 +4090,7 @@ def get_federal_audit_programs(report_id):
             conn, params=[report_id],
         )
     except Exception:
+        logger.exception("get_federal_audit_programs failed")
         df = pd.DataFrame()
     conn.close()
     return df
@@ -4091,6 +4149,7 @@ def get_headstart_programs(state=None, program_type=None, pir_year=None,
     try:
         df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
+        logger.exception("get_headstart_programs failed")
         df = pd.DataFrame()
     conn.close()
     return df
@@ -4108,197 +4167,15 @@ def get_headstart_by_id(grant_number, program_number, pir_year):
             conn, params=[grant_number, program_number, pir_year],
         )
     except Exception:
-        df = pd.DataFrame()
+        logger.exception(
+            "get_headstart_by_id failed for grant_number=%s program_number=%s pir_year=%s",
+            grant_number, program_number, pir_year,
+        )
+        conn.close()
+        raise
     conn.close()
     if df.empty:
         return None
     return df.iloc[0].to_dict()
 
 
-# ---------------------------------------------------------------------------
-# Tear sheet — aggregated data for a single school PDF report
-# ---------------------------------------------------------------------------
-
-def get_school_tearsheet_data(nces_id: str) -> dict:
-    """
-    Return all data needed to render a one-page tear sheet for a school.
-
-    Queries multiple tables and returns a single dict with keys:
-      school, enrollment_history, demographics, accountability,
-      cpf_scores, financials, nearby_schools, census_tract
-    Each section degrades gracefully if data is missing (returns None or empty list).
-    """
-    from utils.geo import filter_by_radius
-    import sqlite3 as _sqlite3
-
-    conn = get_connection()
-    conn.row_factory = _sqlite3.Row
-    cur = conn.cursor()
-
-    result = {}
-
-    # --- School record ---
-    cur.execute("SELECT * FROM schools WHERE nces_id = ?", (nces_id,))
-    row = cur.fetchone()
-    if not row:
-        conn.close()
-        return None  # School not found
-    school = dict(row)
-    result["school"] = school
-
-    # --- Enrollment history ---
-    try:
-        df = pd.read_sql_query(
-            "SELECT school_year, enrollment, pct_free_reduced_lunch "
-            "FROM enrollment_history WHERE nces_id = ? ORDER BY school_year ASC",
-            conn, params=[nces_id],
-        )
-        result["enrollment_history"] = df.to_dict("records") if not df.empty else []
-    except Exception:
-        result["enrollment_history"] = []
-
-    # --- Demographics (from current school record) ---
-    result["demographics"] = {
-        "pct_free_reduced_lunch": school.get("pct_free_reduced_lunch"),
-        "pct_sped": school.get("pct_sped"),
-        "pct_ell": school.get("pct_ell"),
-        "pct_black": school.get("pct_black"),
-        "pct_hispanic": school.get("pct_hispanic"),
-        "pct_white": school.get("pct_white"),
-        "pct_asian": school.get("pct_asian"),
-        "pct_multiracial": school.get("pct_multiracial"),
-    }
-
-    # --- LEA accountability (proficiency + graduation) ---
-    lea_id = school.get("lea_id")
-    if lea_id:
-        try:
-            df = pd.read_sql_query(
-                "SELECT * FROM lea_accountability WHERE lea_id = ? ORDER BY data_year DESC",
-                conn, params=[lea_id],
-            )
-            result["accountability"] = df.to_dict("records") if not df.empty else []
-        except Exception:
-            result["accountability"] = []
-    else:
-        result["accountability"] = []
-
-    # --- State and district comparison baselines ---
-    try:
-        cur.execute("""
-            SELECT AVG(proficiency_reading) as state_avg_reading,
-                   AVG(proficiency_math) as state_avg_math,
-                   AVG(graduation_rate) as state_avg_graduation
-            FROM lea_accountability WHERE state = ?
-        """, (school.get("state", "GA"),))
-        state_row = cur.fetchone()
-        result["state_averages"] = dict(state_row) if state_row else {}
-    except Exception:
-        result["state_averages"] = {}
-
-    # --- SCSC CPF scores (GA charter accountability) ---
-    try:
-        df = pd.read_sql_query(
-            "SELECT school_year, academic_designation, financial_designation, "
-            "operations_score, operations_designation "
-            "FROM scsc_cpf WHERE nces_id = ? ORDER BY school_year DESC",
-            conn, params=[nces_id],
-        )
-        result["cpf_scores"] = df.to_dict("records") if not df.empty else []
-    except Exception:
-        result["cpf_scores"] = []
-
-    # --- Financial data (990 + ratios) ---
-    ein = school.get("ein")
-    if ein:
-        try:
-            df = pd.read_sql_query(
-                "SELECT tax_year, total_revenue, total_expenses, total_assets, "
-                "total_liabilities, unrestricted_net_assets, cash_savings "
-                "FROM irs_990_history WHERE ein = ? ORDER BY tax_year DESC",
-                conn, params=[ein],
-            )
-            result["financials_990"] = df.to_dict("records") if not df.empty else []
-        except Exception:
-            result["financials_990"] = []
-
-        try:
-            df = pd.read_sql_query(
-                "SELECT * FROM financial_ratios WHERE ein = ? ORDER BY fiscal_year DESC LIMIT 1",
-                conn, params=[ein],
-            )
-            result["financial_ratios"] = df.iloc[0].to_dict() if not df.empty else {}
-        except Exception:
-            result["financial_ratios"] = {}
-    else:
-        result["financials_990"] = []
-        result["financial_ratios"] = {}
-
-    # --- Nearby schools (within 10 miles) ---
-    lat, lon = school.get("latitude"), school.get("longitude")
-    if lat and lon:
-        try:
-            all_schools = pd.read_sql_query(
-                "SELECT nces_id, school_name, enrollment, is_charter, "
-                "pct_free_reduced_lunch, pct_black, pct_hispanic, pct_white, "
-                "latitude, longitude FROM schools "
-                "WHERE state = ? AND school_status = 'Open' AND nces_id != ?",
-                conn, params=[school.get("state", "GA"), nces_id],
-            )
-            if not all_schools.empty:
-                nearby = filter_by_radius(all_schools, lat, lon, radius_miles=10.0)
-                if not nearby.empty:
-                    nearby = nearby.nsmallest(8, "distance_miles")
-                    nearby_list = nearby.to_dict("records")
-                    for ns in nearby_list:
-                        ns_nces = ns.get("nces_id")
-                        if ns_nces:
-                            cur.execute(
-                                "SELECT s.lea_id FROM schools s WHERE s.nces_id = ?",
-                                (ns_nces,),
-                            )
-                            ns_row = cur.fetchone()
-                            if ns_row:
-                                ns_lea_id = dict(ns_row).get("lea_id")
-                                if ns_lea_id:
-                                    cur.execute(
-                                        "SELECT accountability_rating, graduation_rate "
-                                        "FROM lea_accountability WHERE lea_id = ? "
-                                        "ORDER BY data_year DESC LIMIT 1",
-                                        (ns_lea_id,),
-                                    )
-                                    acct = cur.fetchone()
-                                    if acct:
-                                        acct_d = dict(acct)
-                                        ns["accountability_rating"] = acct_d.get("accountability_rating")
-                                        ns["graduation_rate"] = acct_d.get("graduation_rate")
-                    result["nearby_schools"] = nearby_list
-                else:
-                    result["nearby_schools"] = []
-            else:
-                result["nearby_schools"] = []
-        except Exception:
-            result["nearby_schools"] = []
-    else:
-        result["nearby_schools"] = []
-
-    # --- Census tract context ---
-    tract_id = school.get("census_tract_id")
-    if tract_id:
-        try:
-            cur.execute(
-                "SELECT total_population, median_household_income, poverty_rate, "
-                "pct_minority, unemployment_rate, is_nmtc_eligible, "
-                "nmtc_eligibility_tier, is_opportunity_zone "
-                "FROM census_tracts WHERE census_tract_id = ?",
-                (tract_id,),
-            )
-            tract_row = cur.fetchone()
-            result["census_tract"] = dict(tract_row) if tract_row else {}
-        except Exception:
-            result["census_tract"] = {}
-    else:
-        result["census_tract"] = {}
-
-    conn.close()
-    return result
