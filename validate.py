@@ -129,10 +129,12 @@ def check_geo(table, lat_col="latitude", lon_col="longitude"):
 
 def check_census_tract_format(table, col="census_tract_id"):
     """Census tract IDs must be exactly 11 digits."""
+    # SQLite has GLOB; Postgres uses POSIX regex `~`.
+    nondigit_check = f"{col} ~ '[^0-9]'" if db._IS_POSTGRES else f"{col} GLOB '*[^0-9]*'"
     bad = _scalar(f"""
         SELECT COUNT(*) FROM {table}
         WHERE {col} IS NOT NULL
-          AND (LENGTH({col}) != 11 OR {col} GLOB '*[^0-9]*')
+          AND (LENGTH({col}) != 11 OR {nondigit_check})
     """)
     if bad:
         warn(f"{table}.{col}: {bad:,} rows with invalid format (expected 11-digit FIPS)")
@@ -366,10 +368,15 @@ def check_data_loads():
     n = check_row_count("data_loads", min_rows=1)
     if n == 0:
         return
-    recent = _scalar("""
+    seven_days_ago = (
+        "CURRENT_TIMESTAMP - INTERVAL '7 days'"
+        if db._IS_POSTGRES
+        else "datetime('now', '-7 days')"
+    )
+    recent = _scalar(f"""
         SELECT COUNT(*) FROM data_loads
         WHERE status = 'error'
-          AND started_at > datetime('now', '-7 days')
+          AND started_at > {seven_days_ago}
     """)
     if recent:
         warn(f"data_loads: {recent} pipeline runs ended in error in the last 7 days")

@@ -324,7 +324,6 @@ def apply_historical_data(historical_records: list[dict]):
     Reads current poverty_rate and median_household_income to compute deltas.
     Only updates tracts that already exist in the database.
     """
-    import sqlite3
     conn = db.get_connection()
     cur = conn.cursor()
 

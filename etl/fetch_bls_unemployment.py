@@ -391,10 +391,7 @@ def main():
 
         elif args.mode == "bls-county":
             if args.all_counties:
-                import sqlite3
-                DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                                       "data", "cd_command_center.sqlite")
-                con = sqlite3.connect(DB_PATH)
+                con = db.get_connection()
                 cur = con.cursor()
                 cur.execute(
                     "SELECT DISTINCT SUBSTR(census_tract_id, 1, 5) FROM census_tracts "

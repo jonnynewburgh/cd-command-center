@@ -11,7 +11,6 @@ Usage:
 import sys
 import os
 import random
-import sqlite3
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

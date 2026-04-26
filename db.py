@@ -457,6 +457,10 @@ def init_db():
         )
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_programs_state ON state_programs(state)")
+    cur.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_programs_state_name "
+        "ON state_programs(state, program_name)"
+    )
 
     # Add ein column to schools and fqhc tables if it doesn't exist yet.
     for table, col in [("schools", "ein"), ("fqhc", "ein"), ("cde_allocations", "ein")]:
@@ -2742,14 +2746,17 @@ def get_cdfi_states() -> list:
 # ---------------------------------------------------------------------------
 
 def upsert_state_program(record: dict):
-    """Insert a state incentive program record. Ignores duplicates."""
+    """Insert a state incentive program record. Ignores duplicates on (state, program_name)."""
     conn = get_connection()
     cur = conn.cursor()
     columns = list(record.keys())
     values = list(record.values())
     placeholders = ",".join("?" * len(values))
     cur.execute(
-        f"INSERT OR IGNORE INTO state_programs ({','.join(columns)}) VALUES ({placeholders})",
+        adapt_sql(
+            f"INSERT INTO state_programs ({','.join(columns)}) VALUES ({placeholders}) "
+            f"ON CONFLICT(state, program_name) DO NOTHING"
+        ),
         values,
     )
     conn.commit()
