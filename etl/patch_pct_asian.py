@@ -112,14 +112,19 @@ def main():
     conn = db.get_connection()
 
     # Load nces_id + state for all schools (or filtered states)
+    cur = conn.cursor()
     if args.states:
         placeholders = ",".join("?" * len(args.states))
-        rows = conn.execute(
-            f"SELECT nces_id, state FROM schools WHERE state IN ({placeholders})",
-            args.states
-        ).fetchall()
+        cur.execute(
+            db.adapt_sql(
+                f"SELECT nces_id, state FROM schools WHERE state IN ({placeholders})"
+            ),
+            args.states,
+        )
+        rows = cur.fetchall()
     else:
-        rows = conn.execute("SELECT nces_id, state FROM schools").fetchall()
+        cur.execute("SELECT nces_id, state FROM schools")
+        rows = cur.fetchall()
 
     # Group by state
     by_state = {}
@@ -149,9 +154,9 @@ def main():
         # Update schools table in batches
         updated = 0
         for nces_id, pct in pct_map.items():
-            conn.execute(
-                "UPDATE schools SET pct_asian = ? WHERE nces_id = ?",
-                (pct, nces_id)
+            cur.execute(
+                db.adapt_sql("UPDATE schools SET pct_asian = ? WHERE nces_id = ?"),
+                (pct, nces_id),
             )
             updated += 1
 

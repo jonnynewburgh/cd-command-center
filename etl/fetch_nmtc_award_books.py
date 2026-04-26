@@ -284,10 +284,11 @@ def main():
                 cur = conn.cursor()
 
                 # Check if CDE already exists (from project-data derivation, year=0)
-                existing = cur.execute(
+                cur.execute(
                     db.adapt_sql("SELECT id FROM cde_allocations WHERE cde_name = ? AND allocation_year = ?"),
                     (rec["cde_name"], year)
-                ).fetchone()
+                )
+                existing = cur.fetchone()
 
                 if existing:
                     cur.execute(
@@ -315,10 +316,12 @@ def main():
     # Summary
     conn = db.get_connection()
     cur = conn.cursor()
-    n = cur.execute("SELECT COUNT(*) FROM cde_allocations").fetchone()[0]
-    n_with_amt = cur.execute(
+    cur.execute("SELECT COUNT(*) FROM cde_allocations")
+    n = cur.fetchone()[0]
+    cur.execute(
         "SELECT COUNT(*) FROM cde_allocations WHERE allocation_amount IS NOT NULL AND allocation_year > 0"
-    ).fetchone()[0]
+    )
+    n_with_amt = cur.fetchone()[0]
     conn.close()
     print(f"cde_allocations total rows:        {n:,}")
     print(f"With official allocation amounts:  {n_with_amt:,}")

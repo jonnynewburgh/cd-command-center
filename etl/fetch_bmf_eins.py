@@ -355,8 +355,10 @@ def _get_unlinked_operators(states=None, limit=None, all_schools=False) -> list[
     where = "WHERE " + " AND ".join(conditions)
 
     cur.execute(
-        f"SELECT DISTINCT lea_id, lea_name, school_name, state, zip_code "
-        f"FROM schools {where} ORDER BY state, lea_name",
+        db.adapt_sql(
+            f"SELECT DISTINCT lea_id, lea_name, school_name, state, zip_code "
+            f"FROM schools {where} ORDER BY state, lea_name"
+        ),
         params,
     )
     rows = cur.fetchall()
@@ -393,14 +395,18 @@ def _link_ein_to_schools(lea_id, school_name, state, ein, all_schools=False):
     charter_filter = "" if all_schools else "AND is_charter = 1"
     if lea_id:
         cur.execute(
-            f"UPDATE schools SET ein = ?, updated_at = CURRENT_TIMESTAMP "
-            f"WHERE lea_id = ? {charter_filter}",
+            db.adapt_sql(
+                f"UPDATE schools SET ein = ?, updated_at = CURRENT_TIMESTAMP "
+                f"WHERE lea_id = ? {charter_filter}"
+            ),
             (ein, lea_id),
         )
     else:
         cur.execute(
-            f"UPDATE schools SET ein = ?, updated_at = CURRENT_TIMESTAMP "
-            f"WHERE school_name = ? AND state = ? {charter_filter}",
+            db.adapt_sql(
+                f"UPDATE schools SET ein = ?, updated_at = CURRENT_TIMESTAMP "
+                f"WHERE school_name = ? AND state = ? {charter_filter}"
+            ),
             (ein, school_name, state),
         )
     conn.commit()

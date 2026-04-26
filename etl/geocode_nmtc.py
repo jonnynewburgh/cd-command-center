@@ -90,8 +90,10 @@ def get_projects_to_geocode(states=None, limit=None, overwrite=False) -> list[di
     limit_clause = f"LIMIT {limit}" if limit else ""
 
     cur.execute(
-        f"SELECT id, cdfi_project_id, city, state, zip_code "
-        f"FROM nmtc_projects {where} ORDER BY zip_code, id {limit_clause}",
+        db.adapt_sql(
+            f"SELECT id, cdfi_project_id, city, state, zip_code "
+            f"FROM nmtc_projects {where} ORDER BY zip_code, id {limit_clause}"
+        ),
         params,
     )
     rows = cur.fetchall()

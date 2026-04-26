@@ -67,7 +67,9 @@ def compute_ratios(limit: int = None):
         if limit:
             # Get a subset of EINs for testing
             eins_sql = f"SELECT DISTINCT ein FROM irs_990_history LIMIT {limit}"
-            ein_rows = conn.execute(eins_sql).fetchall()
+            cur = conn.cursor()
+            cur.execute(eins_sql)
+            ein_rows = cur.fetchall()
             ein_list = [r[0] for r in ein_rows]
             placeholders = ",".join("?" * len(ein_list))
             sql = f"""
@@ -78,7 +80,7 @@ def compute_ratios(limit: int = None):
                 WHERE ein IN ({placeholders})
                 ORDER BY ein, tax_year
             """
-            df = pd.read_sql_query(sql, conn, params=ein_list)
+            df = pd.read_sql_query(db.adapt_sql(sql), conn, params=ein_list)
         else:
             df = pd.read_sql_query(sql, conn)
 

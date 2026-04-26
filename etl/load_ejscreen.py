@@ -390,7 +390,9 @@ def main():
             conn = db.get_connection()
             cur = conn.cursor()
             cur.execute(
-                f"UPDATE census_tracts SET {set_clauses} WHERE census_tract_id = ?",
+                db.adapt_sql(
+                    f"UPDATE census_tracts SET {set_clauses} WHERE census_tract_id = ?"
+                ),
                 values,
             )
             if cur.rowcount > 0:

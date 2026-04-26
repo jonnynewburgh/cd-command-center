@@ -3191,7 +3191,7 @@ def update_document_data(doc_id: int, extracted_data: str, verified: bool = Fals
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
-        "UPDATE documents SET extracted_data = ?, verified = ? WHERE id = ?",
+        adapt_sql("UPDATE documents SET extracted_data = ?, verified = ? WHERE id = ?"),
         (extracted_data, 1 if verified else 0, doc_id),
     )
     conn.commit()

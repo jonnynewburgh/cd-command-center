@@ -183,7 +183,9 @@ def main():
     not_in_db = 0
     for tid in tract_ids:
         cur.execute(
-            "UPDATE census_tracts SET is_opportunity_zone = 1 WHERE census_tract_id = ?",
+            db.adapt_sql(
+                "UPDATE census_tracts SET is_opportunity_zone = 1 WHERE census_tract_id = ?"
+            ),
             (tid,),
         )
         if cur.rowcount > 0:

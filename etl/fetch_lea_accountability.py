@@ -238,8 +238,10 @@ def _upsert_lea(row: dict):
         f"{c}=excluded.{c}" for c in cols if c != "lea_id"
     )
     cur.execute(
-        f"INSERT INTO lea_accountability ({','.join(cols)}) VALUES ({placeholders}) "
-        f"ON CONFLICT(lea_id, data_year) DO UPDATE SET {update}, created_at=CURRENT_TIMESTAMP",
+        db.adapt_sql(
+            f"INSERT INTO lea_accountability ({','.join(cols)}) VALUES ({placeholders}) "
+            f"ON CONFLICT(lea_id, data_year) DO UPDATE SET {update}, created_at=CURRENT_TIMESTAMP"
+        ),
         vals,
     )
     conn.commit()
@@ -288,10 +290,12 @@ def main():
 
     conn = db.get_connection()
     cur = conn.cursor()
-    total = cur.execute("SELECT COUNT(*) FROM lea_accountability").fetchone()[0]
-    with_grad = cur.execute(
+    cur.execute("SELECT COUNT(*) FROM lea_accountability")
+    total = cur.fetchone()[0]
+    cur.execute(
         "SELECT COUNT(*) FROM lea_accountability WHERE graduation_rate IS NOT NULL"
-    ).fetchone()[0]
+    )
+    with_grad = cur.fetchone()[0]
     conn.close()
 
     print(f"Done. lea_accountability rows: {total:,}")

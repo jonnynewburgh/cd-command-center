@@ -336,7 +336,9 @@ def apply_historical_data(historical_records: list[dict]):
 
         # Look up current values to compute deltas
         cur.execute(
-            "SELECT poverty_rate, median_household_income FROM census_tracts WHERE census_tract_id = ?",
+            db.adapt_sql(
+                "SELECT poverty_rate, median_household_income FROM census_tracts WHERE census_tract_id = ?"
+            ),
             (tid,),
         )
         row = cur.fetchone()
@@ -355,12 +357,14 @@ def apply_historical_data(historical_records: list[dict]):
             inc_change_pct = round((inc_now - inc_old) / inc_old * 100, 2)
 
         cur.execute(
-            """UPDATE census_tracts
-               SET poverty_rate_5yr_ago = ?,
-                   median_income_5yr_ago = ?,
-                   poverty_rate_change = ?,
-                   income_change_pct = ?
-               WHERE census_tract_id = ?""",
+            db.adapt_sql(
+                """UPDATE census_tracts
+                   SET poverty_rate_5yr_ago = ?,
+                       median_income_5yr_ago = ?,
+                       poverty_rate_change = ?,
+                       income_change_pct = ?
+                   WHERE census_tract_id = ?"""
+            ),
             (pov_old, inc_old, pov_change, inc_change_pct, tid),
         )
         updated += 1
