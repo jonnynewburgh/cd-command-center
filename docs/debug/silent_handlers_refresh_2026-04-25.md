@@ -137,3 +137,67 @@ do not chase mid-session.
 - **H11 dict(row)** at db.py:2982 — Phase 4 dict(row) sweep.
 - **H12 dict(row)** at db.py:3034 — Phase 4 dict(row) sweep.
 - **NEW-3 raw-?**: `get_nmtc_projects_by_cde` at db.py:2284 — raw `?` not wrapped in `adapt_sql`. Phase 3.
+
+---
+
+## Post-Phase-1 smoke test findings (2026-04-26)
+
+Now that the silent masks are gone, called previously-masked db
+functions directly against Postgres with valid IDs to surface what was
+hidden. This sizes the Phase 4 architectural decision.
+
+### Confirmed live bugs (now loud)
+
+| Site | Function | Bug |
+|---|---|---|
+| db.py:1426 | `get_school_by_id` | `dict(row)` TypeError on psycopg2 tuple |
+| db.py:2285 | `get_nmtc_project_by_id` (H8) | `dict(row)` TypeError on psycopg2 tuple |
+| db.py:3008 | `get_user_notes` (H11) | `[dict(row) for row in ...]` TypeError |
+| db.py:3064 | `get_bookmarks` (H12) | `[dict(row) for row in ...]` TypeError |
+
+H11 and H12 only raise when there's data to return — empty cursor
+swallows the bug. Test harness inserted a note and a bookmark to
+trigger the cursor path; both raised.
+
+### dict(row) full sweep — 7 sites
+
+Fresh grep against db.py for `dict(row)` and `[dict(row) for`:
+
+| Line | Function | Status |
+|---|---|---|
+| 1426 | `get_school_by_id` | LIVE (raised in smoke test) |
+| 1491 | `get_census_tract` | likely LIVE (same shape; not smoke-tested) |
+| 1685 | `get_nmtc_project_summary` | likely LIVE (single-row aggregate) |
+| 2285 | `get_nmtc_project_by_id` | LIVE (raised) |
+| 3008 | `get_user_notes` | LIVE (raised) |
+| 3064 | `get_bookmarks` | LIVE (raised) |
+| 3187 | `delete_document` | likely LIVE; ALSO has raw-? (no `adapt_sql`) |
+
+Functions using `dict(zip(cols, row))` instead of `dict(row)` work
+correctly on psycopg2 tuples and need no fix: `get_fqhc_by_id`,
+`get_ece_by_id`, `get_fqhc_summary`, `get_school_summary` etc.
+
+### Phase 4 Decision A vs B — resolved
+
+**Decision B is correct.** 7 sites is well under the 25-site Decision A
+threshold in `postgres-migration-plan.md`. A `row_to_dict(cur, row)`
+helper + 7 site-specific edits is a 30-60 minute job. Decision A
+(`RealDictCursor`) would touch every SELECT path's tuple-index access
+across db.py — multiple sessions of mechanical work for no extra
+benefit at this surface size.
+
+### Other findings (deferred)
+
+- **H9 `get_nearby_facilities` schools branch — signature drift bug**:
+  calls `get_schools(active_only=False)` but `active_only` is not a
+  current kwarg on `get_schools`. Raises `TypeError`. Not a Postgres
+  bug; pre-existing. ~5 min fix; flag for a 30-min slot.
+- **L2 `save_user_note` lastrowid**: returns 0 instead of real id on
+  Postgres. Already in Phase 4 scope.
+
+### What didn't surface (silent paths still safe)
+
+H6, H7, NEW-1, NEW-2 returned full records correctly. Their callers
+(FastAPI 404 wrappers) will continue to work as designed. Real
+Postgres errors will now produce 500s with stack traces instead of
+fake 404s — desired behavior.
