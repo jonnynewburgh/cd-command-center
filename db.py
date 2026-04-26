@@ -57,6 +57,16 @@ def adapt_sql(sql: str) -> str:
     return sql
 
 
+def row_to_dict(cur, row):
+    # psycopg2 returns plain tuples — dict(row) raises TypeError on those.
+    # sqlite3.Row supports dict(row) directly but also iterates like a tuple,
+    # so dict(zip(cur.description, row)) works on both backends.
+    if row is None:
+        return None
+    cols = [d[0] for d in cur.description]
+    return dict(zip(cols, row))
+
+
 def _try_exec(cur, sql: str):
     """Execute a statement that might fail (e.g. ADD COLUMN on an existing table).
 
@@ -1422,8 +1432,9 @@ def get_school_by_id(school_id: int) -> dict:
     cur = conn.cursor()
     cur.execute(adapt_sql("SELECT * FROM schools WHERE id = ?"), (school_id,))
     row = cur.fetchone()
+    result = row_to_dict(cur, row)
     conn.close()
-    return dict(row) if row else {}
+    return result if result else {}
 
 
 def get_charter_school_by_id(school_id: int) -> dict:
@@ -1487,8 +1498,9 @@ def get_census_tract(census_tract_id: str) -> dict:
     cur = conn.cursor()
     cur.execute(adapt_sql("SELECT * FROM census_tracts WHERE census_tract_id = ?"), (census_tract_id,))
     row = cur.fetchone()
+    result = row_to_dict(cur, row)
     conn.close()
-    return dict(row) if row else {}
+    return result if result else {}
 
 
 @_cached(ttl=300)
@@ -1681,8 +1693,9 @@ def get_nmtc_project_summary() -> dict:
         FROM nmtc_projects
     """)
     row = cur.fetchone()
+    result = row_to_dict(cur, row)
     conn.close()
-    return dict(row) if row else {}
+    return result if result else {}
 
 
 @_cached(ttl=300)
@@ -2281,8 +2294,9 @@ def get_nmtc_project_by_id(cdfi_project_id: str) -> dict:
     try:
         cur.execute(adapt_sql("SELECT * FROM nmtc_projects WHERE cdfi_project_id = ?"), (cdfi_project_id,))
         row = cur.fetchone()
+        result = row_to_dict(cur, row)
         conn.close()
-        return dict(row) if row else {}
+        return result if result else {}
     except Exception:
         logger.exception("get_nmtc_project_by_id failed for cdfi_project_id=%s", cdfi_project_id)
         conn.close()
@@ -3005,7 +3019,7 @@ def get_user_notes(entity_type: str, entity_id: str) -> list:
             ),
             (entity_type, str(entity_id)),
         )
-        notes = [dict(row) for row in cur.fetchall()]
+        notes = [row_to_dict(cur, row) for row in cur.fetchall()]
     except Exception:
         logger.exception(
             "get_user_notes failed for entity_type=%s entity_id=%s", entity_type, entity_id
@@ -3021,10 +3035,13 @@ def save_user_note(entity_type: str, entity_id: str, note_text: str) -> int:
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
-        adapt_sql("INSERT INTO user_notes (entity_type, entity_id, note_text) VALUES (?, ?, ?)"),
+        adapt_sql(
+            "INSERT INTO user_notes (entity_type, entity_id, note_text) "
+            "VALUES (?, ?, ?) RETURNING id"
+        ),
         (entity_type, str(entity_id), note_text),
     )
-    note_id = cur.lastrowid
+    note_id = cur.fetchone()[0]
     conn.commit()
     conn.close()
     return note_id
@@ -3061,7 +3078,7 @@ def get_bookmarks() -> list:
     cur = conn.cursor()
     try:
         cur.execute("SELECT * FROM user_bookmarks ORDER BY created_at DESC")
-        bookmarks = [dict(row) for row in cur.fetchall()]
+        bookmarks = [row_to_dict(cur, row) for row in cur.fetchall()]
     except Exception:
         logger.exception("get_bookmarks failed")
         conn.close()
@@ -3129,10 +3146,13 @@ def save_document(record: dict) -> int:
     values = list(record.values())
     placeholders = ",".join("?" * len(values))
     cur.execute(
-        f"INSERT INTO documents ({','.join(columns)}) VALUES ({placeholders})",
+        adapt_sql(
+            f"INSERT INTO documents ({','.join(columns)}) "
+            f"VALUES ({placeholders}) RETURNING id"
+        ),
         values,
     )
-    doc_id = cur.lastrowid
+    doc_id = cur.fetchone()[0]
     conn.commit()
     conn.close()
     return doc_id
@@ -3182,10 +3202,10 @@ def delete_document(doc_id: int) -> str:
     """Delete a document record and return its filepath so the caller can remove the file."""
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT filepath FROM documents WHERE id = ?", (doc_id,))
+    cur.execute(adapt_sql("SELECT filepath FROM documents WHERE id = ?"), (doc_id,))
     row = cur.fetchone()
-    filepath = dict(row)["filepath"] if row else None
-    cur.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+    filepath = row[0] if row else None
+    cur.execute(adapt_sql("DELETE FROM documents WHERE id = ?"), (doc_id,))
     conn.commit()
     conn.close()
     return filepath
