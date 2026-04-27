@@ -1521,7 +1521,7 @@ def get_nmtc_eligible_tracts(states=None) -> pd.DataFrame:
     query = f"SELECT * FROM census_tracts {where_clause} ORDER BY state, census_tract_id"
 
     conn = get_connection()
-    df = pd.read_sql_query(query, conn, params=params)
+    df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     conn.close()
     return df
 
@@ -1578,7 +1578,7 @@ def get_census_tracts(
     query = f"SELECT * FROM census_tracts {where_clause} ORDER BY state, poverty_rate DESC"
 
     conn = get_connection()
-    df = pd.read_sql_query(query, conn, params=params)
+    df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     conn.close()
     return df
 
@@ -1676,7 +1676,7 @@ def get_nmtc_projects(
     """
 
     conn = get_connection()
-    df = pd.read_sql_query(query, conn, params=params)
+    df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     conn.close()
     return df
 
@@ -1721,7 +1721,7 @@ def get_cde_allocations(states=None) -> pd.DataFrame:
     """
 
     conn = get_connection()
-    df = pd.read_sql_query(query, conn, params=params)
+    df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     conn.close()
     return df
 
@@ -1765,7 +1765,7 @@ def get_fqhc(
 
     conn = get_connection()
     try:
-        df = pd.read_sql_query(query, conn, params=params)
+        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
         logger.exception("get_fqhc failed")
         df = pd.DataFrame()
@@ -1866,7 +1866,7 @@ def get_ece_centers(
 
     conn = get_connection()
     try:
-        df = pd.read_sql_query(query, conn, params=params)
+        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
         logger.exception("get_ece_centers failed")
         df = pd.DataFrame()
@@ -2083,7 +2083,7 @@ def get_lea_accountability(lea_ids=None, states=None) -> pd.DataFrame:
     query = f"SELECT * FROM lea_accountability {where_clause} ORDER BY state, lea_name"
 
     conn = get_connection()
-    df = pd.read_sql_query(query, conn, params=params)
+    df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     conn.close()
     return df
 
@@ -2312,7 +2312,7 @@ def get_nmtc_projects_by_cde(cde_name: str) -> pd.DataFrame:
     conn = get_connection()
     try:
         df = pd.read_sql_query(
-            "SELECT * FROM nmtc_projects WHERE cde_name = ? ORDER BY fiscal_year DESC",
+            adapt_sql("SELECT * FROM nmtc_projects WHERE cde_name = ? ORDER BY fiscal_year DESC"),
             conn, params=[cde_name],
         )
     except Exception:
@@ -2578,7 +2578,7 @@ def get_peer_nmtc_projects(
 
     conn = get_connection()
     try:
-        df = pd.read_sql_query(query, conn, params=params)
+        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
         logger.exception("get_peer_nmtc_projects failed")
         df = pd.DataFrame()
@@ -2596,7 +2596,7 @@ def get_operator_schools(ein: str) -> pd.DataFrame:
     conn = get_connection()
     try:
         df = pd.read_sql_query(
-            "SELECT * FROM schools WHERE ein = ? ORDER BY school_name",
+            adapt_sql("SELECT * FROM schools WHERE ein = ? ORDER BY school_name"),
             conn, params=[ein],
         )
     except Exception:
@@ -2612,7 +2612,7 @@ def get_operator_fqhc(ein: str) -> pd.DataFrame:
     conn = get_connection()
     try:
         df = pd.read_sql_query(
-            "SELECT * FROM fqhc WHERE ein = ? ORDER BY site_name",
+            adapt_sql("SELECT * FROM fqhc WHERE ein = ? ORDER BY site_name"),
             conn, params=[ein],
         )
     except Exception:
@@ -2716,7 +2716,7 @@ def get_cdfis(states=None, cdfi_type=None) -> pd.DataFrame:
 
     conn = get_connection()
     try:
-        df = pd.read_sql_query(query, conn, params=params)
+        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
         logger.exception("get_cdfis failed")
         df = pd.DataFrame()
@@ -2781,7 +2781,7 @@ def get_state_programs(state: str = None) -> pd.DataFrame:
 
     conn = get_connection()
     try:
-        df = pd.read_sql_query(query, conn, params=params)
+        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
         logger.exception("get_state_programs failed")
         df = pd.DataFrame()
@@ -2882,7 +2882,7 @@ def get_service_gaps(
 
     conn = get_connection()
     try:
-        df = pd.read_sql_query(query, conn, params=params)
+        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
         logger.exception("get_service_gaps failed")
         df = pd.DataFrame()
@@ -2919,7 +2919,7 @@ def get_enrollment_history(nces_id: str) -> pd.DataFrame:
     conn = get_connection()
     try:
         df = pd.read_sql_query(
-            "SELECT * FROM enrollment_history WHERE nces_id = ? ORDER BY school_year ASC",
+            adapt_sql("SELECT * FROM enrollment_history WHERE nces_id = ? ORDER BY school_year ASC"),
             conn, params=[nces_id],
         )
     except Exception:
@@ -3185,7 +3185,7 @@ def get_documents(ein: str = None, entity_type: str = None, entity_id: str = Non
 
     conn = get_connection()
     try:
-        df = pd.read_sql_query(query, conn, params=params)
+        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
     except Exception:
         logger.exception("get_documents failed")
         df = pd.DataFrame()
@@ -3469,10 +3469,12 @@ def search_org(query_text: str) -> pd.DataFrame:
     conn = get_connection()
     try:
         df = pd.read_sql_query(
-            """SELECT * FROM irs_990
-               WHERE org_name LIKE ? OR ein LIKE ?
-               ORDER BY org_name
-               LIMIT 50""",
+            adapt_sql(
+                """SELECT * FROM irs_990
+                   WHERE org_name LIKE ? OR ein LIKE ?
+                   ORDER BY org_name
+                   LIMIT 50"""
+            ),
             conn, params=[like, like],
         )
     except Exception:
