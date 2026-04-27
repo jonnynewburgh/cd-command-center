@@ -1200,20 +1200,70 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_hs_tract      ON headstart_programs(census_tract_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_hs_zip        ON headstart_programs(zip_code)")
 
+    # ---- Indexes added per CODEX audit P1 #7 (2026-04-26) ------------------
+    # The columns below are filtered on by routed get_* functions but were
+    # missing index coverage. Added together rather than scattered through
+    # init_db so a future cleanup pass can move all of them to migrations.
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_schools_tract       ON schools(census_tract_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_schools_county      ON schools(county)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_schools_enrollment  ON schools(enrollment)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_tracts_county_fips  ON census_tracts(county_fips)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_nmtc_fiscal_year    ON nmtc_projects(fiscal_year)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_nmtc_cde_name       ON nmtc_projects(cde_name)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_fqhc_site_type      ON fqhc(site_type)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ece_type_subsidy    ON ece_centers(facility_type, accepts_subsidies)")
+
     conn.commit()
     conn.close()
 
 
 # ---------------------------------------------------------------------------
-# Caching helper — no-op; kept so all @_cached decorators still work without
-# change. If a caching layer is added later (e.g. functools.lru_cache or
-# Redis), swap the implementation here.
+# Caching helper — in-process TTL cache.
+#
+# Used by ~12 read functions (state lists, summary cards, latest rates, etc.)
+# to avoid re-querying for unchanged dropdown/header data on every request.
+# Single-process only; for a multi-worker deployment swap in Redis here.
 # ---------------------------------------------------------------------------
 
+import time as _time
+import threading as _threading
+from functools import wraps as _wraps
+
+
+_CACHE_LOCK = _threading.Lock()
+_CACHE: dict = {}   # key -> (expires_at, value)
+
+
+def cache_clear() -> int:
+    """Drop every cached entry. Returns the number of evicted entries.
+    Call after a write that invalidates a cached read (or after a pipeline
+    run); also useful in tests."""
+    with _CACHE_LOCK:
+        n = len(_CACHE)
+        _CACHE.clear()
+    return n
+
+
 def _cached(ttl=300):
-    """No-op decorator. Preserves the @_cached(ttl=...) call signature."""
+    """Per-call TTL cache keyed on (function, args, sorted-kwargs).
+    `ttl` is in seconds. Cache is process-local."""
     def decorator(func):
-        return func
+        fname = func.__qualname__
+
+        @_wraps(func)
+        def wrapper(*args, **kwargs):
+            key = (fname, args, tuple(sorted(kwargs.items())))
+            now = _time.monotonic()
+            with _CACHE_LOCK:
+                hit = _CACHE.get(key)
+                if hit is not None and hit[0] > now:
+                    return hit[1]
+            value = func(*args, **kwargs)
+            with _CACHE_LOCK:
+                _CACHE[key] = (now + ttl, value)
+            return value
+
+        return wrapper
     return decorator
 
 
@@ -1331,6 +1381,9 @@ def get_schools(
     census_tract_id=None,
     charter_only=False,
     nmtc_eligible_only=False,
+    risk_tiers=None,
+    min_survival_score=None,
+    max_survival_score=None,
 ) -> pd.DataFrame:
     """
     Return schools matching the given filters as a DataFrame.
@@ -1349,6 +1402,9 @@ def get_schools(
         census_tract_id: exact census tract FIPS code
         charter_only: if True, only return charter schools (is_charter=1)
         nmtc_eligible_only: if True, only return schools in NMTC-eligible tracts
+        risk_tiers: list of survival_risk_tier strings, e.g. ['High', 'Medium']
+        min_survival_score: minimum survival_score (inclusive, 0.0–1.0)
+        max_survival_score: maximum survival_score (inclusive, 0.0–1.0)
     """
     conditions = []
     params = []
@@ -1385,6 +1441,19 @@ def get_schools(
     if nmtc_eligible_only:
         # Filter to schools in NMTC-eligible census tracts (LIC, Severely Distressed, Deep Distress)
         conditions.append("ct.is_nmtc_eligible = 1")
+
+    if risk_tiers:
+        placeholders = ",".join("?" * len(risk_tiers))
+        conditions.append(f"s.survival_risk_tier IN ({placeholders})")
+        params.extend(risk_tiers)
+
+    if min_survival_score is not None:
+        conditions.append("s.survival_score >= ?")
+        params.append(min_survival_score)
+
+    if max_survival_score is not None:
+        conditions.append("s.survival_score <= ?")
+        params.append(max_survival_score)
 
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
 
@@ -1441,20 +1510,29 @@ def get_schools(
 
 
 @_cached(ttl=300)
-def get_school_by_id(school_id: int) -> dict:
-    """Return a single school by its primary key id."""
+def get_school_by_nces_id(nces_id: str) -> dict:
+    """Return a single school by its NCES ID — the user-visible key the
+    dashboard routes on. Returns empty dict if not found."""
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute(adapt_sql("SELECT * FROM schools WHERE id = ?"), (school_id,))
+    cur.execute(adapt_sql("SELECT * FROM schools WHERE nces_id = ?"), (str(nces_id),))
     row = cur.fetchone()
     result = row_to_dict(cur, row)
     conn.close()
     return result if result else {}
 
 
-def get_charter_school_by_id(school_id: int) -> dict:
+# Deprecated alias — the FastAPI router used to call get_school_by_id() with
+# an nces_id string, against a function whose SQL was WHERE id = ?, which
+# silently returned 404s for valid schools (CODEX audit P0 #1, 2026-04-26).
+# Kept for any remaining callers; new code should use get_school_by_nces_id.
+def get_school_by_id(nces_id) -> dict:
+    return get_school_by_nces_id(nces_id)
+
+
+def get_charter_school_by_id(nces_id) -> dict:
     """Backward-compatible wrapper."""
-    return get_school_by_id(school_id)
+    return get_school_by_nces_id(nces_id)
 
 
 @_cached(ttl=3600)   # state lists change rarely — cache for 1 hour

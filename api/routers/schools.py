@@ -63,7 +63,7 @@ def school_states():
 @router.get("/{nces_id}")
 def get_school(nces_id: str):
     """Full detail for a single school by NCES ID."""
-    record = db.get_school_by_id(nces_id)
+    record = db.get_school_by_nces_id(nces_id)
     if not record:
         raise HTTPException(status_code=404, detail="School not found")
     return clean_dict(record)
