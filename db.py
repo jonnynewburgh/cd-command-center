@@ -407,10 +407,16 @@ def init_db():
             total_revenue REAL,
             total_expenses REAL,
             total_assets REAL,
+            total_liabilities REAL,
             net_income REAL,
             program_service_revenue REAL,
             program_service_expenses REAL,
             officer_compensation REAL,
+            cash_savings REAL,
+            unrestricted_net_assets REAL,
+            accounts_payable REAL,
+            accrued_expenses REAL,
+            notes_payable REAL,
             tax_year INTEGER NOT NULL,
             filing_pdf_url TEXT,
             data_source TEXT DEFAULT 'IRS',
@@ -419,6 +425,11 @@ def init_db():
         )
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_990h_ein ON irs_990_history(ein)")
+    # Backfill columns on pre-existing tables — _try_exec ignores already-exists.
+    for col in ("total_liabilities REAL", "cash_savings REAL",
+                "unrestricted_net_assets REAL", "accounts_payable REAL",
+                "accrued_expenses REAL", "notes_payable REAL"):
+        _try_exec(cur, f"ALTER TABLE irs_990_history ADD COLUMN {col}")
 
     # CDFI directory — certified CDFIs from the CDFI Fund
     cur.execute("""

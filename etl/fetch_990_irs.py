@@ -164,12 +164,17 @@ def _load_index_csv(year: int, refresh: bool = False) -> list[dict]:
         return list(csv.DictReader(f))
 
 
-def build_ein_map(years: list[int], refresh: bool = False) -> dict[str, dict]:
+def build_ein_filings_map(years: list[int], refresh: bool = False) -> dict[str, list[dict]]:
     """
-    Return {ein: filing_info} keeping only the most recent filing per EIN
-    across all given years. Only includes 990 / 990EZ / 990PF form types.
+    Return {ein: [filing_info, ...]} with ALL filings across the given years,
+    keyed by EIN. Filings within an EIN are deduped on TAX_PERIOD (only the
+    last-seen OBJECT_ID per (ein, tax_period) wins — IRS index can list a
+    given filing multiple times across years).
+    Only includes 990 / 990EZ / 990PF form types.
     """
-    ein_map: dict[str, dict] = {}
+    # First pass: per-EIN dict of {tax_period: filing_info} so duplicates
+    # within or across index years collapse to one row per (ein, tax_period).
+    by_ein_period: dict[str, dict[str, dict]] = {}
 
     for year in years:
         rows = _load_index_csv(year, refresh=refresh)
@@ -182,17 +187,22 @@ def build_ein_map(years: list[int], refresh: bool = False) -> dict[str, dict]:
             if not ein or ein == "000000000":
                 continue
             tax_period = row.get("TAX_PERIOD", "").strip()
-            existing   = ein_map.get(ein)
-            if existing is None or tax_period > existing.get("TAX_PERIOD", ""):
-                ein_map[ein] = {
-                    "EIN":        ein,
-                    "OBJECT_ID":  row.get("OBJECT_ID", "").strip(),
-                    "RETURN_TYPE": form,
-                    "TAX_PERIOD": tax_period,
-                    "year":       year,
-                }
+            obj_id     = row.get("OBJECT_ID", "").strip()
+            if not tax_period or not obj_id:
+                continue
+            by_ein_period.setdefault(ein, {})[tax_period] = {
+                "EIN":         ein,
+                "OBJECT_ID":   obj_id,
+                "RETURN_TYPE": form,
+                "TAX_PERIOD":  tax_period,
+                "year":        year,
+            }
 
-    return ein_map
+    # Flatten to {ein: [filings sorted newest-first]}
+    return {
+        ein: sorted(periods.values(), key=lambda f: f["TAX_PERIOD"], reverse=True)
+        for ein, periods in by_ein_period.items()
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -349,9 +359,19 @@ def parse_990_xml(xml_bytes: bytes) -> dict | None:
                               "CompCurrentOfcrDirectorsTrustAmt")
         cash           = _amt(form, "CashNonInterestBearingGrp/EOYAmt",
                               "CashSavingsEOYAmt")
-        unrestricted   = _amt(form, "UnrestrictedNetAssetsGrp/EOYAmt",
-                              "NetAssetsFundBalanceEOYAmt")
-        accts_payable  = _amt(form, "AccountsPayableAccruedExpensesGrp/EOYAmt",
+        # Net assets — modern post-ASU-2016-14 schema renamed Unrestricted to
+        # "Without Donor Restrictions". Fall back to the form-level total if
+        # neither group is populated.
+        unrestricted   = _amt(form,
+                              "NoDonorRestrictionNetAssetsGrp/EOYAmt",
+                              "UnrestrictedNetAssetsGrp/EOYAmt",
+                              "NetAssetsFundBalanceEOYAmt",
+                              "NetAssetsOrFundBalancesEOYAmt")
+        # Accounts payable group — IRS abbreviates "Accrued Expenses" to
+        # "AccrExpnss" in the modern schema; older filings use the full word.
+        accts_payable  = _amt(form,
+                              "AccountsPayableAccrExpnssGrp/EOYAmt",
+                              "AccountsPayableAccruedExpensesGrp/EOYAmt",
                               "AccountsPayableEOYAmt")
         notes_payable  = _amt(form, "MortgageNotesBondsPayableLessGrp/EOYAmt",
                               "BondsPayableGrp/EOYAmt")
@@ -422,9 +442,10 @@ def parse_990_xml(xml_bytes: bytes) -> dict | None:
 
 def _upsert_irs_record(record: dict):
     """
-    Upsert an IRS-sourced record. Only updates non-null financial fields.
-    Preserves existing filing_pdf_url, ntee_code, and subsection_code —
-    those come from the BMF loader and are not in the 990 XML.
+    Upsert an IRS-sourced record into irs_990 (latest year per EIN).
+    Only updates non-null financial fields. Preserves existing
+    filing_pdf_url, ntee_code, and subsection_code — those come from the
+    BMF loader and are not in the 990 XML.
     """
     conn = db.get_connection()
     cur  = conn.cursor()
@@ -449,6 +470,51 @@ def _upsert_irs_record(record: dict):
     conn.close()
 
 
+# Columns that exist on irs_990_history; everything else in the parsed
+# record gets dropped at write time. Defined here so the loader fails fast
+# if a future schema change drops a column we depend on.
+_HISTORY_COLS = {
+    "ein", "org_name", "total_revenue", "total_expenses", "total_assets",
+    "total_liabilities", "net_income", "program_service_revenue",
+    "program_service_expenses", "officer_compensation", "cash_savings",
+    "unrestricted_net_assets", "accounts_payable", "accrued_expenses",
+    "notes_payable", "tax_year", "data_source",
+}
+
+
+def _upsert_history_record(record: dict):
+    """
+    Upsert one (ein, tax_year) row into irs_990_history. Only writes columns
+    that exist on the history table — drops city/state/etc. that the parser
+    returns but the schema doesn't store.
+    """
+    if not record.get("tax_year"):
+        # tax_year is part of the UNIQUE key — can't write history without it
+        return False
+
+    conn = db.get_connection()
+    cur  = conn.cursor()
+
+    cols = [k for k, v in record.items() if v is not None and k in _HISTORY_COLS]
+    vals = [record[k] for k in cols]
+    placeholders = ",".join("?" * len(cols))
+    update = ",".join(
+        f"{c}=excluded.{c}"
+        for c in cols
+        if c not in {"ein", "tax_year"}
+    )
+    cur.execute(
+        db.adapt_sql(
+            f"INSERT INTO irs_990_history ({','.join(cols)}) VALUES ({placeholders}) "
+            f"ON CONFLICT(ein, tax_year) DO UPDATE SET {update}"
+        ),
+        vals,
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Main ETL
 # ---------------------------------------------------------------------------
@@ -458,7 +524,8 @@ def fetch_990_from_irs(
     limit: int | None = None,
     dry_run: bool = False,
     refresh_index: bool = False,
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, int]:
+    """Returns (history_upserted, latest_upserted, failed, skipped)."""
 
     if index_years is None:
         index_years = DEFAULT_YEARS
@@ -491,28 +558,33 @@ def fetch_990_from_irs(
     print(f"  Index years:       {index_years}")
     print()
 
-    # ---- Build EIN map from index CSVs -------------------------------------
-    print("Step 1: Building EIN map from IRS index CSVs...")
-    ein_map = build_ein_map(index_years, refresh=refresh_index)
-    matched_eins = target_eins & ein_map.keys()
-    print(f"  {len(ein_map):,} total EINs in IRS index across {index_years}")
-    print(f"  {len(matched_eins):,} of our EINs found in index")
+    # ---- Build {ein: [filings]} from index CSVs ----------------------------
+    print("Step 1: Building per-EIN filings map from IRS index CSVs...")
+    ein_filings_map = build_ein_filings_map(index_years, refresh=refresh_index)
+    matched_eins = target_eins & ein_filings_map.keys()
+    total_filings = sum(len(ein_filings_map[e]) for e in matched_eins)
+    print(f"  {len(ein_filings_map):,} EINs in IRS index across {index_years}")
+    print(f"  {len(matched_eins):,} of our EINs matched — {total_filings:,} total filings")
 
-    targets = list(matched_eins)
+    targets = sorted(matched_eins)
     if limit:
         targets = targets[:limit]
+        total_filings = sum(len(ein_filings_map[e]) for e in targets)
 
     if not targets:
         print("  Nothing to fetch.")
-        return 0, 0, 0
+        return 0, 0, 0, 0
+
+    # Flatten target filings to a list of (ein, filing) pairs
+    work: list[tuple[str, dict]] = []
+    for ein in targets:
+        for filing in ein_filings_map[ein]:
+            if filing.get("OBJECT_ID"):
+                work.append((ein, filing))
 
     # ---- Build object_id → ZIP location map --------------------------------
-    target_object_ids = {ein_map[e]["OBJECT_ID"] for e in targets
-                         if ein_map[e].get("OBJECT_ID")}
-
-    # Only scan years that have at least one target filing
-    years_needed = sorted({ein_map[e]["year"] for e in targets
-                           if ein_map[e].get("OBJECT_ID")})
+    target_object_ids = {f["OBJECT_ID"] for _, f in work}
+    years_needed = sorted({f["year"] for _, f in work})
 
     print()
     print(f"Step 2: Scanning ZIP central directories for {len(target_object_ids):,} "
@@ -522,25 +594,30 @@ def fetch_990_from_irs(
 
     # ---- Fetch and parse XMLs ----------------------------------------------
     print()
-    print(f"Step 3: Reading {len(targets):,} XMLs from IRS ZIPs...")
+    print(f"Step 3: Reading {len(work):,} XMLs from IRS ZIPs...")
 
-    # Group targets by ZIP URL so we open each ZipFile once
-    zip_groups: dict[str, list[tuple[str, str, str]]] = {}   # zip_url → [(ein, obj_id, member)]
+    # Group filings by ZIP URL so we open each ZipFile once.
+    zip_groups: dict[str, list[tuple[str, dict, str]]] = {}   # zip_url -> [(ein, filing, member)]
     missing = []
-    for ein in targets:
-        filing = ein_map[ein]
-        obj_id = filing.get("OBJECT_ID", "")
-        if not obj_id or obj_id not in object_map:
-            missing.append(ein)
+    for ein, filing in work:
+        obj_id = filing["OBJECT_ID"]
+        if obj_id not in object_map:
+            missing.append((ein, filing))
             continue
         zip_url, member = object_map[obj_id]
-        zip_groups.setdefault(zip_url, []).append((ein, obj_id, member))
+        zip_groups.setdefault(zip_url, []).append((ein, filing, member))
 
-    upserted = 0
-    failed   = 0
+    history_upserted = 0
+    latest_upserted  = 0
+    failed = 0
+
+    # Track, per EIN, the most-recent successfully-parsed record. After all
+    # filings for an EIN have been seen, write that one to irs_990 so the
+    # "most recent" view stays in sync with what we have in history.
+    latest_per_ein: dict[str, tuple[str, dict]] = {}   # ein -> (tax_period, record)
 
     processed = 0
-    total = len(targets) - len(missing)
+    total = sum(len(v) for v in zip_groups.values())
 
     for zip_url, entries in zip_groups.items():
         zip_name = zip_url.split("/")[-1]
@@ -551,11 +628,11 @@ def fetch_990_from_irs(
             failed += len(entries)
             continue
 
-        for ein, obj_id, member in entries:
+        for ein, filing, member in entries:
             try:
                 xml_bytes = zf.read(member)
                 time.sleep(API_SLEEP)
-            except Exception as e:
+            except Exception:
                 failed += 1
                 processed += 1
                 continue
@@ -569,19 +646,30 @@ def fetch_990_from_irs(
             if dry_run:
                 rev = f"${record['total_revenue']:>12,.0f}" if record.get("total_revenue") else "           ?"
                 ast = f"${record['total_assets']:>12,.0f}" if record.get("total_assets") else "           ?"
-                print(f"  {ein}  {(record.get('org_name') or '')[:45]:<45}  "
+                print(f"  {ein}  {(record.get('org_name') or '')[:40]:<40}  "
                       f"TY={record.get('tax_year')}  rev={rev}  assets={ast}")
             else:
-                _upsert_irs_record(record)
+                if _upsert_history_record(record):
+                    history_upserted += 1
 
-            upserted  += 1
+                # Track the newest filing per EIN so we can refresh irs_990
+                # with the most recent year once we've seen everything.
+                tp = filing["TAX_PERIOD"]
+                cur_best = latest_per_ein.get(ein)
+                if cur_best is None or tp > cur_best[0]:
+                    latest_per_ein[ein] = (tp, record)
+
             processed += 1
-
             if processed % 100 == 0 or processed == total:
-                print(f"  [{processed:,}/{total:,}]  upserted={upserted:,}  failed={failed}")
+                print(f"  [{processed:,}/{total:,}]  history={history_upserted:,}  failed={failed}")
+
+    if not dry_run:
+        for ein, (_, record) in latest_per_ein.items():
+            _upsert_irs_record(record)
+            latest_upserted += 1
 
     skipped = len(missing)
-    return upserted, failed, skipped
+    return history_upserted, latest_upserted, failed, skipped
 
 
 # ---------------------------------------------------------------------------
@@ -619,7 +707,7 @@ def main():
         print("  Mode:    DRY RUN (no DB writes)")
     print()
 
-    upserted, failed, skipped = fetch_990_from_irs(
+    history_upserted, latest_upserted, failed, skipped = fetch_990_from_irs(
         index_years=args.years,
         limit=args.limit,
         dry_run=args.dry_run,
@@ -628,23 +716,30 @@ def main():
 
     print()
     if args.dry_run:
-        print(f"DRY RUN — {upserted:,} records would be written")
+        print(f"DRY RUN — {history_upserted:,} history records would be written")
         return
 
     conn = db.get_connection()
     cur  = conn.cursor()
     cur.execute("SELECT COUNT(*) FROM irs_990")
-    total_rows = cur.fetchone()[0]
+    total_990 = cur.fetchone()[0]
     cur.execute("SELECT COUNT(*) FROM irs_990 WHERE data_source = 'IRS'")
-    from_irs   = cur.fetchone()[0]
+    from_irs  = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM irs_990_history")
+    total_hist = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(DISTINCT ein) FROM irs_990_history")
+    distinct_eins_hist = cur.fetchone()[0]
     conn.close()
 
     print(f"Done.")
-    print(f"  Upserted this run:              {upserted:,}")
+    print(f"  History upserts this run:       {history_upserted:,}")
+    print(f"  irs_990 (latest) upserts:       {latest_upserted:,}")
     print(f"  Failed / unreadable:            {failed:,}")
     print(f"  Not found in IRS index:         {skipped:,}")
-    print(f"  Total irs_990 rows:             {total_rows:,}")
+    print(f"  Total irs_990 rows:             {total_990:,}")
     print(f"  Sourced from IRS directly:      {from_irs:,}")
+    print(f"  Total irs_990_history rows:     {total_hist:,}")
+    print(f"  Distinct EINs with history:     {distinct_eins_hist:,}")
 
 
 if __name__ == "__main__":
