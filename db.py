@@ -2343,7 +2343,7 @@ def get_nearby_facilities(lat: float, lon: float, radius_miles: float = 1.0) -> 
 
     # Schools — pull all, then filter by radius
     try:
-        schools = get_schools(active_only=False)
+        schools = get_schools()
         if not schools.empty:
             results["schools"] = filter_by_radius(schools, lat, lon, radius_miles)
     except Exception:
@@ -2365,7 +2365,7 @@ def get_nearby_facilities(lat: float, lon: float, radius_miles: float = 1.0) -> 
     except Exception:
         logger.exception("get_nearby_facilities: ece branch failed (lat=%s lon=%s)", lat, lon)
 
-    # NMTC projects
+    # NMTC projects (no active/inactive flag in schema — pull all)
     try:
         nmtc = get_nmtc_projects()
         if not nmtc.empty:

@@ -33,6 +33,39 @@ class BookmarkCreate(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Bookmarks  (mounted under /notes/bookmarks via main.py prefix)
+#
+# Bookmark routes are registered BEFORE the /{entity_type}/{entity_id} note
+# routes below so the literal "bookmarks" segment doesn't get matched as an
+# entity_type by the catch-all.
+# ---------------------------------------------------------------------------
+
+@router.get("/bookmarks/all")
+def get_bookmarks():
+    """Return all bookmarks, newest first."""
+    return db.get_bookmarks()
+
+
+@router.post("/bookmarks", status_code=201)
+def add_bookmark(body: BookmarkCreate):
+    """Bookmark an entity. Silently ignores duplicates."""
+    db.save_bookmark(body.entity_type, body.entity_id, body.label)
+    return {"ok": True}
+
+
+@router.delete("/bookmarks/{entity_type}/{entity_id}", status_code=204)
+def remove_bookmark(entity_type: str, entity_id: str):
+    """Remove a bookmark."""
+    db.delete_bookmark(entity_type, entity_id)
+
+
+@router.get("/bookmarks/{entity_type}/{entity_id}")
+def check_bookmark(entity_type: str, entity_id: str):
+    """Return whether an entity is bookmarked."""
+    return {"bookmarked": db.is_bookmarked(entity_type, entity_id)}
+
+
+# ---------------------------------------------------------------------------
 # Notes
 # ---------------------------------------------------------------------------
 
@@ -60,32 +93,3 @@ def update_note(entity_type: str, entity_id: str, note_id: int, body: NoteUpdate
 def delete_note(entity_type: str, entity_id: str, note_id: int):
     """Delete a note."""
     db.delete_user_note(note_id)
-
-
-# ---------------------------------------------------------------------------
-# Bookmarks  (mounted under /notes/bookmarks via main.py prefix)
-# ---------------------------------------------------------------------------
-
-@router.get("/bookmarks/all")
-def get_bookmarks():
-    """Return all bookmarks, newest first."""
-    return db.get_bookmarks()
-
-
-@router.post("/bookmarks", status_code=201)
-def add_bookmark(body: BookmarkCreate):
-    """Bookmark an entity. Silently ignores duplicates."""
-    db.save_bookmark(body.entity_type, body.entity_id, body.label)
-    return {"ok": True}
-
-
-@router.delete("/bookmarks/{entity_type}/{entity_id}", status_code=204)
-def remove_bookmark(entity_type: str, entity_id: str):
-    """Remove a bookmark."""
-    db.delete_bookmark(entity_type, entity_id)
-
-
-@router.get("/bookmarks/{entity_type}/{entity_id}")
-def check_bookmark(entity_type: str, entity_id: str):
-    """Return whether an entity is bookmarked."""
-    return {"bookmarked": db.is_bookmarked(entity_type, entity_id)}
