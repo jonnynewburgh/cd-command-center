@@ -20,7 +20,7 @@ How and when each data source in CD Command Center gets updated.
 |--------|--------|-------|
 | BLS Unemployment | `fetch_bls_unemployment.py` | State/county rates released ~1st Friday each month. |
 | FAC Single Audits | `fetch_fac.py --all-states` | Audits submitted on a rolling basis. Monthly catches new filings. |
-| IRS 990 | `fetch_990_data.py --schools --fqhc --years 5` | ProPublica index updates as IRS processes returns. |
+| IRS 990 | `fetch_990_irs.py` | Public-domain IRS XML feed. Multi-year history loader is TODO. |
 
 ### Quarterly — Lending & Employment
 

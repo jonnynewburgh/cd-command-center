@@ -15,32 +15,47 @@ here so the next reader knows what's been triaged vs. what's new.
 
 ## Currently open
 
-### irs_990 12% null tax_year (506 / 4,126 rows)
+### irs_990_history empty (loader pending)
 
-**Source breakdown** (verified 2026-04-26):
-- 473 rows from ProPublica loader (`etl/fetch_990_data.py`)
-- 33 rows from IRS BMF loader (`etl/fetch_bmf_eins.py`)
-- 0 rows from primary IRS source (`etl/fetch_990_irs.py`)
+ProPublica was previously the multi-year 990 history source. After
+the licensing review on 2026-04-26 (ProPublica's ToS prohibits
+commercial use), all ProPublica data was deleted from `irs_990`,
+`irs_990_history`, and `financial_ratios`. `irs_990_history` is
+currently empty.
 
-**Why it's not a 30-min fix:** the ProPublica and IRS BMF loaders
-need their tax_year extraction logic reviewed. ProPublica's CSV
-columns vary by year and some 990 records lack a tax_year field
-entirely. IRS BMF has a `TAX_PERIOD` field that requires parsing
-(YYYYMM → year). Either the loaders should backfill tax_year
-during ingest from `TAX_PERIOD` or other date fields, or the
-records without tax_year should be skipped. Both options need
-sample-data review and a separate workstream.
+**Replacement plan:** Extend `etl/fetch_990_irs.py` (already
+loading public-domain IRS XML for the single-year `irs_990` table)
+to also write per-year rows into `irs_990_history`. The IRS XML
+source has every year — adding a `--years` loop and writing to the
+history table is ~1-2 hours of work.
 
-**Caller impact:** `irs_990_history` joins by EIN + tax_year. Rows
-with null tax_year don't appear in trend charts but DO appear in
-"latest 990" lookups via `MAX(tax_year)`. Acceptable for now —
-trend charts simply have a slightly thinner trail for
-ProPublica-sourced orgs.
+**User-visible features blocked until this ships:** 990 trend
+charts (org-detail page), financial ratios (acid, leverage,
+operating cash flow). Single-latest-year 990 lookups still work.
 
-**Recommended next step:** ~1-2 hour session to update both
-loaders' tax_year extraction. Defer until prioritized.
+### irs_990 33 BMF-sourced null tax_year (was 506)
+
+Down from 506 to 33 after the ProPublica purge. IRS BMF has a
+`TAX_PERIOD` field (YYYYMM) that the loader at
+`etl/fetch_bmf_eins.py` doesn't currently parse into `tax_year`.
+~30 min fix at the loader. Not blocking; defer until the broader
+multi-year IRS history loader is built (same workstream).
 
 ## Closed in this cleanup pass (2026-04-26)
+
+### ProPublica data source removed (licensing) — closed
+
+Deleted all ProPublica-sourced rows from the database (646 from
+`irs_990`, 3,551 from `irs_990_history`, 3,513 from
+`financial_ratios`). Removed `etl/fetch_990_data.py` loader.
+Updated docs (CLAUDE.md, AGENTS.md, DATA_REFRESH_SCHEDULE.md, CI
+workflow) to point to `etl/fetch_990_irs.py` (public-domain IRS
+XML). Schema column defaults updated from
+`DEFAULT 'ProPublica'` → `DEFAULT 'IRS'`.
+
+Reason: ProPublica's Nonprofit Explorer ToS prohibits commercial
+use, and CD Command Center is a commercial deal-origination tool.
+
 
 ### lea_accountability 200 orphan lea_ids — closed
 

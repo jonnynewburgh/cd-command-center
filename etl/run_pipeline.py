@@ -18,7 +18,7 @@ Stages (in order):
     fqhc            HRSA Federally Qualified Health Centers
     edfacts         EDFacts LEA accountability data (Ed.gov, auto)
     enrollment      NCES enrollment history (Urban Institute API)
-    990             IRS 990 financial data (ProPublica API)
+    990             IRS 990 financial data (IRS public-domain XML)
     hmda            HMDA mortgage activity (CFPB API)
     hud-ami         HUD Area Median Income limits (HUD API)
     hud-fmr         HUD Fair Market Rents (HUD API)
@@ -133,11 +133,11 @@ def build_stages(args):
         "--years", "5",
     ] + states_flag))
 
-    # ── IRS 990 data ──────────────────────────────────────────────────────────
+    # ── IRS 990 data (public-domain XML; multi-year history TODO) ─────────────
+    # fetch_990_irs.py loads EINs already in the DB; no --states arg.
     stages.append(("990", [
-        sys.executable, os.path.join(ETL_DIR, "fetch_990_data.py"),
-        "--schools", "--fqhc", "--years", "5",
-    ] + states_flag))
+        sys.executable, os.path.join(ETL_DIR, "fetch_990_irs.py"),
+    ]))
 
     # ── HMDA ─────────────────────────────────────────────────────────────────
     if args.states:

@@ -15,16 +15,16 @@ This script:
   4. Writes matched EINs to schools.ein
   5. Upserts a lightweight record into irs_990 (data_source="IRS BMF")
 
-WHY BMF vs. ProPublica API:
-  ProPublica requires one API call per org with a 0.3s rate limit, making
-  8,000+ orgs a multi-hour job. The BMF is a one-time download (~200MB)
-  that lets us match everything locally in seconds. Coverage improves from
-  ~62% to ~80%+ for charter schools because the BMF includes orgs that
-  don't appear in ProPublica search results.
+WHY BMF (vs. per-org API lookups):
+  The BMF is a one-time download (~200MB) that lets us match everything
+  locally in seconds — much faster than per-org API calls. Coverage is
+  ~80%+ for charter schools because the BMF is the IRS's authoritative
+  master list.
 
 AFTER RUNNING:
-  Run fetch_990_data.py --schools --overwrite to enrich newly-linked schools
-  with full ProPublica financial data (revenue, expenses, assets).
+  Run fetch_990_irs.py to enrich newly-linked orgs with full 990
+  financial data (revenue, expenses, assets) from the public-domain
+  IRS XML feed.
 
 Usage:
     python etl/fetch_bmf_eins.py                    # match all unlinked charters
@@ -79,7 +79,7 @@ BMF_COLUMNS = [
 ]
 
 DOWNLOAD_TIMEOUT = 120
-DEFAULT_MIN_SCORE = 0.7  # higher than ProPublica (0.5) — BMF has more noise
+DEFAULT_MIN_SCORE = 0.7  # BMF has more name noise than curated indexes — set strict
 
 # Common words to strip when normalizing school/org names for comparison
 _STOP_WORDS = {
@@ -88,7 +88,7 @@ _STOP_WORDS = {
     "academy", "academies",
 }
 
-# Suffixes to strip from LEA names before matching (mirrors fetch_990_data.py)
+# Suffixes to strip from LEA names before matching
 _LEA_SUFFIXES = [
     " Unified School District", " City School District",
     " Union High School District", " Union Elementary District",
@@ -417,7 +417,7 @@ def _upsert_bmf_990(ein: str, bmf_row_data: dict):
     """
     Insert a lightweight irs_990 record from BMF data.
     Only populates fields available in the BMF (no detailed financials).
-    Running fetch_990_data.py --overwrite afterwards upgrades to full data.
+    Running fetch_990_irs.py afterwards upgrades to full IRS XML data.
     """
     record = {
         "ein":          ein,
@@ -429,7 +429,7 @@ def _upsert_bmf_990(ein: str, bmf_row_data: dict):
         "total_revenue": bmf_row_data.get("revenue_amt"),
         "data_source":  "IRS BMF",
     }
-    # Drop None values so we don't overwrite real ProPublica data with nulls
+    # Drop None values so we don't overwrite full IRS XML data with sparse BMF nulls
     record = {k: v for k, v in record.items() if v is not None}
     db.upsert_990(record)
 
@@ -627,7 +627,7 @@ def main():
         print()
         if new_matches > 0:
             print("Next step: enrich new matches with full financial data:")
-            print("  python etl/fetch_990_data.py --schools --overwrite")
+            print("  python etl/fetch_990_irs.py")
 
 
 if __name__ == "__main__":

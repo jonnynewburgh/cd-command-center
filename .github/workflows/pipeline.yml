@@ -87,7 +87,7 @@ jobs:
 
       - name: Run 990 pipeline
         if: ${{ github.event.inputs.pipeline == '' || github.event.inputs.pipeline == '990' }}
-        run: python etl/fetch_990_data.py --schools --fqhc --years 3
+        run: python etl/fetch_990_irs.py
 
       - name: Run LEA accountability pipeline
         if: ${{ github.event.inputs.pipeline == '' || github.event.inputs.pipeline == 'lea' }}

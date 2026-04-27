@@ -139,7 +139,7 @@ Build in this order. Each phase should produce a working, usable version of the 
 - **Service gap analysis:** Find high-poverty tracts with zero facilities (ECE/FQHC/schools)
 - **NMTC peer comps:** Comparable deals by project type, state, and QLICI size
 - **Multi-site operator profiles:** All sites + 990 trend chart for orgs with EIN linked
-- **990 multi-year history:** `irs_990_history` table + `--years N` flag on fetch_990_data.py
+- **990 multi-year history:** `irs_990_history` table — currently empty (loader pending; ProPublica source removed for licensing reasons; multi-year IRS XML loader is TODO).
 - **NMTC pro forma calculator:** Interactive deal structure calculator in Tools tab
 - **CDFI directory:** Certified CDFIs from CDFI Fund, filterable by state and type
 - **State incentive programs:** Historic tax credits, state NMTCs, and other programs by state
@@ -227,10 +227,11 @@ python etl/load_ece_data.py --file data/raw/tx_childcare.xlsx --state TX --sourc
 python etl/load_ece_data.py --file data/raw/ny_childcare.csv --state NY --all-facilities
 python etl/load_ece_data.py --file data/raw/ca_licensed_facilities.csv --columns-only  # inspect columns
 
-# Load IRS 990 data (Phase 5)
-python etl/fetch_990_data.py --schools --states CA TX    # charter schools only
-python etl/fetch_990_data.py --fqhc --states CA          # health centers only
-python etl/fetch_990_data.py --years 3                    # load 3 years of history per org
+# Load IRS 990 data — public-domain IRS XML source (Phase 5)
+# Run fetch_bmf_eins.py first to populate EINs in the schools table.
+python etl/fetch_990_irs.py                              # most recent year, all linked EINs
+python etl/fetch_990_irs.py --years 2022 2023 2024       # specific submission years
+python etl/fetch_990_irs.py --limit 100                   # test on 100 EINs
 
 # Load Opportunity Zone designations (Phase 5.5)
 # Download from: https://www.irs.gov/pub/irs-utl/Designated_QOZ_8996.xlsx

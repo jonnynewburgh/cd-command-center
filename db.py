@@ -386,9 +386,9 @@ def init_db():
             program_service_expenses REAL,     -- spending on mission-related programs
             officer_compensation REAL,         -- top officer/executive compensation
             tax_year INTEGER,                  -- fiscal year the financials cover
-            filing_pdf_url TEXT,               -- link to the actual 990 PDF on ProPublica
+            filing_pdf_url TEXT,               -- link to the 990 PDF if we have one
             -- Metadata
-            data_source TEXT DEFAULT 'ProPublica',
+            data_source TEXT DEFAULT 'IRS',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -413,7 +413,7 @@ def init_db():
             officer_compensation REAL,
             tax_year INTEGER NOT NULL,
             filing_pdf_url TEXT,
-            data_source TEXT DEFAULT 'ProPublica',
+            data_source TEXT DEFAULT 'IRS',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(ein, tax_year)
         )

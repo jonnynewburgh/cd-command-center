@@ -411,8 +411,8 @@ def parse_990_xml(xml_bytes: bytes) -> dict | None:
         "accounts_payable":         accts_payable,
         "notes_payable":            notes_payable,
         "data_source":              "IRS",
-        # IRS XML doesn't have a PDF URL. We leave filing_pdf_url untouched
-        # in the upsert so any existing ProPublica URL is preserved.
+        # IRS XML doesn't have a PDF URL — filing_pdf_url is left
+        # untouched in the upsert (the BMF loader doesn't set one either).
     }
 
 
@@ -424,7 +424,7 @@ def _upsert_irs_record(record: dict):
     """
     Upsert an IRS-sourced record. Only updates non-null financial fields.
     Preserves existing filing_pdf_url, ntee_code, and subsection_code —
-    those come from ProPublica / IRS BMF and are not in the 990 XML.
+    those come from the BMF loader and are not in the 990 XML.
     """
     conn = db.get_connection()
     cur  = conn.cursor()
