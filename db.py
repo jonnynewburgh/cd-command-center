@@ -1213,6 +1213,15 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_fqhc_site_type      ON fqhc(site_type)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ece_type_subsidy    ON ece_centers(facility_type, accepts_subsidies)")
 
+    # ---- Indexes added per CODEX audit P0 #3 (2026-04-27) ------------------
+    # get_nearby_facilities() now pushes a lat/lon bounding-box WHERE into SQL
+    # before the Python haversine pass. These composite indexes let SQLite/PG
+    # serve the BETWEEN ranges without a sequential scan.
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_schools_latlon ON schools(latitude, longitude)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_fqhc_latlon    ON fqhc(latitude, longitude)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ece_latlon     ON ece_centers(latitude, longitude)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_nmtc_latlon    ON nmtc_projects(latitude, longitude)")
+
     conn.commit()
     conn.close()
 
@@ -1384,6 +1393,7 @@ def get_schools(
     risk_tiers=None,
     min_survival_score=None,
     max_survival_score=None,
+    bbox=None,
 ) -> pd.DataFrame:
     """
     Return schools matching the given filters as a DataFrame.
@@ -1454,6 +1464,13 @@ def get_schools(
     if max_survival_score is not None:
         conditions.append("s.survival_score <= ?")
         params.append(max_survival_score)
+
+    if bbox is not None:
+        # bbox = (min_lat, max_lat, min_lon, max_lon) — bounding-box prefilter
+        # used by get_nearby_facilities to push the radius search into SQL.
+        min_lat, max_lat, min_lon, max_lon = bbox
+        conditions.append("s.latitude BETWEEN ? AND ? AND s.longitude BETWEEN ? AND ?")
+        params.extend([min_lat, max_lat, min_lon, max_lon])
 
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
 
@@ -1717,6 +1734,7 @@ def get_nmtc_projects(
     project_type=None,
     min_year=None,
     max_year=None,
+    bbox=None,
 ) -> pd.DataFrame:
     """
     Return NMTC projects matching the given filters as a DataFrame.
@@ -1756,6 +1774,11 @@ def get_nmtc_projects(
     if max_year is not None:
         conditions.append("fiscal_year <= ?")
         params.append(max_year)
+
+    if bbox is not None:
+        min_lat, max_lat, min_lon, max_lon = bbox
+        conditions.append("latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?")
+        params.extend([min_lat, max_lat, min_lon, max_lon])
 
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
     query = f"""
@@ -1824,6 +1847,7 @@ def get_fqhc(
     states=None,
     active_only=True,
     site_types=None,
+    bbox=None,
 ) -> pd.DataFrame:
     """
     Return FQHC health center sites matching the given filters.
@@ -1848,6 +1872,11 @@ def get_fqhc(
         placeholders = ",".join("?" * len(site_types))
         conditions.append(f"site_type IN ({placeholders})")
         params.extend(site_types)
+
+    if bbox is not None:
+        min_lat, max_lat, min_lon, max_lon = bbox
+        conditions.append("latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?")
+        params.extend([min_lat, max_lat, min_lon, max_lon])
 
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
     query = f"SELECT * FROM fqhc {where_clause} ORDER BY state, health_center_name"
@@ -1916,6 +1945,7 @@ def get_ece_centers(
     facility_types=None,
     accepts_subsidies=None,
     min_capacity=None,
+    bbox=None,
 ) -> pd.DataFrame:
     """
     Return ECE centers matching the given filters.
@@ -1949,6 +1979,11 @@ def get_ece_centers(
     if min_capacity is not None:
         conditions.append("capacity >= ?")
         params.append(min_capacity)
+
+    if bbox is not None:
+        min_lat, max_lat, min_lon, max_lon = bbox
+        conditions.append("latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?")
+        params.extend([min_lat, max_lat, min_lon, max_lon])
 
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
     query = f"SELECT * FROM ece_centers {where_clause} ORDER BY state, provider_name"
@@ -2411,18 +2446,34 @@ def get_nmtc_projects_by_cde(cde_name: str) -> pd.DataFrame:
     return df
 
 
+def _bbox_for_radius(lat: float, lon: float, radius_miles: float) -> tuple:
+    """Return (min_lat, max_lat, min_lon, max_lon) covering radius_miles of (lat, lon).
+
+    Used as a SQL prefilter so each per-table query touches O(rows-in-bbox)
+    instead of every row in the table. The bbox is always a superset of the
+    true radius circle — exact distance filtering still happens in
+    filter_by_radius() afterward.
+    """
+    import math
+    lat_delta = radius_miles / 69.0
+    # 1 deg lon shrinks toward the poles; clamp the cosine to keep the bbox
+    # finite (and slightly oversized) at extreme latitudes.
+    lon_delta = radius_miles / (69.0 * max(0.01, math.cos(math.radians(lat))))
+    return (lat - lat_delta, lat + lat_delta, lon - lon_delta, lon + lon_delta)
+
+
 def get_nearby_facilities(lat: float, lon: float, radius_miles: float = 1.0) -> dict:
     """
     Return all facility types within radius_miles of the given coordinates.
 
-    Uses filter_by_radius() from utils/geo.py which calculates haversine distance.
-    Pulls all states (no geographic filter) since we want everything nearby regardless of state.
+    The per-table queries use a lat/lon bounding-box WHERE clause to push the
+    first filter into SQL (CODEX P0 #3, 2026-04-27). The exact haversine
+    distance check + sort still happens in Python via filter_by_radius().
 
     Returns a dict with keys: 'schools', 'fqhc', 'ece', 'nmtc'
     Each value is a DataFrame with a 'distance_miles' column added.
     Returns empty DataFrames if any table is missing or has no data.
     """
-    # Import here to avoid circular imports (geo.py doesn't import db.py, so this is safe)
     from utils.geo import filter_by_radius
 
     results = {"schools": pd.DataFrame(), "fqhc": pd.DataFrame(), "ece": pd.DataFrame(), "nmtc": pd.DataFrame()}
@@ -2430,33 +2481,31 @@ def get_nearby_facilities(lat: float, lon: float, radius_miles: float = 1.0) -> 
     if lat is None or lon is None:
         return results
 
-    # Schools — pull all, then filter by radius
+    bbox = _bbox_for_radius(lat, lon, radius_miles)
+
     try:
-        schools = get_schools()
+        schools = get_schools(bbox=bbox)
         if not schools.empty:
             results["schools"] = filter_by_radius(schools, lat, lon, radius_miles)
     except Exception:
         logger.exception("get_nearby_facilities: schools branch failed (lat=%s lon=%s)", lat, lon)
 
-    # FQHCs
     try:
-        fqhc = get_fqhc(active_only=False)
+        fqhc = get_fqhc(active_only=False, bbox=bbox)
         if not fqhc.empty:
             results["fqhc"] = filter_by_radius(fqhc, lat, lon, radius_miles)
     except Exception:
         logger.exception("get_nearby_facilities: fqhc branch failed (lat=%s lon=%s)", lat, lon)
 
-    # ECE centers
     try:
-        ece = get_ece_centers(active_only=False)
+        ece = get_ece_centers(active_only=False, bbox=bbox)
         if not ece.empty:
             results["ece"] = filter_by_radius(ece, lat, lon, radius_miles)
     except Exception:
         logger.exception("get_nearby_facilities: ece branch failed (lat=%s lon=%s)", lat, lon)
 
-    # NMTC projects (no active/inactive flag in schema — pull all)
     try:
-        nmtc = get_nmtc_projects()
+        nmtc = get_nmtc_projects(bbox=bbox)
         if not nmtc.empty:
             results["nmtc"] = filter_by_radius(nmtc, lat, lon, radius_miles)
     except Exception:
