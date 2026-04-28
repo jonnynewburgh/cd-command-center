@@ -5,7 +5,7 @@ api/routers/ece.py — Early care and education (ECE) center endpoints.
 from typing import Optional, List
 from fastapi import APIRouter, Query, HTTPException
 import db
-from api.deps import df_to_records, clean_dict
+from api.deps import clean_dict, paginate
 
 router = APIRouter()
 
@@ -17,16 +17,27 @@ def list_ece(
     facility_types: Optional[List[str]] = Query(default=None),
     accepts_subsidies: Optional[bool] = None,
     min_capacity: Optional[int] = None,
+    limit: int = Query(default=100, ge=1, le=10000),
+    offset: int = Query(default=0, ge=0),
+    sort: Optional[str] = Query(default=None, description="Sort key: name, state, capacity, type"),
+    sort_dir: str = Query(default="asc", regex="^(asc|desc)$"),
 ):
-    """Return ECE centers matching the given filters."""
+    """Return a page of ECE centers matching the given filters.
+
+    Response shape: `{items, total, limit, offset}`.
+    """
     df = db.get_ece_centers(
         states=states,
         active_only=active_only,
         facility_types=facility_types,
         accepts_subsidies=accepts_subsidies,
         min_capacity=min_capacity,
+        limit=limit,
+        offset=offset,
+        sort_by=sort,
+        sort_dir=sort_dir,
     )
-    return df_to_records(df)
+    return paginate(df, limit=limit, offset=offset)
 
 
 @router.get("/summary")

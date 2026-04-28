@@ -5,7 +5,7 @@ api/routers/nmtc.py — NMTC project, CDE allocation, and Coalition project endp
 from typing import Optional, List
 from fastapi import APIRouter, Query, HTTPException
 import db
-from api.deps import df_to_records, clean_dict
+from api.deps import df_to_records, clean_dict, paginate
 
 router = APIRouter()
 
@@ -18,8 +18,15 @@ def list_nmtc_projects(
     project_type: Optional[str] = Query(default=None, description="Real Estate or Non-Real Estate"),
     min_year: Optional[int] = None,
     max_year: Optional[int] = None,
+    limit: int = Query(default=100, ge=1, le=10000),
+    offset: int = Query(default=0, ge=0),
+    sort: Optional[str] = Query(default=None, description="Sort key: state, year, qlici, cde, type"),
+    sort_dir: str = Query(default="asc", regex="^(asc|desc)$"),
 ):
-    """Return NMTC projects matching the given filters."""
+    """Return a page of NMTC projects matching the given filters.
+
+    Response shape: `{items, total, limit, offset}`.
+    """
     df = db.get_nmtc_projects(
         states=states,
         census_tract_id=census_tract_id,
@@ -27,8 +34,12 @@ def list_nmtc_projects(
         project_type=project_type,
         min_year=min_year,
         max_year=max_year,
+        limit=limit,
+        offset=offset,
+        sort_by=sort,
+        sort_dir=sort_dir,
     )
-    return df_to_records(df)
+    return paginate(df, limit=limit, offset=offset)
 
 
 @router.get("/projects/summary")

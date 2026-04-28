@@ -8,7 +8,7 @@ census_tract_id that joins back here for eligibility tiers, demographics, etc.
 from typing import Optional, List, Literal
 from fastapi import APIRouter, Query, HTTPException
 import db
-from api.deps import df_to_records, clean_dict
+from api.deps import df_to_records, clean_dict, paginate
 
 router = APIRouter()
 
@@ -24,8 +24,15 @@ def list_tracts(
     min_poverty_rate: Optional[float] = None,
     max_median_income: Optional[int] = None,
     county_fips: Optional[str] = None,
+    limit: int = Query(default=100, ge=1, le=10000),
+    offset: int = Query(default=0, ge=0),
+    sort: Optional[str] = Query(default=None, description="Sort key: state, poverty, income, tract, county"),
+    sort_dir: str = Query(default="asc", regex="^(asc|desc)$"),
 ):
-    """Return census tracts matching the given filters."""
+    """Return a page of census tracts matching the given filters.
+
+    Response shape: `{items, total, limit, offset}`.
+    """
     df = db.get_census_tracts(
         states=states,
         nmtc_eligible_only=nmtc_eligible_only,
@@ -33,8 +40,12 @@ def list_tracts(
         min_poverty_rate=min_poverty_rate,
         max_median_income=max_median_income,
         county_fips=county_fips,
+        limit=limit,
+        offset=offset,
+        sort_by=sort,
+        sort_dir=sort_dir,
     )
-    return df_to_records(df)
+    return paginate(df, limit=limit, offset=offset)
 
 
 @router.get("/summary")

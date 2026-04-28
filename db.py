@@ -1253,6 +1253,20 @@ def cache_clear() -> int:
     return n
 
 
+def _hashable(x):
+    """Recursively convert list/dict args into a hashable tuple form.
+
+    Necessary because cached helpers like get_schools(states=['GA']) pass
+    list-typed kwargs straight through from FastAPI Query parameters, and
+    plain `dict` keys can't contain lists.
+    """
+    if isinstance(x, list):
+        return tuple(_hashable(v) for v in x)
+    if isinstance(x, dict):
+        return tuple(sorted((k, _hashable(v)) for k, v in x.items()))
+    return x
+
+
 def _cached(ttl=300):
     """Per-call TTL cache keyed on (function, args, sorted-kwargs).
     `ttl` is in seconds. Cache is process-local."""
@@ -1261,7 +1275,7 @@ def _cached(ttl=300):
 
         @_wraps(func)
         def wrapper(*args, **kwargs):
-            key = (fname, args, tuple(sorted(kwargs.items())))
+            key = (fname, _hashable(args), _hashable(kwargs))
             now = _time.monotonic()
             with _CACHE_LOCK:
                 hit = _CACHE.get(key)
@@ -1377,8 +1391,80 @@ def log_load_finish(run_id: int, rows_loaded: int = 0, error: str = None):
 
 
 # ---------------------------------------------------------------------------
+# Paging helpers (CODEX P0 #4) — shared by every list helper that supports
+# limit/offset/sort. Keeping the boilerplate here means each get_* function
+# only owns its WHERE clause and column whitelist; the count + LIMIT/OFFSET
+# wiring is centralized.
+# ---------------------------------------------------------------------------
+
+def _resolve_sort(sort_by, sort_dir, whitelist: dict, default_sql: str) -> str:
+    """Map a public sort key to a vetted SQL ORDER BY clause.
+
+    sort_by must be a key in `whitelist`; otherwise the default is used.
+    This is the SQL-injection guard — caller-supplied strings never reach
+    SQL untouched. sort_dir is normalized to ASC/DESC.
+    """
+    if sort_by and sort_by in whitelist:
+        direction = "DESC" if str(sort_dir or "asc").lower() == "desc" else "ASC"
+        return f"{whitelist[sort_by]} {direction}"
+    return default_sql
+
+
+def _execute_paged_query(
+    conn,
+    select_sql: str,
+    count_sql: str,
+    params: list,
+    order_sql: str,
+    limit,
+    offset,
+) -> pd.DataFrame:
+    """Run a paged SELECT and (when limit is set) a sibling COUNT(*).
+
+    Args:
+        conn:       open DB connection (caller closes)
+        select_sql: query through the WHERE clause inclusive (no ORDER/LIMIT)
+        count_sql:  same FROM/WHERE but with `SELECT COUNT(*)` projection
+        params:     parameter list shared by both queries
+        order_sql:  contents of the ORDER BY clause (no leading 'ORDER BY')
+        limit:      None = return everything, no count; int = paginate + count
+        offset:     row offset (0 if None)
+
+    Returns:
+        DataFrame. When limit is set, df.attrs["total"] holds the
+        unpaginated row count for the same WHERE.
+    """
+    total = None
+    if limit is not None:
+        cur = conn.cursor()
+        cur.execute(adapt_sql(count_sql), params)
+        total = cur.fetchone()[0]
+
+    full_sql = f"{select_sql} ORDER BY {order_sql}"
+    paged_params = list(params)
+    if limit is not None:
+        full_sql += " LIMIT ? OFFSET ?"
+        paged_params.extend([int(limit), int(offset or 0)])
+
+    df = pd.read_sql_query(adapt_sql(full_sql), conn, params=paged_params)
+    if total is not None:
+        df.attrs["total"] = int(total)
+    return df
+
+
+# ---------------------------------------------------------------------------
 # School queries (formerly charter_schools)
 # ---------------------------------------------------------------------------
+
+_SCHOOLS_SORT_WHITELIST = {
+    "name":         "s.school_name",
+    "state":        "s.state",
+    "enrollment":   "s.enrollment",
+    "status":       "s.school_status",
+    "survival":     "s.survival_score",
+    "distance":     "distance_miles",   # only meaningful when bbox+post-filter set it
+}
+
 
 @_cached(ttl=300)
 def get_schools(
@@ -1394,6 +1480,10 @@ def get_schools(
     min_survival_score=None,
     max_survival_score=None,
     bbox=None,
+    limit=None,
+    offset=0,
+    sort_by=None,
+    sort_dir="asc",
 ) -> pd.DataFrame:
     """
     Return schools matching the given filters as a DataFrame.
@@ -1481,7 +1571,7 @@ def get_schools(
     # We also LEFT JOIN census_tracts to expose NMTC eligibility tier on each row,
     # and compute has_990 (1 if the school has an EIN linked, 0 otherwise) so the
     # dashboard can quickly flag which schools have financial data available.
-    query = f"""
+    select_sql = f"""
         WITH latest_lea AS (
             SELECT lea_id, MAX(data_year) AS max_year
             FROM lea_accountability
@@ -1515,10 +1605,21 @@ def get_schools(
         LEFT JOIN census_tracts ct
             ON s.census_tract_id = ct.census_tract_id
         {where_clause}
-        ORDER BY s.school_name
     """
+    # COUNT(*) shares the same FROM/WHERE so totals reflect all filtered rows
+    # before LIMIT/OFFSET. The JOINs are LEFT JOINs against schools.id so the
+    # row count equals the schools count under any WHERE filter.
+    count_sql = f"""
+        SELECT COUNT(*) FROM schools s
+        LEFT JOIN census_tracts ct ON s.census_tract_id = ct.census_tract_id
+        {where_clause}
+    """
+    order_sql = _resolve_sort(sort_by, sort_dir, _SCHOOLS_SORT_WHITELIST, "s.school_name ASC")
+    # Stable tiebreaker: school_name dupes exist; nces_id is the unique key.
+    order_sql += ", s.nces_id ASC"
+
     conn = get_connection()
-    df = pd.read_sql_query(adapt_sql(query), conn, params=params)
+    df = _execute_paged_query(conn, select_sql, count_sql, params, order_sql, limit, offset)
     conn.close()
     return df
 
@@ -1632,6 +1733,15 @@ def get_nmtc_eligible_tracts(states=None) -> pd.DataFrame:
     return df
 
 
+_TRACTS_SORT_WHITELIST = {
+    "state":        "state",
+    "poverty":      "poverty_rate",
+    "income":       "median_family_income",
+    "tract":        "census_tract_id",
+    "county":       "county_fips",
+}
+
+
 @_cached(ttl=300)
 def get_census_tracts(
     states=None,
@@ -1640,6 +1750,10 @@ def get_census_tracts(
     nmtc_eligible_only=False,
     eligibility_tiers=None,
     county_fips=None,
+    limit=None,
+    offset=0,
+    sort_by=None,
+    sort_dir="asc",
 ) -> pd.DataFrame:
     """
     Return census tracts matching the given filters as a DataFrame.
@@ -1681,10 +1795,13 @@ def get_census_tracts(
         params.append(county_fips)
 
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
-    query = f"SELECT * FROM census_tracts {where_clause} ORDER BY state, poverty_rate DESC"
+    select_sql = f"SELECT * FROM census_tracts {where_clause}"
+    count_sql = f"SELECT COUNT(*) FROM census_tracts {where_clause}"
+    order_sql = _resolve_sort(sort_by, sort_dir, _TRACTS_SORT_WHITELIST, "state ASC, poverty_rate DESC")
+    order_sql += ", census_tract_id ASC"
 
     conn = get_connection()
-    df = pd.read_sql_query(adapt_sql(query), conn, params=params)
+    df = _execute_paged_query(conn, select_sql, count_sql, params, order_sql, limit, offset)
     conn.close()
     return df
 
@@ -1726,6 +1843,15 @@ def get_census_tract_states() -> list:
 # NMTC project queries
 # ---------------------------------------------------------------------------
 
+_NMTC_SORT_WHITELIST = {
+    "state":     "state",
+    "year":      "fiscal_year",
+    "qlici":     "qlici_amount",
+    "cde":       "cde_name",
+    "type":      "project_type",
+}
+
+
 @_cached(ttl=300)
 def get_nmtc_projects(
     states=None,
@@ -1735,6 +1861,10 @@ def get_nmtc_projects(
     min_year=None,
     max_year=None,
     bbox=None,
+    limit=None,
+    offset=0,
+    sort_by=None,
+    sort_dir="asc",
 ) -> pd.DataFrame:
     """
     Return NMTC projects matching the given filters as a DataFrame.
@@ -1781,14 +1911,16 @@ def get_nmtc_projects(
         params.extend([min_lat, max_lat, min_lon, max_lon])
 
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
-    query = f"""
-        SELECT * FROM nmtc_projects
-        {where_clause}
-        ORDER BY state, fiscal_year DESC, qlici_amount DESC
-    """
+    select_sql = f"SELECT * FROM nmtc_projects {where_clause}"
+    count_sql = f"SELECT COUNT(*) FROM nmtc_projects {where_clause}"
+    order_sql = _resolve_sort(
+        sort_by, sort_dir, _NMTC_SORT_WHITELIST,
+        "state ASC, fiscal_year DESC, qlici_amount DESC",
+    )
+    order_sql += ", cdfi_project_id ASC"
 
     conn = get_connection()
-    df = pd.read_sql_query(adapt_sql(query), conn, params=params)
+    df = _execute_paged_query(conn, select_sql, count_sql, params, order_sql, limit, offset)
     conn.close()
     return df
 
@@ -1842,12 +1974,24 @@ def get_cde_allocations(states=None) -> pd.DataFrame:
 # FQHC queries
 # ---------------------------------------------------------------------------
 
+_FQHC_SORT_WHITELIST = {
+    "name":  "health_center_name",
+    "state": "state",
+    "city":  "city",
+    "type":  "site_type",
+}
+
+
 @_cached(ttl=300)
 def get_fqhc(
     states=None,
     active_only=True,
     site_types=None,
     bbox=None,
+    limit=None,
+    offset=0,
+    sort_by=None,
+    sort_dir="asc",
 ) -> pd.DataFrame:
     """
     Return FQHC health center sites matching the given filters.
@@ -1879,11 +2023,14 @@ def get_fqhc(
         params.extend([min_lat, max_lat, min_lon, max_lon])
 
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
-    query = f"SELECT * FROM fqhc {where_clause} ORDER BY state, health_center_name"
+    select_sql = f"SELECT * FROM fqhc {where_clause}"
+    count_sql = f"SELECT COUNT(*) FROM fqhc {where_clause}"
+    order_sql = _resolve_sort(sort_by, sort_dir, _FQHC_SORT_WHITELIST, "state ASC, health_center_name ASC")
+    order_sql += ", bhcmis_id ASC"
 
     conn = get_connection()
     try:
-        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
+        df = _execute_paged_query(conn, select_sql, count_sql, params, order_sql, limit, offset)
     except Exception:
         logger.exception("get_fqhc failed")
         df = pd.DataFrame()
@@ -1938,6 +2085,14 @@ def get_fqhc_summary() -> dict:
 # ECE center queries
 # ---------------------------------------------------------------------------
 
+_ECE_SORT_WHITELIST = {
+    "name":     "provider_name",
+    "state":    "state",
+    "capacity": "capacity",
+    "type":     "facility_type",
+}
+
+
 @_cached(ttl=300)
 def get_ece_centers(
     states=None,
@@ -1946,6 +2101,10 @@ def get_ece_centers(
     accepts_subsidies=None,
     min_capacity=None,
     bbox=None,
+    limit=None,
+    offset=0,
+    sort_by=None,
+    sort_dir="asc",
 ) -> pd.DataFrame:
     """
     Return ECE centers matching the given filters.
@@ -1986,11 +2145,14 @@ def get_ece_centers(
         params.extend([min_lat, max_lat, min_lon, max_lon])
 
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
-    query = f"SELECT * FROM ece_centers {where_clause} ORDER BY state, provider_name"
+    select_sql = f"SELECT * FROM ece_centers {where_clause}"
+    count_sql = f"SELECT COUNT(*) FROM ece_centers {where_clause}"
+    order_sql = _resolve_sort(sort_by, sort_dir, _ECE_SORT_WHITELIST, "state ASC, provider_name ASC")
+    order_sql += ", license_id ASC"
 
     conn = get_connection()
     try:
-        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
+        df = _execute_paged_query(conn, select_sql, count_sql, params, order_sql, limit, offset)
     except Exception:
         logger.exception("get_ece_centers failed")
         df = pd.DataFrame()

@@ -5,7 +5,7 @@ api/routers/fqhc.py — FQHC / health center endpoints.
 from typing import Optional, List
 from fastapi import APIRouter, Query, HTTPException
 import db
-from api.deps import df_to_records, clean_dict
+from api.deps import clean_dict, paginate
 
 router = APIRouter()
 
@@ -15,14 +15,25 @@ def list_fqhc(
     states: Optional[List[str]] = Query(default=None),
     active_only: bool = Query(default=True),
     site_types: Optional[List[str]] = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=10000),
+    offset: int = Query(default=0, ge=0),
+    sort: Optional[str] = Query(default=None, description="Sort key: name, state, city, type"),
+    sort_dir: str = Query(default="asc", regex="^(asc|desc)$"),
 ):
-    """Return FQHC health center sites matching the given filters."""
+    """Return a page of FQHC sites matching the given filters.
+
+    Response shape: `{items, total, limit, offset}`.
+    """
     df = db.get_fqhc(
         states=states,
         active_only=active_only,
         site_types=site_types,
+        limit=limit,
+        offset=offset,
+        sort_by=sort,
+        sort_dir=sort_dir,
     )
-    return df_to_records(df)
+    return paginate(df, limit=limit, offset=offset)
 
 
 @router.get("/summary")

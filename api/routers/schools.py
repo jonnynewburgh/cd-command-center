@@ -9,7 +9,7 @@ so the dashboard can toggle it without changing routes.
 from typing import Optional, List
 from fastapi import APIRouter, Query, HTTPException
 import db
-from api.deps import df_to_records, clean_dict
+from api.deps import df_to_records, clean_dict, paginate
 
 router = APIRouter()
 
@@ -27,10 +27,14 @@ def list_schools(
     school_status: Optional[List[str]] = Query(default=None, description="Open, Closed, etc."),
     county: Optional[str] = None,
     census_tract_id: Optional[str] = None,
+    limit: int = Query(default=100, ge=1, le=10000),
+    offset: int = Query(default=0, ge=0),
+    sort: Optional[str] = Query(default=None, description="Sort key: name, state, enrollment, status, survival"),
+    sort_dir: str = Query(default="asc", regex="^(asc|desc)$"),
 ):
-    """
-    Return schools matching the given filters.
-    Omit all filters to get every school in the database.
+    """Return a page of schools matching the given filters.
+
+    Response shape: `{items, total, limit, offset}`.
     """
     df = db.get_schools(
         states=states,
@@ -44,8 +48,12 @@ def list_schools(
         school_status=school_status,
         county=county,
         census_tract_id=census_tract_id,
+        limit=limit,
+        offset=offset,
+        sort_by=sort,
+        sort_dir=sort_dir,
     )
-    return df_to_records(df)
+    return paginate(df, limit=limit, offset=offset)
 
 
 @router.get("/summary")
