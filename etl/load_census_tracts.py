@@ -433,6 +433,20 @@ def main():
 
     db.init_db()
 
+    # Columns populated by sibling ETL steps (EJScreen, OZ flag, 5yr-change
+    # deltas). On UPDATE these are preserved when the incoming ACS record
+    # has NULL — keep this list in sync with upsert_census_tract's
+    # preserve_if_null set.
+    PRESERVE_IF_NULL = [
+        "pct_minority", "county_name",
+        "pop_uninsured", "pop_65_plus",
+        "ej_index", "pm25_percentile", "diesel_percentile",
+        "lead_paint_percentile", "superfund_percentile", "wastewater_percentile",
+        "poverty_rate_5yr_ago", "median_income_5yr_ago",
+        "poverty_rate_change", "income_change_pct",
+        "is_opportunity_zone",
+    ]
+
     total_loaded = 0
     total_errors = 0
 
@@ -446,15 +460,27 @@ def main():
 
         print(f" {len(raw_records):,} tracts", end="", flush=True)
 
-        loaded = 0
+        # Parse first; failures here are per-record, not a batch problem.
+        records = []
         errors = 0
         for raw in raw_records:
             try:
-                record = parse_tract_record(raw, abbr, args.year)
-                db.upsert_census_tract(record)
-                loaded += 1
-            except Exception as e:
+                records.append(parse_tract_record(raw, abbr, args.year))
+            except Exception:
                 errors += 1
+
+        # Single batched upsert per state — ~50-170x faster than the old
+        # per-row db.upsert_census_tract loop on Postgres (CODEX P1 #6).
+        try:
+            loaded = db.upsert_rows(
+                "census_tracts", records,
+                unique_cols=["census_tract_id"],
+                coalesce_cols=PRESERVE_IF_NULL,
+            )
+        except Exception as e:
+            print(f" DB batch error: {e}", end="")
+            loaded = 0
+            errors += len(records)
 
         total_loaded += loaded
         total_errors += errors

@@ -361,26 +361,28 @@ def main():
     # Load into database
     db.init_db()
 
-    loaded = 0
+    # Build the row list, then batch-upsert in one round-trip per column-set
+    # group. ~50-170x faster than the old per-row db.upsert_fqhc loop on
+    # Postgres (CODEX P1 #6).
+    records = []
     errors = 0
     for _, row in df.iterrows():
         record = clean_record(row.to_dict())
-
         # Skip rows without a meaningful name
         if not record.get("health_center_name") and not record.get("site_name"):
             errors += 1
             continue
+        records.append(record)
 
-        try:
-            db.upsert_fqhc(record)
-            loaded += 1
-        except Exception as e:
-            site_id = record.get("bhcmis_id", "?")
-            print(f"    DB error for site {site_id}: {e}")
-            errors += 1
-
-        if loaded % 1000 == 0 and loaded > 0:
-            print(f"  Loaded {loaded:,}...")
+    print(f"  Upserting {len(records):,} sites...")
+    try:
+        loaded = db.upsert_rows("fqhc", records, unique_cols=["bhcmis_id"])
+    except Exception as e:
+        # Whole batch fails atomically — partial commits would leave the table
+        # in an ambiguous state half-loaded against a reproducible source file.
+        print(f"  DB batch error for {len(records):,} sites: {e}")
+        loaded = 0
+        errors += len(records)
 
     print()
     print("Done.")

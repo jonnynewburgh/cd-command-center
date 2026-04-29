@@ -1294,52 +1294,100 @@ def _cached(ttl=300):
 # ETL helpers — used by all pipeline scripts
 # ---------------------------------------------------------------------------
 
-def upsert_rows(table: str, rows: list[dict], unique_cols: list[str]) -> int:
+def upsert_rows(
+    table: str,
+    rows: list[dict],
+    unique_cols: list[str],
+    touch_cols: list[str] | None = None,
+    coalesce_cols: list[str] | None = None,
+) -> int:
     """
     Insert or update rows in a table. Returns the number of rows processed.
 
-    How it works:
-    - For each row, attempt an INSERT.
-    - If a row already exists (based on unique_cols), UPDATE the non-unique columns.
-    - This makes every pipeline script idempotent: safe to re-run without duplicating data.
+    Batches rows that share the same column-set signature into a single
+    INSERT round-trip per group (SQLite: executemany; Postgres:
+    psycopg2.extras.execute_values). Beats the old per-row loop by ~50-170x
+    on bulk loads (CODEX P1 #6, 2026-04-28).
 
     Args:
-        table:       Table name, e.g. 'schools' or 'census_tracts'
-        rows:        List of dicts, where each dict is one row (keys = column names)
-        unique_cols: List of column names that uniquely identify a row, e.g. ['nces_id']
+        table:         Table name, e.g. 'schools' or 'census_tracts'
+        rows:          List of dicts, where each dict is one row (keys = column names)
+        unique_cols:   List of column names that uniquely identify a row, e.g. ['nces_id']
+        touch_cols:    Optional columns to set to CURRENT_TIMESTAMP on UPDATE.
+                       Use for `updated_at`-style audit columns whose schema
+                       default only fires on INSERT.
+        coalesce_cols: Optional columns where the existing value should be
+                       preserved when the incoming value is NULL. Used by the
+                       census_tracts loader so a re-run of the main ACS pull
+                       does not wipe enrichment columns (EJScreen, OZ flag,
+                       5yr-change deltas) that other ETL steps populate.
 
     Example:
-        upsert_rows('schools', school_records, unique_cols=['nces_id'])
+        upsert_rows('schools', records, unique_cols=['nces_id'],
+                    touch_cols=['updated_at'])
     """
     if not rows:
         return 0
+
+    # Group by column signature so each group can share one prepared INSERT.
+    # Most loaders produce uniform records, so this is normally one group.
+    groups: dict[tuple, list[tuple]] = {}
+    for row in rows:
+        cols_sig = tuple(row.keys())
+        groups.setdefault(cols_sig, []).append(tuple(row[c] for c in cols_sig))
 
     conn = get_connection()
     cur = conn.cursor()
     count = 0
 
-    for row in rows:
-        cols = list(row.keys())
-        vals = list(row.values())
-        placeholders = ", ".join(["?"] * len(cols))
-        col_names = ", ".join(cols)
+    try:
+        for cols, val_tuples in groups.items():
+            col_names = ", ".join(cols)
+            placeholders = ", ".join(["?"] * len(cols))
 
-        # Build the UPDATE clause for non-unique columns
-        update_cols = [c for c in cols if c not in unique_cols]
-        if update_cols:
-            update_clause = ", ".join(f"{c} = excluded.{c}" for c in update_cols)
-            conflict_clause = f"ON CONFLICT ({', '.join(unique_cols)}) DO UPDATE SET {update_clause}"
-        else:
-            conflict_clause = f"ON CONFLICT ({', '.join(unique_cols)}) DO NOTHING"
+            update_cols = [c for c in cols if c not in unique_cols]
+            coalesce_set = set(coalesce_cols or [])
+            if update_cols or touch_cols:
+                parts = []
+                for c in update_cols:
+                    if c in coalesce_set:
+                        # Keep existing value when incoming is NULL — used for
+                        # columns populated by sibling ETL steps.
+                        parts.append(f"{c} = COALESCE(excluded.{c}, {table}.{c})")
+                    else:
+                        parts.append(f"{c} = excluded.{c}")
+                parts.extend(f"{c} = CURRENT_TIMESTAMP" for c in (touch_cols or []))
+                conflict_clause = (
+                    f"ON CONFLICT ({', '.join(unique_cols)}) DO UPDATE SET "
+                    + ", ".join(parts)
+                )
+            else:
+                conflict_clause = f"ON CONFLICT ({', '.join(unique_cols)}) DO NOTHING"
 
-        sql = adapt_sql(
-            f"INSERT INTO {table} ({col_names}) VALUES ({placeholders}) {conflict_clause}"
-        )
-        cur.execute(sql, vals)
-        count += 1
+            if _IS_POSTGRES:
+                # psycopg2.extras.execute_values builds a single multi-row VALUES
+                # clause and is the canonical fast path for Postgres bulk inserts.
+                # The %s in the template gets replaced with the rendered tuples.
+                import psycopg2.extras
+                pg_sql = (
+                    f"INSERT INTO {table} ({col_names}) VALUES %s "
+                    + adapt_sql(conflict_clause)
+                )
+                psycopg2.extras.execute_values(cur, pg_sql, val_tuples)
+            else:
+                sql = adapt_sql(
+                    f"INSERT INTO {table} ({col_names}) VALUES ({placeholders}) {conflict_clause}"
+                )
+                cur.executemany(sql, val_tuples)
 
-    conn.commit()
-    conn.close()
+            count += len(val_tuples)
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
     return count
 
 
