@@ -18,7 +18,7 @@ def list_fqhc(
     limit: int = Query(default=100, ge=1, le=10000),
     offset: int = Query(default=0, ge=0),
     sort: Optional[str] = Query(default=None, description="Sort key: name, state, city, type"),
-    sort_dir: str = Query(default="asc", regex="^(asc|desc)$"),
+    sort_dir: str = Query(default="asc", pattern="^(asc|desc)$"),
 ):
     """Return a page of FQHC sites matching the given filters.
 

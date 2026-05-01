@@ -27,7 +27,7 @@ def list_tracts(
     limit: int = Query(default=100, ge=1, le=10000),
     offset: int = Query(default=0, ge=0),
     sort: Optional[str] = Query(default=None, description="Sort key: state, poverty, income, tract, county"),
-    sort_dir: str = Query(default="asc", regex="^(asc|desc)$"),
+    sort_dir: str = Query(default="asc", pattern="^(asc|desc)$"),
 ):
     """Return a page of census tracts matching the given filters.
 

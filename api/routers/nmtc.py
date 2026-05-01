@@ -21,7 +21,7 @@ def list_nmtc_projects(
     limit: int = Query(default=100, ge=1, le=10000),
     offset: int = Query(default=0, ge=0),
     sort: Optional[str] = Query(default=None, description="Sort key: state, year, qlici, cde, type"),
-    sort_dir: str = Query(default="asc", regex="^(asc|desc)$"),
+    sort_dir: str = Query(default="asc", pattern="^(asc|desc)$"),
 ):
     """Return a page of NMTC projects matching the given filters.
 

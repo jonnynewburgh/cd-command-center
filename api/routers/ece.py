@@ -20,7 +20,7 @@ def list_ece(
     limit: int = Query(default=100, ge=1, le=10000),
     offset: int = Query(default=0, ge=0),
     sort: Optional[str] = Query(default=None, description="Sort key: name, state, capacity, type"),
-    sort_dir: str = Query(default="asc", regex="^(asc|desc)$"),
+    sort_dir: str = Query(default="asc", pattern="^(asc|desc)$"),
 ):
     """Return a page of ECE centers matching the given filters.
 
