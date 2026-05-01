@@ -191,6 +191,13 @@ def load_projects(xl: pd.ExcelFile, sheet_name: str) -> int:
     if "census_tract_id" in df.columns:
         df["census_tract_id"] = df["census_tract_id"].apply(clean_census_tract_id)
 
+    # Normalize state values to 2-letter codes. The CDFI Fund release uses
+    # full state names ("Georgia"); the rest of the API filters on 2-letter
+    # codes. Without this step `/nmtc/projects?states=GA` returns 0 rows.
+    if "state" in df.columns:
+        from utils.state_fips import state_name_to_abbrev
+        df["state"] = df["state"].apply(state_name_to_abbrev)
+
     # Generate a cdfi_project_id if not present (use row index as fallback)
     if "cdfi_project_id" not in df.columns:
         df["cdfi_project_id"] = [f"AUTO_{i+1:06d}" for i in range(len(df))]

@@ -37,3 +37,49 @@ def state_to_fips(state: str) -> str:
 def state_to_fips_int(state: str) -> int:
     """Return FIPS code as int for a state abbreviation, or 0."""
     return STATE_FIPS_INT.get(state.upper(), 0)
+
+
+# ---------------------------------------------------------------------------
+# State-name → 2-letter abbreviation. The CDFI Fund publishes NMTC project
+# data with full state names ("Georgia"), while every other facility table
+# in this repo uses 2-letter codes. The loader normalizes through this map
+# so /nmtc/projects?states=GA matches the rest of the API.
+# ---------------------------------------------------------------------------
+STATE_NAME_TO_ABBREV = {
+    "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
+    "california": "CA", "colorado": "CO", "connecticut": "CT", "delaware": "DE",
+    "district of columbia": "DC", "florida": "FL", "georgia": "GA", "hawaii": "HI",
+    "idaho": "ID", "illinois": "IL", "indiana": "IN", "iowa": "IA",
+    "kansas": "KS", "kentucky": "KY", "louisiana": "LA", "maine": "ME",
+    "maryland": "MD", "massachusetts": "MA", "michigan": "MI", "minnesota": "MN",
+    "mississippi": "MS", "missouri": "MO", "montana": "MT", "nebraska": "NE",
+    "nevada": "NV", "new hampshire": "NH", "new jersey": "NJ", "new mexico": "NM",
+    "new york": "NY", "north carolina": "NC", "north dakota": "ND", "ohio": "OH",
+    "oklahoma": "OK", "oregon": "OR", "pennsylvania": "PA", "rhode island": "RI",
+    "south carolina": "SC", "south dakota": "SD", "tennessee": "TN", "texas": "TX",
+    "utah": "UT", "vermont": "VT", "virginia": "VA", "washington": "WA",
+    "west virginia": "WV", "wisconsin": "WI", "wyoming": "WY",
+    # Territories
+    "puerto rico": "PR", "american samoa": "AS", "guam": "GU",
+    "northern mariana islands": "MP",
+    "us virgin islands": "VI", "u.s. virgin islands": "VI",
+    "united states virgin islands": "VI", "virgin islands": "VI",
+}
+
+
+def state_name_to_abbrev(value):
+    """Normalize a state value to its 2-letter abbreviation.
+
+    Accepts 2-letter codes (returned as-is, uppercased) or full state names
+    in any case ('georgia', 'GEORGIA', 'Georgia' all -> 'GA'). Returns the
+    original value unchanged when it doesn't match either form, so caller
+    code can decide whether to treat that as an error.
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    if len(s) == 2 and s.upper() in STATE_FIPS:
+        return s.upper()
+    return STATE_NAME_TO_ABBREV.get(s.lower(), s)
