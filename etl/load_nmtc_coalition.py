@@ -58,6 +58,31 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import db
+from utils.state_fips import STATE_FIPS, state_name_to_abbrev
+
+
+def _normalize_state(raw):
+    """Coerce a Coalition state value to a 2-letter abbreviation. Accepts full
+    names (any case), already-2-letter codes, or empty/None. Returns "" if the
+    value can't be resolved (do not silently truncate).
+
+    Delegates to the canonical map in utils/state_fips so the Coalition
+    loader and the main NMTC loader stay in sync — historically there was
+    a local copy here that drifted, which produced 2-char truncations
+    like 'TE' / 'PE' / 'LO' instead of TN / PA / LA.
+    """
+    if raw is None:
+        return ""
+    s = str(raw).strip()
+    if not s:
+        return ""
+    abbrev = state_name_to_abbrev(s)
+    # Anything that isn't a known US state code (50 states + DC + territories)
+    # is dropped, not silently passed through. Catches typos / bogus 2-letter
+    # codes ('XX') that the canonical helper passes back unchanged.
+    if abbrev in STATE_FIPS:
+        return abbrev
+    return ""
 
 # ---------------------------------------------------------------------------
 # Column name aliases — add new variants here as Coalition report format changes
@@ -292,7 +317,7 @@ def load_file(filepath: str, columns_only: bool, dry_run: bool,
 
         project_name    = get("project_name")
         cde_name        = get("cde_name")
-        state           = (get("state") or "").upper()[:2]
+        state           = _normalize_state(get("state"))
         investment_year = _clean_int(get("investment_year"))
 
         if not cde_name and not project_name:
