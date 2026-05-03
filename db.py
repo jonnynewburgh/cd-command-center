@@ -57,6 +57,91 @@ def adapt_sql(sql: str) -> str:
     return sql
 
 
+# ---------------------------------------------------------------------------
+# SQLAlchemy engine for pd.read_sql_query (CODEX P1 #5 followup, 2026-05-03).
+#
+# pandas warns ("only supports SQLAlchemy connectable...") on every call that
+# passes a raw psycopg2 / sqlite3 connection. Spamming a Pandas4Warning on
+# every list-endpoint query is bad form, and the underlying calling pattern
+# ("DBAPI2 objects are not tested") means a future pandas release could break
+# it outright.
+#
+# Resolution: open a small SQLAlchemy engine alongside the existing DBAPI
+# get_connection(). Cursor-based call sites keep using get_connection() (the
+# engine is not a drop-in for cur.execute()). Read paths that materialize
+# DataFrames go through _pd_read_sql() below.
+# ---------------------------------------------------------------------------
+
+_ENGINE = None
+
+
+def _sqlalchemy_url() -> str:
+    """Return the same DATABASE_URL the app uses, normalized for SQLAlchemy.
+
+    SQLAlchemy needs `postgresql+psycopg2://...`, not the bare `postgres://`
+    short form Heroku-style URLs use. SQLite needs the `sqlite:///` scheme.
+    """
+    if _IS_POSTGRES:
+        url = DATABASE_URL
+        if url.startswith("postgres://"):
+            url = "postgresql+psycopg2://" + url[len("postgres://"):]
+        elif url.startswith("postgresql://") and "+" not in url.split("://", 1)[0]:
+            url = "postgresql+psycopg2://" + url[len("postgresql://"):]
+        return url
+    return f"sqlite:///{DATABASE_URL}"
+
+
+def _engine():
+    """Lazy SQLAlchemy engine singleton. Creates on first call.
+
+    NullPool on SQLite (the file-based connection isn't pool-friendly under
+    threading); default QueuePool on Postgres.
+    """
+    global _ENGINE
+    if _ENGINE is None:
+        from sqlalchemy import create_engine
+        if _IS_POSTGRES:
+            _ENGINE = create_engine(_sqlalchemy_url(), pool_pre_ping=True)
+        else:
+            from sqlalchemy.pool import NullPool
+            _ENGINE = create_engine(_sqlalchemy_url(), poolclass=NullPool)
+    return _ENGINE
+
+
+def _pd_read_sql(sql: str, params=None) -> pd.DataFrame:
+    """Run pd.read_sql_query through the SQLAlchemy engine.
+
+    Accepts the same '?' positional placeholders the rest of db.py uses,
+    so call sites move from
+        pd.read_sql_query(adapt_sql(sql), conn, params=params)
+    to
+        _pd_read_sql(sql, params)
+    with no other change. The helper opens (and closes) its own SA
+    connection, so callers don't need to manage one for the read.
+    """
+    if params is None:
+        params = []
+    # Convert positional ? placeholders to SQLAlchemy named (:p0, :p1, ...)
+    # because text() requires named binds. Skips placeholders inside string
+    # literals isn't necessary — none of our queries embed literal '?' in
+    # quotes; if that ever changes we'll need a real parser here.
+    parts = sql.split("?")
+    if len(parts) - 1 != len(params):
+        raise ValueError(
+            f"_pd_read_sql: {len(parts) - 1} placeholders but {len(params)} params"
+        )
+    rebuilt = parts[0]
+    bind = {}
+    for i, value in enumerate(params):
+        key = f"p{i}"
+        bind[key] = value
+        rebuilt += f":{key}{parts[i + 1]}"
+
+    from sqlalchemy import text
+    with _engine().connect() as conn:
+        return pd.read_sql_query(text(rebuilt), conn, params=bind)
+
+
 def row_to_dict(cur, row):
     # psycopg2 returns plain tuples — dict(row) raises TypeError on those.
     # sqlite3.Row supports dict(row) directly but also iterates like a tuple,
@@ -1531,7 +1616,7 @@ def _execute_paged_query(
         full_sql += " LIMIT ? OFFSET ?"
         paged_params.extend([int(limit), int(offset or 0)])
 
-    df = pd.read_sql_query(adapt_sql(full_sql), conn, params=paged_params)
+    df = _pd_read_sql(full_sql, paged_params)
     if total is not None:
         df.attrs["total"] = int(total)
     return df
@@ -1813,7 +1898,7 @@ def get_nmtc_eligible_tracts(states=None) -> pd.DataFrame:
     query = f"SELECT * FROM census_tracts {where_clause} ORDER BY state, census_tract_id"
 
     conn = get_connection()
-    df = pd.read_sql_query(adapt_sql(query), conn, params=params)
+    df = _pd_read_sql(query, params)
     conn.close()
     return df
 
@@ -2050,7 +2135,7 @@ def get_cde_allocations(states=None) -> pd.DataFrame:
     """
 
     conn = get_connection()
-    df = pd.read_sql_query(adapt_sql(query), conn, params=params)
+    df = _pd_read_sql(query, params)
     conn.close()
     return df
 
@@ -2294,7 +2379,7 @@ def get_ece_summary() -> dict:
 # Global search — across schools, NMTC projects, CDEs, FQHCs, ECE
 # ---------------------------------------------------------------------------
 
-def _search_table(conn, table: str, columns: list, term: str,
+def _search_table(table: str, columns: list, term: str,
                   order_by: str = None) -> pd.DataFrame:
     """Run a substring search across columns in a table, returning up to 200 rows.
 
@@ -2304,15 +2389,16 @@ def _search_table(conn, table: str, columns: list, term: str,
     SQLite path uses LIKE, which is already case-insensitive there.
 
     Returns an empty DataFrame if the query fails (e.g. table doesn't exist).
-    Wraps SQL through adapt_sql() so ? placeholders are converted to %s on Postgres.
+    Goes through _pd_read_sql so the SQLAlchemy engine handles dialect
+    placeholder conversion — no adapt_sql needed on this path.
     """
     op = "ILIKE" if _IS_POSTGRES else "LIKE"
     where = " OR ".join(f"{col} {op} ?" for col in columns)
     order = order_by or columns[0]
-    sql = adapt_sql(f"SELECT * FROM {table} WHERE {where} ORDER BY {order} LIMIT 200")
+    sql = f"SELECT * FROM {table} WHERE {where} ORDER BY {order} LIMIT 200"
     params = [term] * len(columns)
     try:
-        return pd.read_sql_query(sql, conn, params=params)
+        return _pd_read_sql(sql, params)
     except Exception:
         logger.exception("_search_table failed")
         return pd.DataFrame()
@@ -2334,25 +2420,23 @@ def search_all(query_text: str) -> dict:
         }
 
     like = f"%{query_text.strip()}%"
-    conn = get_connection()
 
     # Substring search across name + city columns only. State (2-letter codes)
     # and structural IDs (nces_id, census_tract_id) are surfaced by their
     # dedicated filters on the list endpoints — including them here forces
     # Postgres into a Seq Scan when only a subset of the OR'd columns have
     # trigram indexes (CODEX P1 #9 finding, 2026-05-03).
-    schools_df = _search_table(conn, "schools",
+    schools_df = _search_table("schools",
         ["school_name", "city", "lea_name"], like, order_by="school_name")
-    projects_df = _search_table(conn, "nmtc_projects",
+    projects_df = _search_table("nmtc_projects",
         ["project_name", "cde_name", "city"], like, order_by="project_name")
-    cdes_df = _search_table(conn, "cde_allocations",
+    cdes_df = _search_table("cde_allocations",
         ["cde_name", "city", "service_areas"], like, order_by="cde_name")
-    fqhc_df = _search_table(conn, "fqhc",
+    fqhc_df = _search_table("fqhc",
         ["health_center_name", "site_name", "city"], like, order_by="health_center_name")
-    ece_df = _search_table(conn, "ece_centers",
+    ece_df = _search_table("ece_centers",
         ["provider_name", "operator_name", "city"], like, order_by="provider_name")
 
-    conn.close()
     return {
         "schools": schools_df,
         "projects": projects_df,
@@ -2465,7 +2549,7 @@ def get_lea_accountability(lea_ids=None, states=None) -> pd.DataFrame:
     query = f"SELECT * FROM lea_accountability {where_clause} ORDER BY state, lea_name"
 
     conn = get_connection()
-    df = pd.read_sql_query(adapt_sql(query), conn, params=params)
+    df = _pd_read_sql(query, params)
     conn.close()
     return df
 
@@ -2693,9 +2777,9 @@ def get_nmtc_projects_by_cde(cde_name: str) -> pd.DataFrame:
     """Return all NMTC projects for a given CDE, most recent first."""
     conn = get_connection()
     try:
-        df = pd.read_sql_query(
-            adapt_sql("SELECT * FROM nmtc_projects WHERE cde_name = ? ORDER BY fiscal_year DESC"),
-            conn, params=[cde_name],
+        df = _pd_read_sql(
+            "SELECT * FROM nmtc_projects WHERE cde_name = ? ORDER BY fiscal_year DESC",
+            [cde_name],
         )
     except Exception:
         logger.exception("get_nmtc_projects_by_cde failed for cde_name=%s", cde_name)
@@ -2974,7 +3058,7 @@ def get_peer_nmtc_projects(
 
     conn = get_connection()
     try:
-        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
+        df = _pd_read_sql(query, params)
     except Exception:
         logger.exception("get_peer_nmtc_projects failed")
         df = pd.DataFrame()
@@ -2991,9 +3075,9 @@ def get_operator_schools(ein: str) -> pd.DataFrame:
     """Return all schools operated by the organization with the given EIN."""
     conn = get_connection()
     try:
-        df = pd.read_sql_query(
-            adapt_sql("SELECT * FROM schools WHERE ein = ? ORDER BY school_name"),
-            conn, params=[ein],
+        df = _pd_read_sql(
+            "SELECT * FROM schools WHERE ein = ? ORDER BY school_name",
+            [ein],
         )
     except Exception:
         logger.exception("get_operator_schools failed")
@@ -3007,9 +3091,9 @@ def get_operator_fqhc(ein: str) -> pd.DataFrame:
     """Return all FQHC sites operated by the organization with the given EIN."""
     conn = get_connection()
     try:
-        df = pd.read_sql_query(
-            adapt_sql("SELECT * FROM fqhc WHERE ein = ? ORDER BY site_name"),
-            conn, params=[ein],
+        df = _pd_read_sql(
+            "SELECT * FROM fqhc WHERE ein = ? ORDER BY site_name",
+            [ein],
         )
     except Exception:
         logger.exception("get_operator_fqhc failed")
@@ -3052,9 +3136,9 @@ def get_990_history(ein: str) -> pd.DataFrame:
     """
     conn = get_connection()
     try:
-        df = pd.read_sql_query(
-            adapt_sql("SELECT * FROM irs_990_history WHERE ein = ? ORDER BY tax_year ASC"),
-            conn, params=[ein],
+        df = _pd_read_sql(
+            "SELECT * FROM irs_990_history WHERE ein = ? ORDER BY tax_year ASC",
+            [ein],
         )
     except Exception:
         logger.exception("get_990_history failed")
@@ -3112,7 +3196,7 @@ def get_cdfis(states=None, cdfi_type=None) -> pd.DataFrame:
 
     conn = get_connection()
     try:
-        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
+        df = _pd_read_sql(query, params)
     except Exception:
         logger.exception("get_cdfis failed")
         df = pd.DataFrame()
@@ -3177,7 +3261,7 @@ def get_state_programs(state: str = None) -> pd.DataFrame:
 
     conn = get_connection()
     try:
-        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
+        df = _pd_read_sql(query, params)
     except Exception:
         logger.exception("get_state_programs failed")
         df = pd.DataFrame()
@@ -3278,7 +3362,7 @@ def get_service_gaps(
 
     conn = get_connection()
     try:
-        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
+        df = _pd_read_sql(query, params)
     except Exception:
         logger.exception("get_service_gaps failed")
         df = pd.DataFrame()
@@ -3314,9 +3398,9 @@ def get_enrollment_history(nces_id: str) -> pd.DataFrame:
     """Return enrollment history for a school, sorted by year ascending."""
     conn = get_connection()
     try:
-        df = pd.read_sql_query(
-            adapt_sql("SELECT * FROM enrollment_history WHERE nces_id = ? ORDER BY school_year ASC"),
-            conn, params=[nces_id],
+        df = _pd_read_sql(
+            "SELECT * FROM enrollment_history WHERE nces_id = ? ORDER BY school_year ASC",
+            [nces_id],
         )
     except Exception:
         logger.exception("get_enrollment_history failed")
@@ -3380,7 +3464,7 @@ def get_cdfi_awards(states=None, programs=None, min_year=None) -> pd.DataFrame:
 
     conn = get_connection()
     try:
-        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
+        df = _pd_read_sql(query, params)
     except Exception:
         logger.exception("get_cdfi_awards failed")
         df = pd.DataFrame()
@@ -3581,7 +3665,7 @@ def get_documents(ein: str = None, entity_type: str = None, entity_id: str = Non
 
     conn = get_connection()
     try:
-        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
+        df = _pd_read_sql(query, params)
     except Exception:
         logger.exception("get_documents failed")
         df = pd.DataFrame()
@@ -3645,9 +3729,9 @@ def get_financial_ratios(ein: str) -> pd.DataFrame:
     """Return financial ratio history for an organization, newest first."""
     conn = get_connection()
     try:
-        df = pd.read_sql_query(
-            adapt_sql("SELECT * FROM financial_ratios WHERE ein = ? ORDER BY fiscal_year DESC"),
-            conn, params=[ein],
+        df = _pd_read_sql(
+            "SELECT * FROM financial_ratios WHERE ein = ? ORDER BY fiscal_year DESC",
+            [ein],
         )
     except Exception:
         logger.exception("get_financial_ratios failed")
@@ -3811,7 +3895,7 @@ def get_market_rates(
 
     conn = get_connection()
     try:
-        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
+        df = _pd_read_sql(query, params)
     except Exception:
         logger.exception("get_market_rates failed")
         df = pd.DataFrame()
@@ -3827,7 +3911,7 @@ def get_latest_rates() -> pd.DataFrame:
     """
     conn = get_connection()
     try:
-        df = pd.read_sql_query(
+        df = _pd_read_sql(
             """
             SELECT m.series_id, m.series_name, m.rate_date, m.rate_value
             FROM market_rates m
@@ -3838,8 +3922,7 @@ def get_latest_rates() -> pd.DataFrame:
             ) latest ON m.series_id = latest.series_id
                     AND m.rate_date  = latest.max_date
             ORDER BY m.series_id
-            """,
-            conn,
+            """
         )
     except Exception:
         logger.exception("get_latest_rates failed")
@@ -3864,14 +3947,12 @@ def search_org(query_text: str) -> pd.DataFrame:
     like = f"%{query_text.strip()}%"
     conn = get_connection()
     try:
-        df = pd.read_sql_query(
-            adapt_sql(
-                """SELECT * FROM irs_990
-                   WHERE org_name LIKE ? OR ein LIKE ?
-                   ORDER BY org_name
-                   LIMIT 50"""
-            ),
-            conn, params=[like, like],
+        df = _pd_read_sql(
+            """SELECT * FROM irs_990
+               WHERE org_name LIKE ? OR ein LIKE ?
+               ORDER BY org_name
+               LIMIT 50""",
+            [like, like],
         )
     except Exception:
         logger.exception("search_org failed")
@@ -3909,7 +3990,7 @@ def get_hud_ami(fiscal_year=None, state=None, fips=None):
     """
     conn = get_connection()
     try:
-        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
+        df = _pd_read_sql(query, params)
     except Exception:
         logger.exception("get_hud_ami failed")
         df = pd.DataFrame()
@@ -3946,7 +4027,7 @@ def get_hud_fmr(fiscal_year=None, state=None, fips=None):
     """
     conn = get_connection()
     try:
-        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
+        df = _pd_read_sql(query, params)
     except Exception:
         logger.exception("get_hud_fmr failed")
         df = pd.DataFrame()
@@ -3988,7 +4069,7 @@ def get_cra_institutions(state=None, report_year=None, asset_size=None, search=N
     """
     conn = get_connection()
     try:
-        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
+        df = _pd_read_sql(query, params)
     except Exception:
         logger.exception("get_cra_institutions failed")
         df = pd.DataFrame()
@@ -4031,7 +4112,7 @@ def get_cra_assessment_areas(state=None, report_year=None, respondent_id=None, c
     """
     conn = get_connection()
     try:
-        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
+        df = _pd_read_sql(query, params)
     except Exception:
         logger.exception("get_cra_assessment_areas failed")
         df = pd.DataFrame()
@@ -4084,7 +4165,7 @@ def get_sba_loans(state=None, year=None, program=None, census_tract_id=None,
     """
     conn = get_connection()
     try:
-        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
+        df = _pd_read_sql(query, params)
     except Exception:
         logger.exception("get_sba_loans failed")
         df = pd.DataFrame()
@@ -4108,7 +4189,7 @@ def get_sba_summary(state=None, year=None):
     """
     conn = get_connection()
     try:
-        row = pd.read_sql_query(adapt_sql(query), conn, params=params).iloc[0]
+        row = _pd_read_sql(query, params).iloc[0]
         result = {k: (None if pd.isna(v) else v) for k, v in row.items()}
     except Exception:
         logger.exception("get_sba_summary failed")
@@ -4158,7 +4239,7 @@ def get_hmda_activity(census_tract_id=None, state=None, county_fips=None,
     """
     conn = get_connection()
     try:
-        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
+        df = _pd_read_sql(query, params)
     except Exception:
         logger.exception("get_hmda_activity failed")
         df = pd.DataFrame()
@@ -4210,7 +4291,7 @@ def get_bls_unemployment(area_fips=None, state=None, area_type=None,
     """
     conn = get_connection()
     try:
-        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
+        df = _pd_read_sql(query, params)
     except Exception:
         logger.exception("get_bls_unemployment failed")
         df = pd.DataFrame()
@@ -4261,7 +4342,7 @@ def get_bls_qcew(area_fips=None, state=None, year=None, quarter=None,
     """
     conn = get_connection()
     try:
-        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
+        df = _pd_read_sql(query, params)
     except Exception:
         logger.exception("get_bls_qcew failed")
         df = pd.DataFrame()
@@ -4322,7 +4403,7 @@ def get_scsc_cpf(school_year=None, nces_id=None, school_name=None, designation=N
     """
     conn = get_connection()
     try:
-        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
+        df = _pd_read_sql(query, params)
     except Exception:
         logger.exception("get_scsc_cpf failed")
         df = pd.DataFrame()
@@ -4386,7 +4467,7 @@ def get_nmtc_coalition_projects(state=None, cde_name=None, investment_year=None,
     """
     conn = get_connection()
     try:
-        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
+        df = _pd_read_sql(query, params)
     except Exception:
         logger.exception("get_nmtc_coalition_projects failed")
         df = pd.DataFrame()
@@ -4471,7 +4552,7 @@ def get_federal_audits(state=None, audit_year=None, ein=None, entity_type=None,
     """
     conn = get_connection()
     try:
-        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
+        df = _pd_read_sql(query, params)
     except Exception:
         logger.exception("get_federal_audits failed")
         df = pd.DataFrame()
@@ -4483,9 +4564,9 @@ def get_federal_audit_by_id(report_id):
     """Return full detail for a single audit by report_id."""
     conn = get_connection()
     try:
-        df = pd.read_sql_query(
-            adapt_sql("SELECT * FROM federal_audits WHERE report_id = ?"),
-            conn, params=[report_id],
+        df = _pd_read_sql(
+            "SELECT * FROM federal_audits WHERE report_id = ?",
+            [report_id],
         )
     except Exception:
         logger.exception("get_federal_audit_by_id failed for report_id=%s", report_id)
@@ -4501,8 +4582,8 @@ def get_federal_audit_programs(report_id):
     """Return program-level line items for a single audit."""
     conn = get_connection()
     try:
-        df = pd.read_sql_query(
-            adapt_sql("""
+        df = _pd_read_sql(
+            """
                 SELECT award_reference, aln, federal_program_name,
                        amount_expended, federal_program_total,
                        is_major, is_loan, loan_balance,
@@ -4511,8 +4592,8 @@ def get_federal_audit_programs(report_id):
                 FROM federal_audit_programs
                 WHERE report_id = ?
                 ORDER BY amount_expended DESC
-            """),
-            conn, params=[report_id],
+            """,
+            [report_id],
         )
     except Exception:
         logger.exception("get_federal_audit_programs failed")
@@ -4572,7 +4653,7 @@ def get_headstart_programs(state=None, program_type=None, pir_year=None,
     """
     conn = get_connection()
     try:
-        df = pd.read_sql_query(adapt_sql(query), conn, params=params)
+        df = _pd_read_sql(query, params)
     except Exception:
         logger.exception("get_headstart_programs failed")
         df = pd.DataFrame()
@@ -4584,12 +4665,12 @@ def get_headstart_by_id(grant_number, program_number, pir_year):
     """Return full detail for a single Head Start program."""
     conn = get_connection()
     try:
-        df = pd.read_sql_query(
-            adapt_sql("""
+        df = _pd_read_sql(
+            """
                 SELECT * FROM headstart_programs
                 WHERE grant_number = ? AND program_number = ? AND pir_year = ?
-            """),
-            conn, params=[grant_number, program_number, pir_year],
+            """,
+            [grant_number, program_number, pir_year],
         )
     except Exception:
         logger.exception(
