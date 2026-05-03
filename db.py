@@ -1222,6 +1222,36 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ece_latlon     ON ece_centers(latitude, longitude)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_nmtc_latlon    ON nmtc_projects(latitude, longitude)")
 
+    # ---- Trigram indexes for substring search (CODEX P1 #9, 2026-05-03) ----
+    # search_all() does ILIKE '%term%' across name/city columns. Without
+    # trigram indexes the leading-wildcard pattern forces a sequential scan
+    # of every searched table on every keystroke. With pg_trgm + GIN these
+    # become index seeks. SQLite has no equivalent (FTS5 is a separate
+    # virtual-table refactor); skip there.
+    if _IS_POSTGRES:
+        # _try_exec wraps each statement in a SAVEPOINT so a missing
+        # extension (e.g. on a hosted Postgres without superuser rights)
+        # doesn't abort the rest of init_db.
+        _try_exec(_raw_cur, "CREATE EXTENSION IF NOT EXISTS pg_trgm")
+        for sql in (
+            "CREATE INDEX IF NOT EXISTS idx_schools_name_trgm     ON schools         USING gin (school_name        gin_trgm_ops)",
+            "CREATE INDEX IF NOT EXISTS idx_schools_city_trgm     ON schools         USING gin (city               gin_trgm_ops)",
+            "CREATE INDEX IF NOT EXISTS idx_schools_lea_trgm      ON schools         USING gin (lea_name           gin_trgm_ops)",
+            "CREATE INDEX IF NOT EXISTS idx_nmtc_proj_trgm        ON nmtc_projects   USING gin (project_name        gin_trgm_ops)",
+            "CREATE INDEX IF NOT EXISTS idx_nmtc_cde_trgm         ON nmtc_projects   USING gin (cde_name            gin_trgm_ops)",
+            "CREATE INDEX IF NOT EXISTS idx_nmtc_city_trgm        ON nmtc_projects   USING gin (city               gin_trgm_ops)",
+            "CREATE INDEX IF NOT EXISTS idx_cde_alloc_name_trgm   ON cde_allocations USING gin (cde_name            gin_trgm_ops)",
+            "CREATE INDEX IF NOT EXISTS idx_cde_alloc_city_trgm   ON cde_allocations USING gin (city               gin_trgm_ops)",
+            "CREATE INDEX IF NOT EXISTS idx_cde_alloc_areas_trgm  ON cde_allocations USING gin (service_areas       gin_trgm_ops)",
+            "CREATE INDEX IF NOT EXISTS idx_fqhc_name_trgm        ON fqhc            USING gin (health_center_name  gin_trgm_ops)",
+            "CREATE INDEX IF NOT EXISTS idx_fqhc_site_trgm        ON fqhc            USING gin (site_name           gin_trgm_ops)",
+            "CREATE INDEX IF NOT EXISTS idx_fqhc_city_trgm        ON fqhc            USING gin (city               gin_trgm_ops)",
+            "CREATE INDEX IF NOT EXISTS idx_ece_provider_trgm     ON ece_centers     USING gin (provider_name       gin_trgm_ops)",
+            "CREATE INDEX IF NOT EXISTS idx_ece_operator_trgm     ON ece_centers     USING gin (operator_name       gin_trgm_ops)",
+            "CREATE INDEX IF NOT EXISTS idx_ece_city_trgm         ON ece_centers     USING gin (city               gin_trgm_ops)",
+        ):
+            _try_exec(_raw_cur, sql)
+
     conn.commit()
     conn.close()
 
@@ -2259,12 +2289,18 @@ def get_ece_summary() -> dict:
 
 def _search_table(conn, table: str, columns: list, term: str,
                   order_by: str = None) -> pd.DataFrame:
-    """Run a LIKE search across columns in a table, returning up to 200 rows.
+    """Run a substring search across columns in a table, returning up to 200 rows.
+
+    Postgres path uses ILIKE (case-insensitive), backed by GIN trigram
+    indexes added to init_db() under CODEX P1 #9 — search('atlanta')
+    used to return 0 because plain LIKE is case-sensitive on Postgres.
+    SQLite path uses LIKE, which is already case-insensitive there.
 
     Returns an empty DataFrame if the query fails (e.g. table doesn't exist).
     Wraps SQL through adapt_sql() so ? placeholders are converted to %s on Postgres.
     """
-    where = " OR ".join(f"{col} LIKE ?" for col in columns)
+    op = "ILIKE" if _IS_POSTGRES else "LIKE"
+    where = " OR ".join(f"{col} {op} ?" for col in columns)
     order = order_by or columns[0]
     sql = adapt_sql(f"SELECT * FROM {table} WHERE {where} ORDER BY {order} LIMIT 200")
     params = [term] * len(columns)
@@ -2293,16 +2329,21 @@ def search_all(query_text: str) -> dict:
     like = f"%{query_text.strip()}%"
     conn = get_connection()
 
+    # Substring search across name + city columns only. State (2-letter codes)
+    # and structural IDs (nces_id, census_tract_id) are surfaced by their
+    # dedicated filters on the list endpoints — including them here forces
+    # Postgres into a Seq Scan when only a subset of the OR'd columns have
+    # trigram indexes (CODEX P1 #9 finding, 2026-05-03).
     schools_df = _search_table(conn, "schools",
-        ["school_name", "city", "lea_name", "nces_id", "state"], like, order_by="school_name")
+        ["school_name", "city", "lea_name"], like, order_by="school_name")
     projects_df = _search_table(conn, "nmtc_projects",
-        ["project_name", "cde_name", "city", "state", "census_tract_id"], like, order_by="project_name")
+        ["project_name", "cde_name", "city"], like, order_by="project_name")
     cdes_df = _search_table(conn, "cde_allocations",
-        ["cde_name", "city", "state", "service_areas"], like, order_by="cde_name")
+        ["cde_name", "city", "service_areas"], like, order_by="cde_name")
     fqhc_df = _search_table(conn, "fqhc",
-        ["health_center_name", "site_name", "city", "state"], like, order_by="health_center_name")
+        ["health_center_name", "site_name", "city"], like, order_by="health_center_name")
     ece_df = _search_table(conn, "ece_centers",
-        ["provider_name", "operator_name", "city", "state"], like, order_by="provider_name")
+        ["provider_name", "operator_name", "city"], like, order_by="provider_name")
 
     conn.close()
     return {
