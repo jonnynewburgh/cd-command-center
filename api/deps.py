@@ -2,17 +2,31 @@
 api/deps.py — Shared helpers for API routers.
 """
 import json
+
 import pandas as pd
 
 
 def df_to_records(df: pd.DataFrame) -> list:
     """
     Convert a pandas DataFrame to a JSON-safe list of dicts.
-    NaN / NaT values become None (null in JSON) automatically via to_json().
+
+    Why json.loads(df.to_json(...)) instead of df.to_dict('records'):
+    on a 2,000-row 44-col schools page the to_json path runs ~2x faster
+    than a pure-Python NaN/NaT scrub loop (28 ms vs 64 ms in the bench
+    script run during P1 #5 triage on 2026-05-01). pandas' to_json is
+    C-implemented; Python loops over hundreds of thousands of cells are
+    not.
+
+    `date_format='iso'` is explicit because pandas deprecated the default
+    'epoch' (millisecond ints) starting in 4.x — without it every list
+    endpoint logs a Pandas4Warning, and a future pandas release will
+    flip the contract under us. ISO 8601 is also the format the Next.js
+    consumer already expects, so this also fixes a latent format-drift
+    risk.
     """
     if df is None or df.empty:
         return []
-    return json.loads(df.to_json(orient="records"))
+    return json.loads(df.to_json(orient="records", date_format="iso"))
 
 
 def paginate(df: pd.DataFrame, limit: int, offset: int) -> dict:
