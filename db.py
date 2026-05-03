@@ -92,6 +92,13 @@ def init_db():
     """
     Create all tables if they don't exist yet.
     Call this once at app startup or from ETL scripts.
+
+    NOTE (CODEX P1 #8, 2026-05-03): init_db is the bootstrap path for a
+    brand-new empty database. New schema changes should land as Alembic
+    migrations under `migrations/versions/`, not as new CREATE/ALTER
+    statements in this function. Once init_db is fully retired in favor
+    of versioned migrations, the workflow becomes
+    `alembic upgrade head` end-to-end.
     """
     conn = get_connection()
     _raw_cur = conn.cursor()

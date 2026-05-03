@@ -9,6 +9,14 @@ fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
 pydantic>=2.0.0
 
+# Schema migration tooling. Wired to honor the same DATABASE_URL env var
+# the app reads (see migrations/env.py). Workflow:
+#   alembic current          — show what revision the DB is at
+#   alembic upgrade head     — apply outstanding migrations
+#   alembic revision -m "X"  — author a new migration
+alembic>=1.13.0
+sqlalchemy>=2.0.0
+
 # Test dependencies — `pytest tests/` runs the API smoke + perf baseline
 # suite added in P2 #11. httpx is a transitive of starlette.testclient.
 pytest>=8.0.0

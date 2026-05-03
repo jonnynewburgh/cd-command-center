@@ -395,6 +395,14 @@ python etl/run_pipeline.py --continue-on-error     # keep running after failures
 
 # Run tests (when they exist)
 pytest tests/
+
+# Schema migrations (Alembic, env-driven via DATABASE_URL)
+alembic current                       # show what revision the DB is at
+alembic upgrade head                  # apply outstanding migrations
+alembic revision -m "add foo column"  # author a new migration
+# For brand-new DBs: db.init_db() bootstraps the schema, then `alembic stamp head`
+# marks it as caught up. New schema changes after the baseline must land as
+# migrations, not as new statements in init_db.
 ```
 
 ## Related Projects
