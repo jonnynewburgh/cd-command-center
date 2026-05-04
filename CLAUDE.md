@@ -400,9 +400,15 @@ pytest tests/
 alembic current                       # show what revision the DB is at
 alembic upgrade head                  # apply outstanding migrations
 alembic revision -m "add foo column"  # author a new migration
-# For brand-new DBs: db.init_db() bootstraps the schema, then `alembic stamp head`
-# marks it as caught up. New schema changes after the baseline must land as
-# migrations, not as new statements in init_db.
+# Fresh DB:    `alembic upgrade head` is sufficient — revision f19ded25b983
+#              calls db.init_db() and the rest of the chain runs on top.
+# Existing DB: same — every CREATE in init_db uses IF NOT EXISTS so the
+#              baseline migration no-ops on a populated DB.
+# IMPORTANT:   db.init_db() is FROZEN at revision f19ded25b983. New schema
+#              changes go in NEW alembic revisions (op.create_table /
+#              op.execute), not as new statements in init_db — adding to
+#              init_db would silently change what the baseline migration
+#              does on downstream environments.
 ```
 
 ## Related Projects

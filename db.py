@@ -178,12 +178,18 @@ def init_db():
     Create all tables if they don't exist yet.
     Call this once at app startup or from ETL scripts.
 
-    NOTE (CODEX P1 #8, 2026-05-03): init_db is the bootstrap path for a
-    brand-new empty database. New schema changes should land as Alembic
-    migrations under `migrations/versions/`, not as new CREATE/ALTER
-    statements in this function. Once init_db is fully retired in favor
-    of versioned migrations, the workflow becomes
-    `alembic upgrade head` end-to-end.
+    FROZEN at Alembic revision f19ded25b983 (CODEX P1 #8 followup,
+    2026-05-03). This function captures the schema as of that revision
+    and is replayed by it on a fresh DB. NEW schema changes must land
+    as new Alembic revisions (op.create_table / op.execute), NOT as
+    new statements added here — adding here would silently change what
+    the f19ded25b983 migration does for downstream environments.
+
+    Fresh-DB workflow is now `alembic upgrade head`, which calls this
+    function via the f19ded25b983 revision. Existing DBs stamped at
+    the empty baseline (542621587619) can also `alembic upgrade head`
+    safely — every CREATE here uses IF NOT EXISTS so it no-ops on a
+    populated DB.
     """
     conn = get_connection()
     _raw_cur = conn.cursor()
