@@ -39,6 +39,7 @@ from api.routers import (
     audits,
     headstart,
     accountability,
+    authorizers,
 )
 
 app = FastAPI(
@@ -84,6 +85,7 @@ app.include_router(housing.router,        prefix="/housing",        tags=["Housi
 app.include_router(audits.router,         prefix="/audits",         tags=["Federal Audits"])
 app.include_router(headstart.router,      prefix="/headstart",      tags=["Head Start"])
 app.include_router(accountability.router, prefix="/accountability", tags=["Accountability"])
+app.include_router(authorizers.router, prefix="/authorizers", tags=["Authorizers"])
 
 
 # ---------------------------------------------------------------------------

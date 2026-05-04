@@ -45,6 +45,7 @@ SERIAL_TABLES = {
     "cra_assessment_areas", "sba_loans", "hmda_activity", "bls_unemployment",
     "bls_qcew", "scsc_cpf", "nmtc_coalition_projects",
     "cra_sb_discl", "cra_sb_aggr",
+    "authorizers", "school_authorizer",
 }
 
 BATCH_SIZE = 5000

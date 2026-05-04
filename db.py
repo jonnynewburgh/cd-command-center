@@ -4794,3 +4794,164 @@ def get_headstart_by_id(grant_number, program_number, pir_year):
     return df.iloc[0].to_dict()
 
 
+# ---------------------------------------------------------------------------
+# Charter authorizer registry (NACSA statute snapshot + operational entities)
+# ---------------------------------------------------------------------------
+
+def upsert_statutory_charter_authorizer_policy(record: dict):
+    """Insert or update a row in statutory_charter_authorizer_policy (key: state_usps)."""
+    columns = list(record.keys())
+    values = list(record.values())
+    placeholders = ",".join("?" * len(values))
+    update_cols = [c for c in columns if c != "state_usps"]
+    update_clause = ",".join(f"{c}=excluded.{c}" for c in update_cols)
+    sql = f"""
+        INSERT INTO statutory_charter_authorizer_policy ({",".join(columns)})
+        VALUES ({placeholders})
+        ON CONFLICT(state_usps) DO UPDATE SET {update_clause}
+    """
+    conn = get_connection()
+    conn.cursor().execute(adapt_sql(sql), values)
+    conn.commit()
+    conn.close()
+
+
+def get_statutory_charter_authorizer_policy(state_usps=None) -> pd.DataFrame:
+    """Return NACSA-derived statutory authorizer-type columns by state/DC."""
+    conditions, params = [], []
+    if state_usps:
+        conditions.append("state_usps = ?")
+        params.append(state_usps.upper())
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    query = f"""
+        SELECT state_usps, state_name, nacsa_col_1, nacsa_col_2, nacsa_col_3, nacsa_col_4,
+               source_url, retrieved
+        FROM statutory_charter_authorizer_policy {where}
+        ORDER BY state_usps
+    """
+    conn = get_connection()
+    try:
+        df = _pd_read_sql(query, params)
+    except Exception:
+        logger.exception("get_statutory_charter_authorizer_policy failed")
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+def upsert_authorizer(record: dict):
+    """Insert or update an authorizing entity (unique on state + name)."""
+    columns = list(record.keys())
+    values = list(record.values())
+    placeholders = ",".join("?" * len(values))
+    update_cols = [c for c in columns if c not in ("id", "state", "name")]
+    update_clause = ",".join(f"{c}=excluded.{c}" for c in update_cols)
+    sql = f"""
+        INSERT INTO authorizers ({",".join(columns)})
+        VALUES ({placeholders})
+        ON CONFLICT(state, name) DO UPDATE SET {update_clause}
+    """
+    conn = get_connection()
+    conn.cursor().execute(adapt_sql(sql), values)
+    conn.commit()
+    conn.close()
+
+
+def get_authorizers(
+    states=None,
+    name_substring=None,
+    authorizer_kind=None,
+    active_only=True,
+) -> pd.DataFrame:
+    """Return operational authorizer rows."""
+    conditions, params = [], []
+    if states:
+        placeholders = ",".join("?" * len(states))
+        conditions.append(f"state IN ({placeholders})")
+        params.extend([s.upper() for s in states])
+    if name_substring:
+        conditions.append("name LIKE ?")
+        params.append(f"%{name_substring}%")
+    if authorizer_kind:
+        conditions.append("authorizer_kind = ?")
+        params.append(authorizer_kind)
+    if active_only:
+        conditions.append("(is_active = 1 OR is_active IS NULL)")
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    query = f"""
+        SELECT id, state, name, authorizer_kind, nces_lea_id, state_authorizer_id,
+               source_system, source_url, notes, is_active, created_at, updated_at
+        FROM authorizers {where}
+        ORDER BY state, name
+    """
+    conn = get_connection()
+    try:
+        df = _pd_read_sql(query, params)
+    except Exception:
+        logger.exception("get_authorizers failed")
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+def upsert_school_authorizer(record: dict):
+    """Link an NCES school to an authorizer for a school year."""
+    columns = list(record.keys())
+    values = list(record.values())
+    placeholders = ",".join("?" * len(values))
+    key_cols = ("nces_school_id", "authorizer_id", "school_year")
+    update_cols = [c for c in columns if c not in ("id",) + key_cols]
+    update_clause = ",".join(f"{c}=excluded.{c}" for c in update_cols)
+    sql = f"""
+        INSERT INTO school_authorizer ({",".join(columns)})
+        VALUES ({placeholders})
+        ON CONFLICT(nces_school_id, authorizer_id, school_year) DO UPDATE SET {update_clause}
+    """
+    conn = get_connection()
+    conn.cursor().execute(adapt_sql(sql), values)
+    conn.commit()
+    conn.close()
+
+
+def get_school_authorizers(
+    nces_school_id=None,
+    authorizer_id=None,
+    school_year=None,
+    states=None,
+) -> pd.DataFrame:
+    """Return school ↔ authorizer links, optionally filtered."""
+    conditions, params = [], []
+    if nces_school_id:
+        conditions.append("sa.nces_school_id = ?")
+        params.append(nces_school_id)
+    if authorizer_id:
+        conditions.append("sa.authorizer_id = ?")
+        params.append(authorizer_id)
+    if school_year:
+        conditions.append("sa.school_year = ?")
+        params.append(school_year)
+    if states:
+        placeholders = ",".join("?" * len(states))
+        conditions.append(f"a.state IN ({placeholders})")
+        params.extend([s.upper() for s in states])
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    query = f"""
+        SELECT sa.id, sa.nces_school_id, sa.authorizer_id, sa.school_year,
+               sa.relationship, sa.source_system, sa.created_at,
+               a.state, a.name AS authorizer_name, a.authorizer_kind,
+               a.nces_lea_id, a.state_authorizer_id
+        FROM school_authorizer sa
+        JOIN authorizers a ON a.id = sa.authorizer_id
+        {where}
+        ORDER BY sa.school_year DESC, a.state, a.name
+    """
+    conn = get_connection()
+    try:
+        df = _pd_read_sql(query, params)
+    except Exception:
+        logger.exception("get_school_authorizers failed")
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
