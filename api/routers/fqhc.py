@@ -64,3 +64,31 @@ def fqhc_990(bhcmis_id: str):
     if not record:
         raise HTTPException(status_code=404, detail="No 990 data linked to this FQHC site")
     return clean_dict(record)
+
+
+@router.get("/uds/summary")
+def fqhc_uds_summary():
+    """Coverage stats for the fqhc_uds_reports table."""
+    return db.get_fqhc_uds_summary()
+
+
+@router.get("/{bhcmis_id}/uds")
+def fqhc_uds_for_site(bhcmis_id: str, year: Optional[int] = Query(default=None)):
+    """Latest UDS report for the org that operates this site (or a specific year)."""
+    record = db.get_fqhc_uds_for_site(bhcmis_id, data_year=year)
+    if not record:
+        raise HTTPException(status_code=404, detail="No UDS report for this site's organization")
+    return clean_dict(record)
+
+
+@router.get("/{bhcmis_id}/uds/history")
+def fqhc_uds_history_for_site(bhcmis_id: str):
+    """All UDS years on file for the org that operates this site (oldest first)."""
+    site = db.get_fqhc_by_id(bhcmis_id)
+    if not site:
+        raise HTTPException(status_code=404, detail="FQHC site not found")
+    grant = site.get("health_center_grant_number")
+    if not grant:
+        return {"items": [], "grant_number": None}
+    df = db.get_fqhc_uds_history(grant)
+    return {"grant_number": grant, "items": [clean_dict(r) for r in df.to_dict(orient="records")]}

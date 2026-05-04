@@ -95,6 +95,7 @@ The database (`cd_command_center.sqlite`) consolidates all data sources. Key tab
 - `federal_audits` — GSA FAC Single Audit submissions (64K+ audits, 2023-2024); EIN-keyed, joins to all entity tables
 - `federal_audit_programs` — per-ALN line items from Single Audits (1.2M+ rows); federal program detail, findings, amounts
 - `headstart_programs` — Head Start PIR program-level data (46K+ records, 2008-2025); enrollment, staffing, health, demographics
+- `fqhc_uds_reports` — HRSA UDS grantee-per-year (payer mix, encounters, FTEs, quality, financials); join via `fqhc.health_center_grant_number`
 
 Every facility table has `latitude`, `longitude`, and `census_tract_id` columns for geographic joins.
 
@@ -374,6 +375,15 @@ python etl/fetch_fac.py --state GA --year 2024             # single state test
 python etl/fetch_fac.py --state GA --years 2023 2024       # multiple years
 python etl/fetch_fac.py --all-states --year 2024           # all states (slow — rate limited)
 python etl/fetch_fac.py --state GA --year 2024 --dry-run   # preview without writing
+
+# Load HRSA UDS grantee reports (payer mix, encounters, FTEs, quality, financials)
+# Source xlsx is Akamai-protected — download in a browser:
+#   https://data.hrsa.gov/topics/health-centers/uds  (H80 Awardees + LAL Look-Alikes)
+# Save to data/raw/uds/, then:
+python etl/load_fqhc_uds.py --file data/raw/uds/h80-2024.xlsx --columns-only   # inspect
+python etl/load_fqhc_uds.py --file data/raw/uds/h80-2024.xlsx --year 2024
+python etl/load_fqhc_uds.py --file data/raw/uds/lal-2024.xlsx --year 2024
+python etl/load_fqhc_uds.py --file data/raw/uds/h80-2024.xlsx --year 2024 --states GA TX
 
 # Load Head Start PIR (Program Information Report) from HSES Excel export
 # Requires HSES account (https://hses.ohs.acf.hhs.gov) — set HSES_USERNAME/HSES_PASSWORD env vars

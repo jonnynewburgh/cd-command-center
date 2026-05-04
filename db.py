@@ -2258,6 +2258,105 @@ def get_fqhc_summary() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# FQHC UDS reports (grantee-per-year)
+# ---------------------------------------------------------------------------
+
+def get_fqhc_uds_report(grant_number: str, data_year: int = None) -> dict:
+    """Return one UDS report row by grant_number + data_year.
+
+    If data_year is None, returns the most recent year on file for that grantee.
+    Returns empty dict if no rows found.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        if data_year is None:
+            cur.execute(adapt_sql(
+                "SELECT * FROM fqhc_uds_reports WHERE grant_number = ? "
+                "ORDER BY data_year DESC LIMIT 1"
+            ), (grant_number,))
+        else:
+            cur.execute(adapt_sql(
+                "SELECT * FROM fqhc_uds_reports WHERE grant_number = ? AND data_year = ?"
+            ), (grant_number, data_year))
+        row = cur.fetchone()
+        result = row_to_dict(cur, row)
+    except Exception:
+        logger.exception("get_fqhc_uds_report failed grant=%s year=%s", grant_number, data_year)
+        result = {}
+    conn.close()
+    return result if result else {}
+
+
+def get_fqhc_uds_history(grant_number: str) -> pd.DataFrame:
+    """All UDS years on file for one grantee, oldest first (for trend charts)."""
+    try:
+        return _pd_read_sql(
+            "SELECT * FROM fqhc_uds_reports WHERE grant_number = ? ORDER BY data_year ASC",
+            [grant_number],
+        )
+    except Exception:
+        logger.exception("get_fqhc_uds_history failed grant=%s", grant_number)
+        return pd.DataFrame()
+
+
+def get_fqhc_uds_for_site(bhcmis_id: str, data_year: int = None) -> dict:
+    """Resolve site → org grant_number → UDS report.
+
+    Site directory rows carry the site-level bhcmis_id; UDS data is reported
+    once per organization (grant_number). This helper does the join in one
+    query so callers (school detail page, FQHC detail page) don't have to.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        if data_year is None:
+            cur.execute(adapt_sql("""
+                SELECT u.* FROM fqhc_uds_reports u
+                JOIN fqhc f ON f.health_center_grant_number = u.grant_number
+                WHERE f.bhcmis_id = ?
+                ORDER BY u.data_year DESC LIMIT 1
+            """), (bhcmis_id,))
+        else:
+            cur.execute(adapt_sql("""
+                SELECT u.* FROM fqhc_uds_reports u
+                JOIN fqhc f ON f.health_center_grant_number = u.grant_number
+                WHERE f.bhcmis_id = ? AND u.data_year = ?
+            """), (bhcmis_id, data_year))
+        row = cur.fetchone()
+        result = row_to_dict(cur, row)
+    except Exception:
+        logger.exception("get_fqhc_uds_for_site failed bhcmis_id=%s year=%s", bhcmis_id, data_year)
+        result = {}
+    conn.close()
+    return result if result else {}
+
+
+def get_fqhc_uds_summary() -> dict:
+    """High-level UDS coverage stats: grantees, years, latest year."""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT
+                COUNT(*)                       AS total_reports,
+                COUNT(DISTINCT grant_number)   AS distinct_grantees,
+                COUNT(DISTINCT data_year)      AS distinct_years,
+                MIN(data_year)                 AS earliest_year,
+                MAX(data_year)                 AS latest_year,
+                COALESCE(SUM(total_patients), 0)  AS total_patients_latest_load
+            FROM fqhc_uds_reports
+        """)
+        row = cur.fetchone()
+        result = row_to_dict(cur, row) or {}
+    except Exception:
+        logger.exception("get_fqhc_uds_summary failed")
+        result = {}
+    conn.close()
+    return result
+
+
+# ---------------------------------------------------------------------------
 # ECE center queries
 # ---------------------------------------------------------------------------
 

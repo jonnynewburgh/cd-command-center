@@ -74,6 +74,9 @@ COLUMN_MAP = {
     "health center site id":                  "bhcmis_id",
     # NOTE: "bhcmis organization identification number" is an ORG-level ID (not site-level).
     # Do NOT map it to bhcmis_id — it would collapse all sites of one org into one row.
+    # Org-level join keys (UDS reports roll up to grant_number)
+    "bhcmis organization identification number": "org_bhcmis_id",
+    "health center number":                   "health_center_grant_number",
 
     # Organization / site names
     "health center name":                     "health_center_name",
