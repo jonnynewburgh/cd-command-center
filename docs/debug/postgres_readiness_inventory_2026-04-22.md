@@ -2,10 +2,58 @@
 title: Postgres readiness inventory — SQL function + silent exception scan
 date: 2026-04-22
 scope: All Python files under repo root — db.py, etl/, api/, utils/, validate.py, archive/
-status: Inventory only — no code edits. Reference doc for sizing the full Postgres migration.
+status: STALE — substantial fixes have shipped since this scan. See "Status update — 2026-05-04" before relying on any line below.
 ---
 
 # Postgres readiness inventory — 2026-04-22
+
+## Status update — 2026-05-04
+
+Verified live against local Postgres on 2026-05-04. The body of this
+doc is the 2026-04-22 snapshot and has not been re-grepped — treat
+the per-site tables as historical, not current. The line counts in
+the body refer to the file at the time of writing and have shifted.
+
+### A1 — FastAPI raw-? sites — CLOSED
+
+All six sites listed under A1 (FastAPI loud-crash on Postgres) wrap
+through `adapt_sql()` as of 2026-04-25. Live CRUD round-trip on
+Postgres confirmed 2026-05-04 for `get_user_notes`,
+`save_user_note` (returns real id, not None — see B6), `update_user_note`,
+`delete_user_note`, `get_census_tract`, `save_bookmark`, `is_bookmarked`,
+`delete_bookmark`, `get_bookmarks`.
+
+Closing commits:
+- `11097d6` — Fix Phase 3B FastAPI raw-? — 6 sites (A1): `get_census_tract`, `get_user_notes`, `save_user_note`, `update_user_note`, `delete_user_note`, `get_nmtc_project_by_id`
+- `bf4ed8a` — `get_schools` / `get_school_by_id` raw-? + drop `charter_schools` fallback (also closes A4 / class 8 for schools)
+- `d7855ee` — `save_bookmark` `INSERT OR IGNORE` → `ON CONFLICT DO NOTHING`, `delete_bookmark` + `is_bookmarked` adapt_sql wraps
+
+### B6 — `cur.lastrowid` + `dict(row)` — CLOSED
+
+- `dict(row)` sweep landed in `33bef1c` (Phase 4, "Decision B" → `row_to_dict(cur, row)` helper using `dict(zip(cur.description, row))`, works on both backends). The six confirmed sites (`get_school_by_id`, `get_fqhc_by_id`, `get_ece_by_id`, `get_nmtc_project_by_id`, `get_user_notes`, `get_bookmarks`) were rewritten in that commit. The latent tearsheet path is also covered.
+- `cur.lastrowid` sites L2 (`save_user_note`) and L3 (`save_document`) rewritten to `INSERT ... RETURNING id` in the same commit `33bef1c`.
+- L1 (`log_load_start`) — pipeline run logging — fixed independently in `7d8382a`.
+
+### Other classes have also moved — body is stale
+
+Not re-verified in this update; included as breadcrumbs so the next
+reader doesn't redo work.
+
+| Bug class (in body) | Likely closing commits |
+|---|---|
+| 1 — Raw `?` placeholders | `11097d6`, `bf4ed8a`, `fe26f90` (ETL, 20 sites), `263507f` (18 db.py reader sites) |
+| 2 — `INSERT OR IGNORE` | `d7855ee` (save_bookmark), `f0582f3` (state_programs schema + rewrite) |
+| 4 — `cur.lastrowid` | `33bef1c` (L2/L3), `7d8382a` (L1) |
+| 5 — `dict(row)` | `33bef1c` |
+| 6 — SQLite-only SQL functions | `f0582f3` (Phase 5 SQLite-only function rewrites) |
+| 7 — Silent exception handlers | `a906bd1` (Phase 1: 14 DANGEROUS resolved, 38 RISKY decorated) |
+| 8 — Schema drift (`charter_schools`) | `bf4ed8a` (drops `charter_schools` fallback) |
+
+A clean re-grep is recommended before starting any new B*-tagged
+session — assume nothing in the per-site tables below is still
+accurate.
+
+---
 
 ## Why this doc exists
 
