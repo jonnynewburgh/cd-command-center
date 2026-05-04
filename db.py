@@ -2504,7 +2504,7 @@ def upsert_nmtc_project(record: dict):
         VALUES ({placeholders})
         ON CONFLICT(cdfi_project_id) DO UPDATE SET {update_clause}
     """
-    cur.execute(sql, values)
+    cur.execute(adapt_sql(sql), values)
     conn.commit()
     conn.close()
 
@@ -2526,7 +2526,7 @@ def upsert_cde_allocation(record: dict):
         VALUES ({placeholders})
         ON CONFLICT(cde_name, allocation_year) DO UPDATE SET {update_clause}
     """
-    cur.execute(sql, values)
+    cur.execute(adapt_sql(sql), values)
     conn.commit()
     conn.close()
 
@@ -2577,7 +2577,7 @@ def upsert_lea_accountability(record: dict):
         VALUES ({placeholders})
         ON CONFLICT(lea_id, data_year) DO UPDATE SET {update_clause}
     """
-    cur.execute(sql, values)
+    cur.execute(adapt_sql(sql), values)
     conn.commit()
     conn.close()
 
@@ -3174,8 +3174,10 @@ def upsert_cdfi(record: dict):
         f"{col}=excluded.{col}" for col in columns if col not in ("cdfi_name", "state")
     )
     cur.execute(
-        f"INSERT INTO cdfi_directory ({','.join(columns)}) VALUES ({placeholders}) "
-        f"ON CONFLICT(cdfi_name, state) DO UPDATE SET {update_clause}",
+        adapt_sql(
+            f"INSERT INTO cdfi_directory ({','.join(columns)}) VALUES ({placeholders}) "
+            f"ON CONFLICT(cdfi_name, state) DO UPDATE SET {update_clause}"
+        ),
         values,
     )
     conn.commit()
@@ -3391,8 +3393,10 @@ def upsert_enrollment_history(record: dict):
         f"{col}=excluded.{col}" for col in columns if col not in ("nces_id", "school_year")
     )
     cur.execute(
-        f"INSERT INTO enrollment_history ({','.join(columns)}) VALUES ({placeholders}) "
-        f"ON CONFLICT(nces_id, school_year) DO UPDATE SET {update_clause}",
+        adapt_sql(
+            f"INSERT INTO enrollment_history ({','.join(columns)}) VALUES ({placeholders}) "
+            f"ON CONFLICT(nces_id, school_year) DO UPDATE SET {update_clause}"
+        ),
         values,
     )
     conn.commit()
