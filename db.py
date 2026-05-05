@@ -1039,7 +1039,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             coalition_project_id TEXT UNIQUE,  -- Coalition's own project identifier (if any)
             cdfi_project_id TEXT,              -- CDFI Fund project ID (when known)
-            project_name TEXT,
+            purpose_of_investment TEXT,        -- e.g., "Real Estate – Construction", "Business Financing"
             cde_name TEXT,
             address TEXT,
             city TEXT,
@@ -2351,6 +2351,171 @@ def get_fqhc_uds_summary() -> dict:
         result = row_to_dict(cur, row) or {}
     except Exception:
         logger.exception("get_fqhc_uds_summary failed")
+        result = {}
+    conn.close()
+    return result
+
+
+# ---------------------------------------------------------------------------
+# HRSA shortage-area designations (HPSA + MUA)
+# ---------------------------------------------------------------------------
+
+def _hpsa_status_filter(active_only: bool) -> tuple[str, list]:
+    """Build (where-clause, params) fragment to filter on active designations only."""
+    if active_only:
+        return " AND hpsa_status = ?", ["Designated"]
+    return "", []
+
+
+def get_hpsa_for_county(
+    state_county_fips: str,
+    discipline: str = None,
+    active_only: bool = True,
+) -> pd.DataFrame:
+    """Return HPSA component rows for a county (5-digit state+county FIPS).
+
+    discipline: 'PC' / 'MH' / 'DH'. None returns all three.
+    active_only: True (default) filters to status='Designated'.
+    """
+    where = "WHERE county_fips = ?"
+    params: list = [state_county_fips]
+    if discipline:
+        where += " AND discipline = ?"
+        params.append(discipline.upper())
+    extra, ex_params = _hpsa_status_filter(active_only)
+    where += extra
+    params.extend(ex_params)
+    try:
+        return _pd_read_sql(
+            f"SELECT * FROM hrsa_hpsa_designations {where} ORDER BY discipline, hpsa_score DESC NULLS LAST",
+            params,
+        )
+    except Exception:
+        logger.exception("get_hpsa_for_county failed county_fips=%s discipline=%s", state_county_fips, discipline)
+        return pd.DataFrame()
+
+
+def get_hpsa_for_facility(bhcmis_org_id: str, active_only: bool = True) -> pd.DataFrame:
+    """Return HPSA designations attached to an FQHC org (auto-HPSA facility designation)."""
+    extra, ex_params = _hpsa_status_filter(active_only)
+    try:
+        return _pd_read_sql(
+            f"SELECT * FROM hrsa_hpsa_designations WHERE bhcmis_org_id = ? {extra} ORDER BY discipline, hpsa_score DESC NULLS LAST",
+            [bhcmis_org_id, *ex_params],
+        )
+    except Exception:
+        logger.exception("get_hpsa_for_facility failed bhcmis_org_id=%s", bhcmis_org_id)
+        return pd.DataFrame()
+
+
+def get_mua_for_county(state_county_fips: str, active_only: bool = True) -> pd.DataFrame:
+    """Return MUA component rows for a county."""
+    where = "WHERE county_fips = ?"
+    params: list = [state_county_fips]
+    if active_only:
+        where += " AND mua_status = ?"
+        params.append("Designated")
+    try:
+        return _pd_read_sql(
+            f"SELECT * FROM hrsa_mua_designations {where} ORDER BY imu_score ASC NULLS LAST",
+            params,
+        )
+    except Exception:
+        logger.exception("get_mua_for_county failed county_fips=%s", state_county_fips)
+        return pd.DataFrame()
+
+
+def get_mua_for_tract(census_tract: str, active_only: bool = True) -> pd.DataFrame:
+    """Return MUA component rows for a census tract code (e.g., '9301.01')."""
+    where = "WHERE census_tract = ?"
+    params: list = [census_tract]
+    if active_only:
+        where += " AND mua_status = ?"
+        params.append("Designated")
+    try:
+        return _pd_read_sql(
+            f"SELECT * FROM hrsa_mua_designations {where} ORDER BY imu_score ASC NULLS LAST",
+            params,
+        )
+    except Exception:
+        logger.exception("get_mua_for_tract failed census_tract=%s", census_tract)
+        return pd.DataFrame()
+
+
+def get_shortage_summary_for_site(bhcmis_id: str) -> dict:
+    """Resolve site → org BHCMIS + county FIPS → HPSA + MUA flags + scores.
+
+    Returns counts per discipline plus the worst-shortage HPSA scores
+    covering the FQHC site. Used by the dashboard to badge each FQHC
+    detail page with its federal shortage-area context.
+    """
+    site = get_fqhc_by_id(bhcmis_id)
+    if not site:
+        return {}
+
+    # FQHC's own auto-HPSA designations (facility-level)
+    org_id = site.get("org_bhcmis_id")
+    facility_hpsa = get_hpsa_for_facility(org_id) if org_id else pd.DataFrame()
+
+    # Resolve county FIPS for the site (via census_tracts table)
+    tract_id = site.get("census_tract_id")
+    county_fips = None
+    if tract_id:
+        # 11-digit GEOID → first 5 digits are state+county
+        ct = str(tract_id).strip()
+        if len(ct) >= 5 and ct.isdigit():
+            county_fips = ct[:5]
+
+    geographic_hpsa = get_hpsa_for_county(county_fips) if county_fips else pd.DataFrame()
+    mua = get_mua_for_county(county_fips) if county_fips else pd.DataFrame()
+
+    def _max_score(df, discipline):
+        if df.empty:
+            return None
+        sub = df[df["discipline"] == discipline] if "discipline" in df.columns else df
+        if sub.empty: return None
+        v = sub["hpsa_score"].max()
+        return None if pd.isna(v) else float(v)
+
+    return {
+        "bhcmis_id":              bhcmis_id,
+        "county_fips":            county_fips,
+        "facility_hpsa_count":    len(facility_hpsa),
+        "geographic_hpsa_count":  len(geographic_hpsa),
+        "mua_designated_count":   len(mua),
+        "max_hpsa_score_pc":      _max_score(geographic_hpsa, "PC"),
+        "max_hpsa_score_mh":      _max_score(geographic_hpsa, "MH"),
+        "max_hpsa_score_dh":      _max_score(geographic_hpsa, "DH"),
+        "min_imu_score":          float(mua["imu_score"].min()) if not mua.empty and not pd.isna(mua["imu_score"].min()) else None,
+    }
+
+
+def get_shortage_summary() -> dict:
+    """Top-level coverage stats for the HPSA + MUA tables."""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT
+                COUNT(*)                                                AS hpsa_total,
+                COUNT(*) FILTER (WHERE hpsa_status = 'Designated')      AS hpsa_designated,
+                COUNT(DISTINCT hpsa_id)                                 AS hpsa_distinct_designations,
+                COUNT(DISTINCT discipline)                              AS hpsa_disciplines
+            FROM hrsa_hpsa_designations
+        """)
+        h = row_to_dict(cur, cur.fetchone()) or {}
+        cur.execute("""
+            SELECT
+                COUNT(*)                                                AS mua_total,
+                COUNT(*) FILTER (WHERE mua_status = 'Designated')       AS mua_designated,
+                COUNT(DISTINCT mua_id)                                  AS mua_distinct_designations,
+                COUNT(DISTINCT census_tract) FILTER (WHERE census_tract IS NOT NULL) AS mua_distinct_tracts
+            FROM hrsa_mua_designations
+        """)
+        m = row_to_dict(cur, cur.fetchone()) or {}
+        result = {**h, **m}
+    except Exception:
+        logger.exception("get_shortage_summary failed")
         result = {}
     conn.close()
     return result
@@ -4566,7 +4731,7 @@ def get_nmtc_coalition_projects(state=None, cde_name=None, investment_year=None,
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
     limit_clause = f"LIMIT {int(limit)}" if limit else ""
     query = f"""
-        SELECT coalition_project_id, cdfi_project_id, project_name,
+        SELECT coalition_project_id, cdfi_project_id, purpose_of_investment,
                cde_name, address, city, state, zip_code, census_tract_id,
                total_project_costs, nmtc_allocation_used,
                jobs_created, jobs_retained, project_type, investment_year,

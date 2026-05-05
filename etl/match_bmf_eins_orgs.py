@@ -7,8 +7,11 @@ the `ein` column on:
   - ece_centers          (name=provider_name, NTEE P*/B*)
   - headstart_programs   (name=grantee_name,  any NTEE — broad filter)
   - cdfi_directory       (name=cdfi_name,     any NTEE — banks/CUs won't match)
-  - nmtc_projects        (name=project_name,  any NTEE — low yield expected)
-  - nmtc_coalition_projects (name=project_name, any NTEE)
+  - nmtc_projects        (name=project_name,  any NTEE — currently 0 matches; project_name is NULL on all rows because the 2024 CDFI Fund release strips it. Recover by loading older release or extracting the NMTC Coalition PDF.)
+
+Not included: nmtc_coalition_projects has no real org name to match against
+(only purpose-of-investment categories), so EIN matching from this table
+would only yield false positives.
 
 Reuses match_score / find_best_match / load_bmf from fetch_bmf_eins.py.
 
@@ -61,12 +64,8 @@ TABLE_CONFIGS = {
         "zip_col":   "zip_code",
         "ntee":      "",
     },
-    "nmtc_coalition_projects": {
-        "name_col":  "project_name",
-        "state_col": "state",
-        "zip_col":   "zip_code",
-        "ntee":      "",
-    },
+    # nmtc_coalition_projects intentionally omitted — has no org name column,
+    # only purpose_of_investment (a category). See module docstring.
 }
 
 

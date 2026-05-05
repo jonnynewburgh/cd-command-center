@@ -96,6 +96,8 @@ The database (`cd_command_center.sqlite`) consolidates all data sources. Key tab
 - `federal_audit_programs` — per-ALN line items from Single Audits (1.2M+ rows); federal program detail, findings, amounts
 - `headstart_programs` — Head Start PIR program-level data (46K+ records, 2008-2025); enrollment, staffing, health, demographics
 - `fqhc_uds_reports` — HRSA UDS grantee-per-year (payer mix, encounters, FTEs, quality, financials); join via `fqhc.health_center_grant_number`
+- `hrsa_hpsa_designations` — HRSA Health Professional Shortage Areas (PC / MH / DH); component-level rows keyed on county FIPS + discipline
+- `hrsa_mua_designations` — HRSA Medically Underserved Areas / Populations; component-level rows keyed on county FIPS or census_tract
 
 Every facility table has `latitude`, `longitude`, and `census_tract_id` columns for geographic joins.
 
@@ -375,6 +377,14 @@ python etl/fetch_fac.py --state GA --year 2024             # single state test
 python etl/fetch_fac.py --state GA --years 2023 2024       # multiple years
 python etl/fetch_fac.py --all-states --year 2024           # all states (slow — rate limited)
 python etl/fetch_fac.py --state GA --year 2024 --dry-run   # preview without writing
+
+# Load HRSA HPSA + MUA shortage-area designations
+# Source xlsx are at data/raw/fqhcs/ (manual download from HRSA Data Warehouse Open Data):
+#   BCD_HPSA_FCT_DET_PC.xlsx / _MH.xlsx / _DH.xlsx  (HPSAs by discipline)
+#   MUA_DET.xlsx                                    (Medically Underserved Areas)
+python etl/load_hrsa_shortage_areas.py                        # all four files
+python etl/load_hrsa_shortage_areas.py --hpsa-pc              # one file only
+python etl/load_hrsa_shortage_areas.py --active-only          # skip Withdrawn rows
 
 # Load HRSA UDS grantee reports (payer mix, encounters, FTEs, quality, financials)
 # Source xlsx is Akamai-protected — download in a browser:
