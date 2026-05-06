@@ -110,7 +110,7 @@ def _ratio(numer: float, denom: float) -> Optional[float]:
 
 def extract_table4(row: Dict) -> Dict:
     """Patients, income tiers, payer mix, special populations."""
-    g = row.get  # shorthand
+    g = lambda k, _r=row: _r.get(k.lower()) if k.lower().startswith("t") else _r.get(k)  # case-insensitive UIID lookup
     total_patients = _num(g("T4_L6_Ca"))
     total_insured  = _num(g("T4_L12_Ca")) + _num(g("T4_L12_Cb"))
 
@@ -138,7 +138,7 @@ def extract_table5(row: Dict) -> Dict:
     Each visit-type total is the sum of clinic + virtual visits on the
     appropriate "Total <Service>" line.
     """
-    g = row.get
+    g = lambda k, _r=row: _r.get(k.lower()) if k.lower().startswith("t") else _r.get(k)
 
     medical_cb   = _num(g("T5_L15_Cb")) + _num(g("T5_L15_Cb2"))
     dental_cb    = _num(g("T5_L19_Cb")) + _num(g("T5_L19_Cb2"))
@@ -175,7 +175,7 @@ def extract_table5(row: Dict) -> Dict:
 
 def extract_table6b_clinical(row: Dict) -> Dict:
     """Quality of care % measures (precomputed by HRSA)."""
-    g = row.get
+    g = lambda k, _r=row: _r.get(k.lower()) if k.lower().startswith("t") else _r.get(k)
     return {
         "cervical_cancer_screening_pct":   _num(g("%ofPatientstestedPap")) or None,
         "breast_cancer_screening_pct":     _num(g("%ofPatientswithMammogram")) or None,
@@ -188,7 +188,7 @@ def extract_table6b_clinical(row: Dict) -> Dict:
 def extract_table7_clinical(row: Dict) -> Dict:
     """Diabetes A1c control + hypertension control. Race-stratified by row;
     we keep just the 'all races' (or first non-stratified) values per grantee."""
-    g = row.get
+    g = lambda k, _r=row: _r.get(k.lower()) if k.lower().startswith("t") else _r.get(k)
     return {
         "diabetes_a1c_poor_control_pct": _num(g("%ofPatientswithHbA1c>9%")) or None,
         "hypertension_control_pct":      _num(g("%ofPatientswithControlledBloodPressure")) or None,
@@ -197,14 +197,15 @@ def extract_table7_clinical(row: Dict) -> Dict:
 
 def extract_table8a(row: Dict) -> Dict:
     """Total accrued costs after facility/non-clinical allocation."""
+    g = lambda k, _r=row: _r.get(k.lower()) if k.lower().startswith("t") else _r.get(k)
     return {
-        "total_costs": int(_num(row.get("T8a_L17_Cc"))) or None,
+        "total_costs": int(_num(g("T8a_L17_Cc"))) or None,
     }
 
 
 def extract_table9d(row: Dict) -> Dict:
     """Patient service revenue collected (across all payers)."""
-    g = row.get
+    g = lambda k, _r=row: _r.get(k.lower()) if k.lower().startswith("t") else _r.get(k)
     return {
         "patient_service_revenue": int(_num(g("T9d_L14_Cb"))) or None,
         "self_pay_revenue":        int(_num(g("T9d_L13_Cb"))) or None,
@@ -213,7 +214,7 @@ def extract_table9d(row: Dict) -> Dict:
 
 def extract_table9e(row: Dict) -> Dict:
     """Federal/state/private grant revenue."""
-    g = row.get
+    g = lambda k, _r=row: _r.get(k.lower()) if k.lower().startswith("t") else _r.get(k)
     return {
         "bphc_grant_revenue":    int(_num(g("T9e_L1_Ca"))) or None,
         "other_federal_revenue": int(_num(g("T9e_L5_Ca"))) or None,
@@ -261,27 +262,49 @@ def _is_real_row(bhcmisid) -> bool:
     return bool(s) and s not in _DASH_BHCMISIDS
 
 
-def _strip_spaces_in_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """HRSA's pre-2022 workbooks use 'BHCMIS ID', 'Grant Number', 'T4 L8 Ca'.
-    Strip all whitespace from column names so the rest of the loader can use
-    a single canonical form (`BHCMISID`, `GrantNumber`, `T4_L8_Ca`).
+# 2020-vintage Table9E used verbose column names instead of UIID codes.
+# Map them to the canonical UIIDs (lowercase) so the rest of the loader is
+# format-agnostic. Only the columns the extractors actually read are listed
+# — the rest fall through to whitespace-stripping and land in raw_metrics_json.
+_LEGACY_VERBOSE_TO_UIID = {
+    "TotalBPHCGrants(SumofLines1g+1k+1q)-Amount(a)":              "t9e_l1_ca",
+    "TotalOtherFederalGrants(SumofLines2through3b)-Amount(a)":    "t9e_l5_ca",
+    "StateGovernmentGrantsandContracts-Amount(a)":                 "t9e_l6_ca",
+    "State/LocalIndigentCarePrograms-Amount(a)":                   "t9e_l6a_ca",
+    "LocalGovernmentGrantsandContracts-Amount(a)":                 "t9e_l7_ca",
+    "Foundation/PrivateGrantsandContracts-Amount(a)":              "t9e_l8_ca",
+}
 
-    Underscores are not in pre-2022 names, so we also normalize spaces around
-    common patterns: 'T4 L8 Ca' → 'T4_L8_Ca'. The simplest reliable transform
-    is to drop spaces entirely (yielding `T4L8Ca`), but UIID extractors
-    reference underscored forms, so we standardize on underscores.
+
+def _normalize_uid_col(c: str) -> str:
+    """Normalize a UIID-style column to a canonical form for matching.
+
+    HRSA's UIID conventions drift across reporting years:
+    - Pre-2022: spaces inside codes ('T4 L8 Ca'), uppercase table letters ('T9D', 'T9E').
+    - 2022-2023: underscores ('T4_L8_Ca'), uppercase table letters ('T9D_L14_Cb').
+    - 2024: underscores, lowercase table letters ('T9d_L14_Cb').
+
+    Canonical form (used everywhere in the loader): underscores + lowercase.
+    Identity columns (BHCMISID, GrantNumber, etc.) lose all whitespace.
     """
     import re
+    s = str(c)
+    if re.match(r"^T\d", s):
+        return re.sub(r"\s+", "_", s.strip()).lower()
+    return re.sub(r"\s+", "", s)
+
+
+def _strip_spaces_in_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize column names to the canonical form (see _normalize_uid_col).
+    Applied to every sheet before extraction so MEASURE_MAP can use a single
+    naming convention regardless of source file vintage. Verbose-named columns
+    from 2020-vintage Table9E are mapped to UIID codes via _LEGACY_VERBOSE_TO_UIID.
+    """
+    df = df.copy()
     new_cols = []
     for c in df.columns:
-        s = str(c)
-        # If the column starts with 'T<digit>' and contains spaces, treat
-        # spaces as underscores (UIID code form). Otherwise strip spaces.
-        if re.match(r"^T\d", s):
-            new_cols.append(re.sub(r"\s+", "_", s.strip()))
-        else:
-            new_cols.append(re.sub(r"\s+", "", s))
-    df = df.copy()
+        n = _normalize_uid_col(c)
+        new_cols.append(_LEGACY_VERBOSE_TO_UIID.get(n, n))
     df.columns = new_cols
     return df
 
