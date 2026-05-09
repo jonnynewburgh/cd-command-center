@@ -3,21 +3,18 @@ Load Georgia charter authorizer entities and school links into:
   - authorizers
   - school_authorizer
 
-This is the GA pilot loader for the authorizer registry model. It expects
-two CSVs:
+This GA pilot loader expects two CSVs:
   1) authorizers file (one row per authorizer entity)
   2) links file (one row per school-year link)
 
-Usage:
-    python etl/load_ga_authorizers.py \
-      --authorizers-file data/raw/charter\ accountability/GA/ga_authorizers.csv \
-      --links-file data/raw/charter\ accountability/GA/ga_school_authorizer_links.csv
-
-    python etl/load_ga_authorizers.py --authorizers-file ... --links-file ... --dry-run
+The links file should include `nces_school_id`, but if that is missing
+the loader can resolve IDs from `school_name` using GA charter rows in
+`schools` plus `scsc_cpf` mappings.
 """
 
 import argparse
 import os
+import re
 import sys
 from typing import Optional
 
@@ -28,7 +25,7 @@ import db
 
 
 REQUIRED_AUTHORIZER_COLS = {"authorizer_name"}
-REQUIRED_LINK_COLS = {"nces_school_id", "authorizer_name", "school_year"}
+REQUIRED_LINK_COLS = {"authorizer_name", "school_year"}
 
 
 def _clean(v) -> Optional[str]:
@@ -48,6 +45,25 @@ def _validate_columns(df: pd.DataFrame, required: set[str], label: str):
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"{label} missing required columns: {sorted(missing)}")
+
+
+def _normalize_name(name: str) -> str:
+    s = name.lower().strip()
+    s = re.sub(r"[^\w\s]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    for suffix in (
+        " charter school",
+        " charter academy",
+        " charter",
+        " academy",
+        " school",
+        " inc",
+        " llc",
+        " corporation",
+    ):
+        if s.endswith(suffix):
+            s = s[: -len(suffix)].strip()
+    return s
 
 
 def load_authorizers(authorizers_df: pd.DataFrame, dry_run: bool) -> int:
@@ -85,11 +101,63 @@ def _authorizer_name_to_id() -> dict[str, int]:
     return lookup
 
 
-def load_links(links_df: pd.DataFrame, dry_run: bool) -> tuple[int, int]:
+def _ga_school_name_to_nces() -> dict[str, str]:
+    """Normalized GA charter school_name -> nces_id from schools + scsc_cpf."""
+    lookup = {}
+    conn = db.get_connection()
+    try:
+        schools_df = db._pd_read_sql(
+            """
+            SELECT nces_id, school_name
+            FROM schools
+            WHERE state = 'GA' AND is_charter = 1 AND nces_id IS NOT NULL
+            """,
+            [],
+        )
+        for _, row in schools_df.iterrows():
+            nm = _clean(row.get("school_name"))
+            nces = _clean(row.get("nces_id"))
+            if nm and nces:
+                lookup[_normalize_name(nm)] = nces
+
+        scsc_df = db._pd_read_sql(
+            """
+            SELECT nces_id, school_name
+            FROM scsc_cpf
+            WHERE nces_id IS NOT NULL
+            """,
+            [],
+        )
+        for _, row in scsc_df.iterrows():
+            nm = _clean(row.get("school_name"))
+            nces = _clean(row.get("nces_id"))
+            if nm and nces and _normalize_name(nm) not in lookup:
+                lookup[_normalize_name(nm)] = nces
+    finally:
+        conn.close()
+    return lookup
+
+
+def load_links(links_df: pd.DataFrame, dry_run: bool, authorizers_df: pd.DataFrame) -> tuple[int, int, int]:
     loaded, skipped = 0, 0
+    resolved_from_name = 0
     lookup = _authorizer_name_to_id()
+    # In dry-run, allow mapping authorizer names that are not yet in DB.
+    if dry_run:
+        for idx, row in authorizers_df.iterrows():
+            nm = _clean(row.get("authorizer_name"))
+            if nm:
+                lookup.setdefault(nm.lower(), -(idx + 1))
+    school_lookup = _ga_school_name_to_nces()
+
     for _, row in links_df.iterrows():
         nces_school_id = _clean(row.get("nces_school_id"))
+        if not nces_school_id:
+            school_name = _clean(row.get("school_name"))
+            if school_name:
+                nces_school_id = school_lookup.get(_normalize_name(school_name))
+                if nces_school_id:
+                    resolved_from_name += 1
         authorizer_name = (_clean(row.get("authorizer_name")) or "").lower()
         school_year = _clean(row.get("school_year"))
         if not nces_school_id or not authorizer_name or not school_year:
@@ -112,7 +180,7 @@ def load_links(links_df: pd.DataFrame, dry_run: bool) -> tuple[int, int]:
         else:
             db.upsert_school_authorizer(rec)
         loaded += 1
-    return loaded, skipped
+    return loaded, skipped, resolved_from_name
 
 
 def print_validation_summary():
@@ -177,14 +245,19 @@ def main():
     links_df = _read_csv(args.links_file)
     _validate_columns(authorizers_df, REQUIRED_AUTHORIZER_COLS, "authorizers file")
     _validate_columns(links_df, REQUIRED_LINK_COLS, "links file")
+    if "nces_school_id" not in links_df.columns and "school_name" not in links_df.columns:
+        raise ValueError(
+            "links file must include either 'nces_school_id' or 'school_name' for NCES matching"
+        )
 
     db.init_db()
 
     n_authorizers = load_authorizers(authorizers_df, args.dry_run)
-    n_links, n_skipped = load_links(links_df, args.dry_run)
+    n_links, n_skipped, n_resolved = load_links(links_df, args.dry_run, authorizers_df)
     print(f"\nProcessed authorizers: {n_authorizers}")
     print(f"Processed school-authorizer links: {n_links}")
     print(f"Skipped links: {n_skipped}")
+    print(f"Resolved NCES IDs from school_name: {n_resolved}")
 
     if not args.dry_run:
         print_validation_summary()

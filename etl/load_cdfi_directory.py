@@ -33,6 +33,7 @@ Usage:
 import argparse
 import sys
 import os
+from datetime import datetime, timezone
 
 import pandas as pd
 import requests
@@ -46,45 +47,48 @@ RAW_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 
 def download_cdfi_directory(dest_dir: str = RAW_DIR) -> str:
     """
-    Download the CDFI Fund certified institution list from data.gov (CKAN API).
-    Returns local file path.
+    Download the CDFI Fund certified institution list directly from cdfifund.gov.
+
+    The file is linked from the certification page as a /media/<id>/download
+    URL. We scrape that page first so the script keeps working when the CDFI
+    Fund publishes a new quarterly list (the media ID changes each release).
+    Falls back to a known-good URL if scraping fails.
     """
     os.makedirs(dest_dir, exist_ok=True)
 
-    PACKAGE_IDS = [
-        "certified-community-development-financial-institutions-cdfis",
-        "cdfi-certification",
-        "cdfi-certified-institutions",
-        "community-development-financial-institutions-cdfi-certification",
-    ]
+    CERT_PAGE = "https://www.cdfifund.gov/programs-training/certification/cdfi"
+    # Known-good URL as of the 1/13/2026 release; used as fallback only.
+    FALLBACK_URL = "https://www.cdfifund.gov/media/8018336/download?inline"
+    HEADERS = {"User-Agent": "Mozilla/5.0 (cd-command-center ETL)"}
 
     resource_url = None
-    for pkg_id in PACKAGE_IDS:
-        try:
-            r = requests.get(
-                f"https://catalog.data.gov/api/3/action/package_show?id={pkg_id}",
-                timeout=20,
-            )
-            if r.status_code == 200 and r.json().get("success"):
-                resources = r.json()["result"]["resources"]
-                for res in resources:
-                    fmt = (res.get("format") or "").lower()
-                    if fmt in ("csv", "xlsx", "xls"):
-                        resource_url = res["url"]
-                        break
-                if resource_url:
+
+    # Try to discover the current download link from the certification page.
+    try:
+        page = requests.get(CERT_PAGE, headers=HEADERS, timeout=30)
+        if page.status_code == 200:
+            import re
+            for href in re.findall(r'href="(/media/\d+/download[^"]*)"', page.text):
+                full = "https://www.cdfifund.gov" + href.replace("&amp;", "&")
+                try:
+                    head = requests.head(full, headers=HEADERS, timeout=20, allow_redirects=True)
+                except requests.RequestException:
+                    continue
+                disp = head.headers.get("Content-Disposition", "")
+                ctype = head.headers.get("Content-Type", "")
+                if "spreadsheet" in ctype or "Cert_List" in disp or disp.lower().endswith(".xlsx"):
+                    resource_url = full
+                    print(f"  Resolved cert list link from certification page: {full}")
+                    print(f"    -> {disp}")
                     break
-        except requests.RequestException:
-            continue
+    except requests.RequestException as e:
+        print(f"  Note: could not scrape certification page ({e}); using fallback URL.")
 
     if not resource_url:
-        raise RuntimeError(
-            "Could not find CDFI certified institution list on data.gov.\n"
-            "Download manually from: https://www.cdfifund.gov/research-and-resources/data-resources\n"
-            "Then run: python etl/load_cdfi_directory.py --file <downloaded_file>"
-        )
+        resource_url = FALLBACK_URL
+        print(f"  Using fallback URL: {resource_url}")
 
-    ext = resource_url.split(".")[-1].split("?")[0].lower()
+    ext = "xlsx"  # CDFI Fund publishes the list as .xlsx
     dest_path = os.path.join(dest_dir, f"cdfi_certified_list.{ext}")
 
     if os.path.exists(dest_path):
@@ -92,7 +96,7 @@ def download_cdfi_directory(dest_dir: str = RAW_DIR) -> str:
         return dest_path
 
     print(f"  Downloading CDFI directory: {resource_url}")
-    r = requests.get(resource_url, stream=True, timeout=120)
+    r = requests.get(resource_url, stream=True, timeout=120, headers=HEADERS)
     r.raise_for_status()
     with open(dest_path, "wb") as f:
         for chunk in r.iter_content(chunk_size=512 * 1024):
@@ -106,12 +110,12 @@ COLUMN_CANDIDATES = {
     "cdfi_name":          ["Organization Name", "Org Name", "CDFI Name", "Name", "ORGANIZATION_NAME"],
     "city":               ["City", "CITY", "Hq City", "HQ_CITY"],
     "state":              ["State", "STATE", "Hq State", "HQ_STATE", "State Abbrev"],
-    "cdfi_type":          ["Institution Type", "Type", "INSTITUTION_TYPE", "CDFI Type", "Organization Type"],
+    "cdfi_type":          ["Financial Institution Type", "Institution Type", "Type", "INSTITUTION_TYPE", "CDFI Type", "Organization Type"],
     "total_assets":       ["Total Assets", "TOTAL_ASSETS", "Assets", "Asset Size"],
     "primary_markets":    ["Service Area", "Primary Market", "Service Areas", "Geographic Service Area", "PRIMARY_MARKET"],
     "target_populations": ["Target Population", "Target Populations", "TARGET_POPULATION", "Targeted Population"],
     "certification_date": ["Certification Date", "CERTIFICATION_DATE", "Cert Date", "Date Certified"],
-    "website":            ["Website", "WEBSITE", "Web", "URL"],
+    "website":            ["Organization Website", "Website", "WEBSITE", "Web", "URL"],
 }
 
 
@@ -269,6 +273,7 @@ def main():
             "target_populations": str(row.get(col_mapping["target_populations"]) or "").strip() or None if col_mapping.get("target_populations") else None,
             "certification_date": str(row.get(col_mapping["certification_date"]) or "").strip() or None if col_mapping.get("certification_date") else None,
             "website":            str(row.get(col_mapping["website"]) or "").strip() or None if col_mapping.get("website") else None,
+            "updated_at":         datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
 
         # Remove None values so upsert doesn't overwrite with NULL unnecessarily

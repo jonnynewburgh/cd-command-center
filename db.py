@@ -3184,6 +3184,7 @@ def upsert_990(record: dict):
     conn.close()
 
 
+@_cached(ttl=300)
 def get_990_by_ein(ein: str) -> dict:
     """Look up a single 990 record by EIN. Returns a dict or empty dict."""
     conn = get_connection()
