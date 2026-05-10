@@ -2,11 +2,19 @@
 
 ## What This Project Is
 
-A Streamlit-based dashboard for community development finance deal origination. It consolidates data on charter schools, health centers (FQHCs), early care and education (ECE) centers, NMTC projects, census demographics, and 990/philanthropy data into a single geography-driven tool.
+The backend + ETL for a community-development-finance deal-origination
+platform. A FastAPI service exposes ~30 federal/state data sources
+(charter schools, FQHCs, ECE centers, NMTC projects, census demographics,
+990s, CRA, HMDA, FRED rates, Single Audits, Head Start, etc.) consolidated
+into a single SQLite/Postgres database keyed by census tract. The Next.js
+frontend lives in a sibling repo (`cd-command-center-dashboard`).
 
 The core use case: a deal originator can look up a specific location (address, census tract, county) and see every relevant facility, demographic indicator, and financing opportunity nearby — or filter across geographies to find areas that meet specific investment criteria.
 
 This is NOT a reporting tool. It's a working tool for finding, evaluating, and comparing community facility investment opportunities.
+
+The original Streamlit frontend was retired; it lives in `archive/app.py`
+for reference only and is not part of the deployed system.
 
 ## Audience
 
@@ -20,7 +28,7 @@ This is NOT a reporting tool. It's a working tool for finding, evaluating, and c
 - **Database:** SQLite for development; designed for migration to PostgreSQL for production multi-user deployment
 - **Data access:** All database queries go through a shared `db.py` module so the SQLite→PostgreSQL migration is a single-file change
 - **Modeling:** SCSC CPF accountability scores for GA charters
-- **Deployment (future):** Render or similar
+- **Deployment:** Render (see `render.yaml`); FastAPI + uvicorn, with `alembic upgrade head` on build. SQLite on a 1 GB persistent disk by default; set `DATABASE_URL` to a Postgres URL in the Render dashboard for prod.
 
 ## Project Structure
 
@@ -181,7 +189,7 @@ These features apply across all data sources once built:
 - **Don't build features for future phases.** Each phase should work standalone.
 - **Census tract is the geographic join key.** Every facility must resolve to a census tract.
 - **The developer codes in Python at a non-expert level.** Keep code straightforward. Prefer clarity over cleverness. Use comments to explain non-obvious logic.
-- **No frontend frameworks.** This is Streamlit only. Don't introduce React, Vue, or custom JS.
+- **No frontend code in this repo.** UI work belongs in the sibling `cd-command-center-dashboard` (Next.js) repo. This repo is API + ETL only.
 - **Raw data files go in `data/raw/` and are gitignored.** Only the SQLite database is committed (or, if too large, the ETL scripts that build it).
 - **When suggesting changes, explain WHY.** The developer is learning and wants to understand the reasoning.
 
@@ -195,8 +203,8 @@ uvicorn api.main:app --reload --port 8000
 # http://localhost:8000/docs   — Swagger UI
 # http://localhost:8000/redoc  — ReDoc
 
-# Run the app locally (archived — Streamlit frontend removed)
-# streamlit run app.py
+# Streamlit frontend is retired (see archive/app.py). The Next.js dashboard
+# lives in the sibling cd-command-center-dashboard repo and consumes this API.
 
 # Fetch school data (all public schools, all states)
 python etl/fetch_nces_schools.py

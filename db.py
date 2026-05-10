@@ -2751,6 +2751,23 @@ def upsert_charter_school(record: dict):
     upsert_school(record)
 
 
+def update_school_fields(nces_id: str, fields: dict):
+    """Update specific columns on an existing schools row (no insert).
+
+    Useful when an ETL only knows a subset of columns — upsert_school would
+    require populating NOT NULL columns even on the no-op insert path.
+    """
+    if not fields:
+        return
+    conn = get_connection()
+    cur = conn.cursor()
+    set_clause = ",".join(f"{col}=?" for col in fields)
+    sql = f"UPDATE schools SET {set_clause}, updated_at=CURRENT_TIMESTAMP WHERE nces_id=?"
+    cur.execute(adapt_sql(sql), [*fields.values(), nces_id])
+    conn.commit()
+    conn.close()
+
+
 def upsert_nmtc_project(record: dict):
     """Insert or update an NMTC project record (keyed on cdfi_project_id)."""
     conn = get_connection()

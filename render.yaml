@@ -2,13 +2,25 @@ services:
   - type: web
     name: cd-command-center
     runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0
+    buildCommand: pip install -r requirements.txt && alembic upgrade head
+    startCommand: uvicorn api.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: DATABASE_URL
         value: /data/cd_command_center.sqlite
       - key: PYTHON_VERSION
         value: "3.11"
+      - key: FRED_API_KEY
+        sync: false
+      - key: CENSUS_API_KEY
+        sync: false
+      - key: BLS_API_KEY
+        sync: false
+      - key: FAC_API_KEY
+        sync: false
+      - key: HSES_USERNAME
+        sync: false
+      - key: HSES_PASSWORD
+        sync: false
     disk:
       name: db-storage
       mountPath: /data

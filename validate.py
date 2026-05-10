@@ -363,6 +363,138 @@ def check_lea():
     check_null_rate("lea_accountability", "state", max_pct=0.01)
     check_foreign_key("lea_accountability", "lea_id", "schools", "lea_id")
 
+def check_market_rates():
+    section("market_rates (FRED)")
+    n = check_row_count("market_rates", min_rows=1)
+    if n == 0:
+        info("market_rates: empty — set FRED_API_KEY and run etl/fetch_fred_rates.py")
+        return
+    check_null_rate("market_rates", "series_id", max_pct=0.0)
+    check_null_rate("market_rates", "rate_date", max_pct=0.0)
+    check_value_range("market_rates", "rate_value", min_val=-5.0, max_val=30.0)
+    # Should have at least the core series the dashboard depends on
+    core = ["SOFR", "DGS10", "DGS5", "DGS30", "FEDFUNDS"]
+    placeholders = ",".join("?" for _ in core)
+    found = _scalar(
+        f"SELECT COUNT(DISTINCT series_id) FROM market_rates WHERE series_id IN ({placeholders})",
+        core,
+    )
+    if found and found >= 3:
+        ok(f"market_rates: {found}/{len(core)} core FRED series present")
+    else:
+        warn(f"market_rates: only {found or 0}/{len(core)} core FRED series present")
+
+
+def check_cra():
+    section("cra_institutions")
+    n_inst = check_row_count("cra_institutions", min_rows=1000)
+    if n_inst:
+        check_null_rate("cra_institutions", "respondent_id", max_pct=0.0)
+        check_null_rate("cra_institutions", "report_year", max_pct=0.0)
+        check_null_rate("cra_institutions", "state", max_pct=0.05)
+
+    section("cra_assessment_areas")
+    n_aa = check_row_count("cra_assessment_areas", min_rows=1000)
+    if n_aa:
+        check_null_rate("cra_assessment_areas", "respondent_id", max_pct=0.0)
+        # Every assessment area should resolve to a known institution-year
+        # but the join is on (respondent_id, report_year) so use a custom check.
+        orphans = _scalar("""
+            SELECT COUNT(*) FROM cra_assessment_areas a
+            LEFT JOIN cra_institutions i
+              ON a.respondent_id = i.respondent_id AND a.report_year = i.report_year
+            WHERE i.respondent_id IS NULL
+        """)
+        if orphans:
+            warn(f"cra_assessment_areas: {orphans:,} rows with no matching cra_institutions row")
+        else:
+            ok("cra_assessment_areas: every row joins to cra_institutions")
+
+    section("cra_sb_discl")
+    n_d = check_row_count("cra_sb_discl", min_rows=10000)
+    if n_d:
+        check_null_rate("cra_sb_discl", "year", max_pct=0.0)
+        check_null_rate("cra_sb_discl", "respondent_id", max_pct=0.0)
+        # census_tract_id is derived; some FFIEC rows lack a tract assignment
+        check_null_rate("cra_sb_discl", "census_tract_id", max_pct=0.10)
+        check_value_range("cra_sb_discl", "amt_total", min_val=0)
+
+    section("cra_sb_aggr")
+    n_a = check_row_count("cra_sb_aggr", min_rows=10000)
+    if n_a:
+        check_null_rate("cra_sb_aggr", "year", max_pct=0.0)
+        check_null_rate("cra_sb_aggr", "census_tract_id", max_pct=0.10)
+        check_value_range("cra_sb_aggr", "amt_orig", min_val=0)
+
+
+def check_hmda():
+    section("hmda_activity")
+    n = check_row_count("hmda_activity", min_rows=1000)
+    if n == 0:
+        info("hmda_activity: empty — run etl/fetch_hmda.py")
+        return
+    check_null_rate("hmda_activity", "census_tract_id", max_pct=0.0)
+    check_null_rate("hmda_activity", "report_year", max_pct=0.0)
+    check_census_tract_format("hmda_activity")
+    check_value_range("hmda_activity", "denial_rate", min_val=0.0, max_val=1.0)
+    check_value_range("hmda_activity", "origination_rate", min_val=0.0, max_val=1.0)
+    check_value_range("hmda_activity", "total_applications", min_val=0)
+    check_value_range("hmda_activity", "total_originations", min_val=0)
+    # Tracts in HMDA should mostly resolve to our census_tracts table.
+    # Some won't (vintage drift, territories) — flag only large mismatches.
+    orphans = _scalar("""
+        SELECT COUNT(*) FROM hmda_activity h
+        LEFT JOIN census_tracts ct ON h.census_tract_id = ct.census_tract_id
+        WHERE ct.census_tract_id IS NULL
+    """)
+    if orphans > n * 0.05:
+        warn(f"hmda_activity: {orphans:,} rows have no matching census tract (>5%)")
+    else:
+        ok(f"hmda_activity.census_tract_id: {orphans:,} unmatched (within 5%)")
+
+
+def check_state_programs():
+    section("state_programs")
+    n = check_row_count("state_programs", min_rows=10)
+    if n == 0:
+        info("state_programs: empty — load data/raw/state_programs_seed.csv via etl/load_state_programs.py")
+        return
+    check_null_rate("state_programs", "state", max_pct=0.0)
+    check_null_rate("state_programs", "program_name", max_pct=0.0)
+    check_value_range("state_programs", "max_credit_pct", min_val=0.0, max_val=100.0)
+    check_value_range("state_programs", "max_amount", min_val=0)
+    # Number of distinct states with at least one program
+    states = _scalar("SELECT COUNT(DISTINCT state) FROM state_programs")
+    ok(f"state_programs: {states} distinct states represented")
+
+
+def check_scsc():
+    section("scsc_cpf")
+    n = check_row_count("scsc_cpf", min_rows=10)
+    if n == 0:
+        info("scsc_cpf: empty — clone charters repo or set SCSC_CPF_FILE, then run etl/load_scsc_cpf.py")
+        return
+    check_null_rate("scsc_cpf", "school_name", max_pct=0.0)
+    check_null_rate("scsc_cpf", "school_year", max_pct=0.0)
+    check_value_range("scsc_cpf", "operations_score", min_val=0.0, max_val=100.0)
+    # nces_id matching is best-effort fuzzy — info-only when unmatched
+    unmatched = _scalar("SELECT COUNT(*) FROM scsc_cpf WHERE nces_id IS NULL")
+    if unmatched:
+        info(f"scsc_cpf.nces_id: {unmatched:,} rows unmatched to schools (fuzzy match below threshold)")
+    else:
+        ok("scsc_cpf.nces_id: all rows matched to schools")
+    # Designations should be in the known CPF scale
+    bad_desig = _scalar("""
+        SELECT COUNT(*) FROM scsc_cpf
+        WHERE academic_designation IS NOT NULL
+          AND academic_designation NOT IN ('Exceeds', 'Meets', 'Approaches', 'Does Not Meet')
+    """)
+    if bad_desig:
+        warn(f"scsc_cpf.academic_designation: {bad_desig:,} rows with unexpected value")
+    else:
+        ok("scsc_cpf.academic_designation: all values in expected scale")
+
+
 def check_data_loads():
     section("data_loads (pipeline run history)")
     n = check_row_count("data_loads", min_rows=1)
@@ -398,6 +530,11 @@ TABLE_CHECKS = {
     "nmtc":      check_nmtc,
     "990":       check_990,
     "lea":       check_lea,
+    "rates":     check_market_rates,
+    "cra":       check_cra,
+    "hmda":      check_hmda,
+    "state_programs": check_state_programs,
+    "scsc":      check_scsc,
     "loads":     check_data_loads,
 }
 

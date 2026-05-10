@@ -355,6 +355,11 @@ def main():
         action="store_true",
         help="Keep running even if a stage fails.",
     )
+    parser.add_argument(
+        "--skip-validate",
+        action="store_true",
+        help="Skip the validate.py data-quality run that follows the pipeline.",
+    )
     args = parser.parse_args()
 
     stages = build_stages(args)
@@ -422,6 +427,21 @@ def main():
         print("Next: run manual stages if needed:")
         for name, hint in MANUAL_STAGES.items():
             print(f"  {hint}")
+
+    # Run validate.py against the resulting DB so data-quality issues surface
+    # in the same log line as the pipeline. Only runs if at least one stage
+    # succeeded (no point validating an empty DB on a dry run).
+    if success and not args.skip_validate and not args.dry_run:
+        print(f"\n{'='*60}")
+        print("RUNNING DATA VALIDATION (validate.py)")
+        print(f"{'='*60}")
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        rc = subprocess.call(
+            [sys.executable, os.path.join(repo_root, "validate.py")],
+            cwd=repo_root,
+        )
+        if rc != 0:
+            print(f"\n[WARN] validate.py exited with code {rc} — review issues above.")
 
     if failed:
         sys.exit(1)
