@@ -47,7 +47,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Initialize database schema
-        run: python -c "import db; db.init_db(); print('Schema initialized.')"
+        run: alembic upgrade head
 
       # ---------------------------------------------------------------------------
       # Run pipelines — census first (everything else joins to it)
