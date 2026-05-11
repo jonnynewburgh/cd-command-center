@@ -333,8 +333,6 @@ def map_record(api_row: dict, year: int, demographics: dict = None) -> dict:
         "school_status": decode_status(api_row.get("school_status")),
         "year_opened": None,
         "year_closed": None,
-        "survival_score": None,
-        "survival_risk_tier": None,
         "data_year": year,
     }
 
