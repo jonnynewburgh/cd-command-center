@@ -19,9 +19,8 @@ logger = logging.getLogger(__name__)
 # DATABASE_URL controls which backend is used:
 #   - Not set (default): SQLite at data/cd_command_center.sqlite
 #   - postgres://...    : PostgreSQL via psycopg2 (production / GitHub Actions)
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    os.path.join(os.path.dirname(__file__), "data", "cd_command_center.sqlite"),
+DATABASE_URL = os.environ.get("DATABASE_URL") or os.path.join(
+    os.path.dirname(__file__), "data", "cd_command_center.sqlite"
 )
 
 # True when DATABASE_URL is a Postgres connection string
