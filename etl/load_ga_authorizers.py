@@ -8,24 +8,27 @@ This GA pilot loader expects two CSVs:
   2) links file (one row per school-year link)
 
 The links file should include `nces_school_id`, but if that is missing
-the loader can resolve IDs from `school_name` using GA charter rows in
-`schools` plus `scsc_cpf` mappings.
+the loader resolves IDs from `school_name` using GA charter rows in
+`schools` plus `scsc_cpf` mappings, with the same exact → normalized →
+fuzzy fallback chain that etl/build_ga_authorizer_inputs.py uses.
 """
 
 import argparse
 import os
 import re
 import sys
+from difflib import SequenceMatcher
 from typing import Optional
 
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import db
+import db  # noqa: E402
 
 
 REQUIRED_AUTHORIZER_COLS = {"authorizer_name"}
 REQUIRED_LINK_COLS = {"authorizer_name", "school_year"}
+DEFAULT_MATCH_THRESHOLD = 0.82
 
 
 def _clean(v) -> Optional[str]:
@@ -48,6 +51,7 @@ def _validate_columns(df: pd.DataFrame, required: set[str], label: str):
 
 
 def _normalize_name(name: str) -> str:
+    """Kept aligned with etl/build_ga_authorizer_inputs.py — change both."""
     s = name.lower().strip()
     s = re.sub(r"[^\w\s]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
@@ -92,7 +96,7 @@ def load_authorizers(authorizers_df: pd.DataFrame, dry_run: bool) -> int:
 
 
 def _authorizer_name_to_id() -> dict[str, int]:
-    lookup = {}
+    lookup: dict[str, int] = {}
     df = db.get_authorizers(states=["GA"], active_only=False)
     for _, row in df.iterrows():
         name = str(row.get("name", "")).strip().lower()
@@ -101,73 +105,113 @@ def _authorizer_name_to_id() -> dict[str, int]:
     return lookup
 
 
-def _ga_school_name_to_nces() -> dict[str, str]:
-    """Normalized GA charter school_name -> nces_id from schools + scsc_cpf."""
-    lookup = {}
-    conn = db.get_connection()
-    try:
-        schools_df = db._pd_read_sql(
-            """
-            SELECT nces_id, school_name
-            FROM schools
-            WHERE state = 'GA' AND is_charter = 1 AND nces_id IS NOT NULL
-            """,
-            [],
-        )
-        for _, row in schools_df.iterrows():
-            nm = _clean(row.get("school_name"))
-            nces = _clean(row.get("nces_id"))
-            if nm and nces:
-                lookup[_normalize_name(nm)] = nces
+def _build_ga_name_index() -> dict[str, str]:
+    """Normalized GA charter school_name -> nces_id from schools + scsc_cpf.
 
-        scsc_df = db._pd_read_sql(
-            """
-            SELECT nces_id, school_name
-            FROM scsc_cpf
-            WHERE nces_id IS NOT NULL
-            """,
-            [],
-        )
-        for _, row in scsc_df.iterrows():
-            nm = _clean(row.get("school_name"))
-            nces = _clean(row.get("nces_id"))
-            if nm and nces and _normalize_name(nm) not in lookup:
-                lookup[_normalize_name(nm)] = nces
-    finally:
-        conn.close()
+    schools is the authoritative source; scsc_cpf fills gaps (it carries names
+    SCSC reports on that may not have made it into the schools roster yet).
+    """
+    lookup: dict[str, str] = {}
+    schools_df = db._pd_read_sql(
+        """
+        SELECT nces_id, school_name
+        FROM schools
+        WHERE state = 'GA' AND is_charter = 1 AND nces_id IS NOT NULL
+        """
+    )
+    for _, row in schools_df.iterrows():
+        nm = _clean(row.get("school_name"))
+        nces = _clean(row.get("nces_id"))
+        if nm and nces:
+            lookup.setdefault(_normalize_name(nm), nces)
+
+    scsc_df = db._pd_read_sql(
+        """
+        SELECT nces_id, school_name
+        FROM scsc_cpf
+        WHERE nces_id IS NOT NULL
+        """
+    )
+    for _, row in scsc_df.iterrows():
+        nm = _clean(row.get("school_name"))
+        nces = _clean(row.get("nces_id"))
+        if nm and nces:
+            lookup.setdefault(_normalize_name(nm), nces)
     return lookup
 
 
-def load_links(links_df: pd.DataFrame, dry_run: bool, authorizers_df: pd.DataFrame) -> tuple[int, int, int]:
-    loaded, skipped = 0, 0
-    resolved_from_name = 0
-    lookup = _authorizer_name_to_id()
-    # In dry-run, allow mapping authorizer names that are not yet in DB.
+def _resolve_nces(name: str, norm_map: dict, choices: list, threshold: float):
+    """Return (nces_id, method). method in {'norm', 'fuzzy', 'unmatched'}."""
+    if not name:
+        return None, "unmatched"
+    norm = _normalize_name(name)
+    if norm in norm_map:
+        return norm_map[norm], "norm"
+    best_id, best_score = None, 0.0
+    for choice_norm, choice_id in choices:
+        score = SequenceMatcher(None, norm, choice_norm).ratio()
+        if score > best_score:
+            best_id, best_score = choice_id, score
+    if best_score >= threshold:
+        return best_id, "fuzzy"
+    return None, "unmatched"
+
+
+def load_links(
+    links_df: pd.DataFrame,
+    dry_run: bool,
+    authorizers_df: pd.DataFrame,
+    threshold: float,
+) -> dict:
+    auth_lookup = _authorizer_name_to_id()
+    # In dry-run, let unknown authorizer names from the CSV resolve so we can
+    # preview without first upserting the authorizers.
     if dry_run:
         for idx, row in authorizers_df.iterrows():
             nm = _clean(row.get("authorizer_name"))
             if nm:
-                lookup.setdefault(nm.lower(), -(idx + 1))
-    school_lookup = _ga_school_name_to_nces()
+                auth_lookup.setdefault(nm.lower(), -(idx + 1))
+
+    norm_map = _build_ga_name_index()
+    fuzzy_choices = list(norm_map.items())
+
+    loaded = 0
+    resolved_norm = 0
+    resolved_fuzzy = 0
+    skipped_no_nces = 0
+    skipped_unknown_authorizer: dict[str, int] = {}
+    skipped_incomplete = 0
 
     for _, row in links_df.iterrows():
         nces_school_id = _clean(row.get("nces_school_id"))
-        if not nces_school_id:
-            school_name = _clean(row.get("school_name"))
-            if school_name:
-                nces_school_id = school_lookup.get(_normalize_name(school_name))
-                if nces_school_id:
-                    resolved_from_name += 1
+        school_name = _clean(row.get("school_name"))
+        if not nces_school_id and school_name:
+            resolved_id, method = _resolve_nces(
+                school_name, norm_map, fuzzy_choices, threshold
+            )
+            if resolved_id:
+                nces_school_id = resolved_id
+                if method == "norm":
+                    resolved_norm += 1
+                else:
+                    resolved_fuzzy += 1
+
         authorizer_name = (_clean(row.get("authorizer_name")) or "").lower()
         school_year = _clean(row.get("school_year"))
-        if not nces_school_id or not authorizer_name or not school_year:
-            skipped += 1
+
+        if not authorizer_name or not school_year:
+            skipped_incomplete += 1
             continue
-        authorizer_id = lookup.get(authorizer_name)
+        if not nces_school_id:
+            skipped_no_nces += 1
+            continue
+        authorizer_id = auth_lookup.get(authorizer_name)
         if not authorizer_id:
-            print(f"SKIP link; unknown authorizer_name: {row.get('authorizer_name')}")
-            skipped += 1
+            skipped_unknown_authorizer[authorizer_name] = (
+                skipped_unknown_authorizer.get(authorizer_name, 0) + 1
+            )
             continue
+
         rec = {
             "nces_school_id": nces_school_id,
             "authorizer_id": authorizer_id,
@@ -180,7 +224,15 @@ def load_links(links_df: pd.DataFrame, dry_run: bool, authorizers_df: pd.DataFra
         else:
             db.upsert_school_authorizer(rec)
         loaded += 1
-    return loaded, skipped, resolved_from_name
+
+    return {
+        "loaded": loaded,
+        "resolved_norm": resolved_norm,
+        "resolved_fuzzy": resolved_fuzzy,
+        "skipped_no_nces": skipped_no_nces,
+        "skipped_incomplete": skipped_incomplete,
+        "skipped_unknown_authorizer": skipped_unknown_authorizer,
+    }
 
 
 def print_validation_summary():
@@ -234,6 +286,13 @@ def main():
     parser.add_argument("--authorizers-file", required=True, help="CSV path for GA authorizers")
     parser.add_argument("--links-file", required=True, help="CSV path for GA school-authorizer links")
     parser.add_argument("--dry-run", action="store_true", help="Print actions, no DB writes")
+    parser.add_argument(
+        "--match-threshold",
+        type=float,
+        default=DEFAULT_MATCH_THRESHOLD,
+        help=f"Fuzzy cutoff for resolving school_name -> NCES id when "
+             f"nces_school_id is blank (default: {DEFAULT_MATCH_THRESHOLD})",
+    )
     args = parser.parse_args()
 
     for p in (args.authorizers_file, args.links_file):
@@ -253,11 +312,22 @@ def main():
     db.init_db()
 
     n_authorizers = load_authorizers(authorizers_df, args.dry_run)
-    n_links, n_skipped, n_resolved = load_links(links_df, args.dry_run, authorizers_df)
+    stats = load_links(links_df, args.dry_run, authorizers_df, args.match_threshold)
+
     print(f"\nProcessed authorizers: {n_authorizers}")
-    print(f"Processed school-authorizer links: {n_links}")
-    print(f"Skipped links: {n_skipped}")
-    print(f"Resolved NCES IDs from school_name: {n_resolved}")
+    print(f"Processed school-authorizer links: {stats['loaded']}")
+    print(f"  resolved NCES from name (normalized): {stats['resolved_norm']}")
+    print(f"  resolved NCES from name (fuzzy):      {stats['resolved_fuzzy']}")
+    print(f"Skipped links:")
+    print(f"  incomplete (missing year or authorizer): {stats['skipped_incomplete']}")
+    print(f"  no NCES id and name did not resolve:     {stats['skipped_no_nces']}")
+    if stats["skipped_unknown_authorizer"]:
+        total = sum(stats["skipped_unknown_authorizer"].values())
+        print(f"  unknown authorizer_name ({total} rows):")
+        for name, n in sorted(
+            stats["skipped_unknown_authorizer"].items(), key=lambda x: -x[1]
+        ):
+            print(f"    {n:>4}  {name}")
 
     if not args.dry_run:
         print_validation_summary()
@@ -265,4 +335,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
