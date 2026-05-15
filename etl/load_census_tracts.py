@@ -397,8 +397,8 @@ def main():
     )
     parser.add_argument(
         "--api-key",
-        default=None,
-        help="Census Bureau API key (optional; get one free at api.census.gov/data/key_signup.html)",
+        default=os.environ.get("CENSUS_API_KEY"),
+        help="Census Bureau API key (optional; get one free at api.census.gov/data/key_signup.html). Falls back to CENSUS_API_KEY env var.",
     )
     parser.add_argument(
         "--historical",
