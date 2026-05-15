@@ -39,6 +39,15 @@ import zipfile
 
 import requests
 
+# zipfile_deflate64 transparently extends the stdlib ZipFile to handle
+# DEFLATE64-compressed entries, which NCES uses for older nested CSV zips
+# (e.g. SY 2021-22 and earlier). Stdlib zipfile raises NotImplementedError
+# on those.
+try:
+    import zipfile_deflate64 as _zf
+except ImportError:
+    _zf = zipfile
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import db
 
@@ -51,23 +60,24 @@ RAW_DIR = os.path.join(
 
 # Probed 2026-05-09 from nces.ed.gov. Each entry maps (school-year-end, file-series)
 # to the exact published filename. Update annually when NCES releases a new SY.
-# Series: 052 = Membership (race×sex×grade), 129 = Lunch (FRL eligibility).
+# Series: 052 = Membership (race x sex x grade), 033 = Free/Reduced-price Lunch counts
+# (the 129 file in current CCD only carries NSLP participation flags, not counts).
 CCD_FILES = {
     2023: {  # SY 2022-23
         "052": "ccd_sch_052_2223_l_1a_083023.zip",
-        "129": "ccd_sch_129_2223_w_1a_083023.zip",
+        "033": "ccd_sch_033_2223_l_1a_083023.zip",
     },
     2022: {  # SY 2021-22
         "052": "ccd_sch_052_2122_l_1a_071722.zip",
-        "129": "ccd_sch_129_2122_w_1a_071722.zip",
+        "033": "ccd_sch_033_2122_l_1a_071722.zip",
     },
     2021: {  # SY 2020-21
         "052": "ccd_sch_052_2021_l_1a_080621.zip",
-        "129": "ccd_sch_129_2021_w_1a_080621.zip",
+        "033": "ccd_sch_033_2021_l_1a_080621.zip",
     },
     2020: {  # SY 2019-20
         "052": "ccd_sch_052_1920_l_1a_082120.zip",
-        "129": "ccd_sch_129_1920_w_1a_082120.zip",
+        "033": "ccd_sch_033_1920_l_1a_082120.zip",
     },
 }
 
@@ -119,14 +129,41 @@ def download_file(filename: str) -> str | None:
 
 
 def open_csv_in_zip(zip_path: str):
-    """Return a streaming csv.DictReader for the .csv inside a CCD zip."""
-    z = zipfile.ZipFile(zip_path)
+    """Return a streaming csv.DictReader for the .csv inside a CCD zip.
+
+    NCES sometimes ships the CSV directly inside the outer zip (e.g. SY 2022-23)
+    and sometimes wraps it in a second 'CSV' zip alongside a SAS counterpart
+    (e.g. SY 2021-22 and earlier). Handles both layouts and returns the readers
+    so the caller can close them.
+    """
+    z = _zf.ZipFile(zip_path)
     csv_name = next((n for n in z.namelist() if n.lower().endswith(".csv")), None)
-    if not csv_name:
+    if csv_name:
+        raw = z.open(csv_name)
+        return csv.DictReader(io.TextIOWrapper(raw, encoding="latin-1")), [z, raw]
+
+    # Nested layout: look for an inner zip whose name implies CSV content.
+    inner_name = next(
+        (n for n in z.namelist()
+         if n.lower().endswith(".zip") and "csv" in n.lower()),
+        None,
+    )
+    if inner_name is None:
+        # Fall back to any nested zip
+        inner_name = next((n for n in z.namelist() if n.lower().endswith(".zip")), None)
+    if inner_name is None:
         z.close()
-        raise RuntimeError(f"No CSV inside {zip_path}")
-    raw = z.open(csv_name)
-    return csv.DictReader(io.TextIOWrapper(raw, encoding="latin-1")), z
+        raise RuntimeError(f"No CSV (or nested zip) inside {zip_path}")
+
+    inner_bytes = z.read(inner_name)
+    inner = _zf.ZipFile(io.BytesIO(inner_bytes))
+    csv_name = next((n for n in inner.namelist() if n.lower().endswith(".csv")), None)
+    if not csv_name:
+        inner.close()
+        z.close()
+        raise RuntimeError(f"No CSV inside nested zip {inner_name} of {zip_path}")
+    raw = inner.open(csv_name)
+    return csv.DictReader(io.TextIOWrapper(raw, encoding="latin-1")), [z, inner, raw]
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +183,7 @@ def parse_membership(zip_path: str, ncessch_filter: set, states_filter: set | No
     """
     by_school = {}  # ncessch → {race_label: count, "_total": int}
 
-    reader, z = open_csv_in_zip(zip_path)
+    reader, closeables = open_csv_in_zip(zip_path)
     try:
         for row in reader:
             if row.get("TOTAL_INDICATOR", "").startswith("Category Set A") is False:
@@ -169,7 +206,11 @@ def parse_membership(zip_path: str, ncessch_filter: set, states_filter: set | No
             entry[race] = entry.get(race, 0) + count
             entry["_total"] += count
     finally:
-        z.close()
+        for c in reversed(closeables):
+            try:
+                c.close()
+            except Exception:
+                pass
 
     out = {}
     for ncessch, counts in by_school.items():
@@ -191,22 +232,29 @@ def parse_membership(zip_path: str, ncessch_filter: set, states_filter: set | No
 
 def parse_lunch(zip_path: str, ncessch_filter: set, states_filter: set | None):
     """
-    Parse a CCD school-lunch (129) zip file.
+    Parse a CCD school free-and-reduced-price-lunch (033) zip file.
 
     Returns {ncessch: pct_free_reduced_lunch}.
 
-    The 129 file reports counts of students eligible for free, reduced-price,
-    free+reduced, no-cost (CEP), or full-price lunch. We compute the standard
-    "pct FRL" as (free + reduced) / membership when both are reported, falling
-    back to the published "Free and Reduced-price Lunch Table" total if the
-    component lines aren't broken out for a school.
-    """
-    free   = {}
-    reduced = {}
-    fr_total = {}
-    membership_by_school = {}
+    Row layout for series 033:
+      DATA_GROUP        = "Free and Reduced-price Lunch Table"
+      TOTAL_INDICATOR   = "Education Unit Total"  -> per-school grand total
+                        = "Category Set A"        -> per-LUNCH_PROGRAM breakdown
+      LUNCH_PROGRAM     = "Free lunch qualified" | "Reduced-price lunch qualified"
+                        | "Missing" | "Not Applicable" | "No Category Codes"
 
-    reader, z = open_csv_in_zip(zip_path)
+    pct_frl = (free + reduced) / total_membership * 100
+
+    Note: Community Eligibility Provision (CEP) schools report 0 free/reduced
+    counts because all students eat free. They will surface here as pct=0;
+    that's a known limitation of CCD 033 alone. To distinguish CEP from a
+    genuinely low-FRL school you need NSLP_STATUS from the 129 file.
+    """
+    free = {}
+    reduced = {}
+    membership = {}
+
+    reader, closeables = open_csv_in_zip(zip_path)
     try:
         for row in reader:
             ncessch = row.get("NCESSCH")
@@ -222,38 +270,36 @@ def parse_lunch(zip_path: str, ncessch_filter: set, states_filter: set | None):
             if count < 0:
                 count = 0
 
-            cat = (row.get("LUNCH_PROGRAM") or "").strip()
             ti  = (row.get("TOTAL_INDICATOR") or "").strip()
+            cat = (row.get("LUNCH_PROGRAM") or "").strip()
 
-            # Membership total is published in the same file as a denominator.
-            if ti.startswith("Education Unit Total") or cat == "No Category Codes":
-                membership_by_school[ncessch] = max(membership_by_school.get(ncessch, 0), count)
-            elif cat == "Free lunch qualified":
-                free[ncessch] = count
-            elif cat == "Reduced-price lunch qualified":
-                reduced[ncessch] = count
-            elif cat == "Free and Reduced-price lunch qualified":
-                fr_total[ncessch] = count
+            if ti == "Education Unit Total":
+                # Schools report the same total once per LUNCH_PROGRAM value, so
+                # any of those rows is fine — take the max defensively.
+                membership[ncessch] = max(membership.get(ncessch, 0), count)
+            elif ti == "Category Set A":
+                if cat == "Free lunch qualified":
+                    free[ncessch] = count
+                elif cat == "Reduced-price lunch qualified":
+                    reduced[ncessch] = count
     finally:
-        z.close()
+        for c in reversed(closeables):
+            try:
+                c.close()
+            except Exception:
+                pass
 
     out = {}
-    all_ids = set(free) | set(reduced) | set(fr_total) | set(membership_by_school)
-    for ncessch in all_ids:
-        m = membership_by_school.get(ncessch)
-        if m is None or m <= 0:
+    for ncessch, m in membership.items():
+        if m <= 0:
             continue
-        if ncessch in fr_total:
-            num = fr_total[ncessch]
-        else:
-            num = free.get(ncessch, 0) + reduced.get(ncessch, 0)
-            if num == 0 and ncessch not in free and ncessch not in reduced:
-                continue
+        num = free.get(ncessch, 0) + reduced.get(ncessch, 0)
         pct = _safe_pct(num, m)
-        if pct is not None:
-            if pct > 100:  # CEP / under-counted membership
-                pct = 100.0
-            out[ncessch] = pct
+        if pct is None:
+            continue
+        if pct > 100:
+            pct = 100.0
+        out[ncessch] = pct
     return out
 
 
@@ -313,11 +359,11 @@ def main():
         if args.skip_download:
             cand = os.path.join(RAW_DIR, files["052"])
             membership_zip = cand if os.path.exists(cand) else None
-            cand = os.path.join(RAW_DIR, files["129"])
+            cand = os.path.join(RAW_DIR, files["033"])
             lunch_zip = cand if os.path.exists(cand) else None
         else:
             membership_zip = download_file(files["052"])
-            lunch_zip      = download_file(files["129"])
+            lunch_zip      = download_file(files["033"])
 
         if not membership_zip:
             print(f"    Membership file missing — skipping year")
