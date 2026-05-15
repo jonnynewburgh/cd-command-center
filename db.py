@@ -4827,10 +4827,13 @@ def get_federal_audits(state=None, audit_year=None, ein=None, entity_type=None,
         conditions.append("is_going_concern = 1")
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
     limit_clause = f"LIMIT {int(limit)}" if limit else ""
+    # Contact name / email / phone are intentionally excluded from the list
+    # SELECT to avoid bulk PII harvest through the public API. The single-
+    # record path (get_federal_audit_by_id) returns them, which gates access
+    # behind needing a specific report_id.
     query = f"""
         SELECT report_id, auditee_ein, auditee_uei, auditee_name, entity_type,
                auditee_city, auditee_state, auditee_zip,
-               auditee_contact_name, auditee_email, auditee_phone,
                audit_year, fy_start_date, fy_end_date,
                total_amount_expended, gaap_results,
                is_going_concern, is_material_weakness,

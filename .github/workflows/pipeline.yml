@@ -23,6 +23,9 @@ on:
           - 990
           - lea
 
+permissions:
+  contents: read
+
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
