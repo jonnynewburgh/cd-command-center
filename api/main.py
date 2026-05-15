@@ -18,10 +18,14 @@ import os
 # of where uvicorn is invoked from.
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 import db
+
+logger = logging.getLogger(__name__)
 
 from api.routers import (
     schools,
@@ -50,11 +54,24 @@ app = FastAPI(
 )
 
 # ---------------------------------------------------------------------------
-# CORS — allow all origins in development.  Tighten this for production.
+# CORS — scoped to the dashboard origins. Override via CORS_ORIGINS env var
+# (comma-separated) to add staging / preview URLs without a code change.
 # ---------------------------------------------------------------------------
+_DEFAULT_CORS_ORIGINS = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "https://command-center.jhnadvising.com",
+]
+_cors_env = os.environ.get("CORS_ORIGINS", "").strip()
+_cors_origins = (
+    [o.strip() for o in _cors_env.split(",") if o.strip()]
+    if _cors_env
+    else _DEFAULT_CORS_ORIGINS
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

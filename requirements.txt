@@ -4,6 +4,9 @@ numpy>=1.26.0
 requests>=2.31.0
 openpyxl>=3.1.0
 pdfplumber>=0.10.0
+# DEFLATE64 support for nested NCES CCD zip files (SY 2021-22 and earlier).
+# Stdlib zipfile cannot decode compress_type=9 entries.
+zipfile-deflate64>=0.2.0
 psycopg2-binary>=2.9.0
 fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
@@ -21,3 +24,9 @@ sqlalchemy>=2.0.0
 # suite added in P2 #11. httpx is a transitive of starlette.testclient.
 pytest>=8.0.0
 httpx>=0.27.0
+
+# Transitive-CVE pins (re-evaluate when the upstream floors catch up):
+#   urllib3 <2.7.0 has CVE-2026-44431 / -44432 (header smuggling).
+#   python-multipart <0.0.27 has CVE-2026-40347 / -42561 (DoS via crafted body).
+urllib3>=2.7.0
+python-multipart>=0.0.27
