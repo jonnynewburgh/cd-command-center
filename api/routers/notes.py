@@ -7,9 +7,10 @@ Bookmarks are starred entities shown in the dashboard sidebar.
 Entity types: school, fqhc, ece, nmtc_project, cde, census_tract, org_990
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 import db
+from api.auth import require_write_token
 
 router = APIRouter()
 
@@ -46,14 +47,14 @@ def get_bookmarks():
     return db.get_bookmarks()
 
 
-@router.post("/bookmarks", status_code=201)
+@router.post("/bookmarks", status_code=201, dependencies=[Depends(require_write_token)])
 def add_bookmark(body: BookmarkCreate):
     """Bookmark an entity. Silently ignores duplicates."""
     db.save_bookmark(body.entity_type, body.entity_id, body.label)
     return {"ok": True}
 
 
-@router.delete("/bookmarks/{entity_type}/{entity_id}", status_code=204)
+@router.delete("/bookmarks/{entity_type}/{entity_id}", status_code=204, dependencies=[Depends(require_write_token)])
 def remove_bookmark(entity_type: str, entity_id: str):
     """Remove a bookmark."""
     db.delete_bookmark(entity_type, entity_id)
@@ -75,21 +76,21 @@ def get_notes(entity_type: str, entity_id: str):
     return db.get_user_notes(entity_type, entity_id)
 
 
-@router.post("/{entity_type}/{entity_id}", status_code=201)
+@router.post("/{entity_type}/{entity_id}", status_code=201, dependencies=[Depends(require_write_token)])
 def create_note(entity_type: str, entity_id: str, body: NoteCreate):
     """Add a new note to an entity. Returns the new note ID."""
     note_id = db.save_user_note(entity_type, entity_id, body.note_text)
     return {"note_id": note_id}
 
 
-@router.put("/{entity_type}/{entity_id}/{note_id}")
+@router.put("/{entity_type}/{entity_id}/{note_id}", dependencies=[Depends(require_write_token)])
 def update_note(entity_type: str, entity_id: str, note_id: int, body: NoteUpdate):
     """Update the text of an existing note."""
     db.update_user_note(note_id, body.note_text)
     return {"ok": True}
 
 
-@router.delete("/{entity_type}/{entity_id}/{note_id}", status_code=204)
+@router.delete("/{entity_type}/{entity_id}/{note_id}", status_code=204, dependencies=[Depends(require_write_token)])
 def delete_note(entity_type: str, entity_id: str, note_id: int):
     """Delete a note."""
     db.delete_user_note(note_id)

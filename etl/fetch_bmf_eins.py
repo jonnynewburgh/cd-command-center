@@ -333,8 +333,16 @@ def find_best_match(
 
 def _get_unlinked_operators(states=None, limit=None, all_schools=False) -> list[dict]:
     """
-    Return distinct charter school operators (by lea_id) that don't yet have
-    an EIN. If all_schools=True, also include non-charter open schools.
+    Return school operators that don't yet have an EIN.
+
+    For charter schools, the operator is per-school: a charter's lea_id is its
+    authorizer (often a county district or a state-charter LEA), not its
+    operating nonprofit. Each charter row is returned individually, keyed on
+    nces_id, and matched against the school's own name.
+
+    For traditional public schools (all_schools=True), the LEA *is* the
+    operator and many schools share one EIN, so rows are deduplicated by
+    lea_id and matched against the LEA name.
     """
     conn = db.get_connection()
     cur = conn.cursor()
@@ -356,31 +364,40 @@ def _get_unlinked_operators(states=None, limit=None, all_schools=False) -> list[
 
     cur.execute(
         db.adapt_sql(
-            f"SELECT DISTINCT lea_id, lea_name, school_name, state, zip_code "
-            f"FROM schools {where} ORDER BY state, lea_name"
+            f"SELECT DISTINCT nces_id, is_charter, lea_id, lea_name, "
+            f"school_name, state, zip_code "
+            f"FROM schools {where} ORDER BY state, school_name"
         ),
         params,
     )
     rows = cur.fetchall()
     conn.close()
 
-    # Deduplicate by lea_id
     seen = set()
     orgs = []
-    for lea_id, lea_name, school_name, state, zip_code in rows:
-        key = lea_id or f"{school_name}|{state}"
+    for nces_id, is_charter, lea_id, lea_name, school_name, state, zip_code in rows:
+        # Charter: one record per school, search by school_name, link by nces_id.
+        # Non-charter: dedupe by lea_id, search by lea_name, link by lea_id.
+        if is_charter:
+            key = ("nces", nces_id or f"{school_name}|{state}")
+            search_name = school_name
+        else:
+            key = ("lea", lea_id or f"{school_name}|{state}")
+            search_name = lea_name or school_name
         if key in seen:
             continue
         seen.add(key)
-        search_name = lea_name or school_name
-        if search_name:
-            orgs.append({
-                "lea_id":      lea_id,
-                "search_name": _clean_lea_name(search_name),
-                "raw_name":    search_name,
-                "state":       state,
-                "zip":         (zip_code or "")[:5],
-            })
+        if not search_name:
+            continue
+        orgs.append({
+            "nces_id":     nces_id,
+            "is_charter":  bool(is_charter),
+            "lea_id":      None if is_charter else lea_id,
+            "search_name": _clean_lea_name(search_name),
+            "raw_name":    search_name,
+            "state":       state,
+            "zip":         (zip_code or "")[:5],
+        })
 
     if limit:
         orgs = orgs[:limit]
@@ -388,12 +405,24 @@ def _get_unlinked_operators(states=None, limit=None, all_schools=False) -> list[
     return orgs
 
 
-def _link_ein_to_schools(lea_id, school_name, state, ein, all_schools=False):
-    """Write the matched EIN back to all schools with this lea_id."""
+def _link_ein_to_schools(lea_id, school_name, state, ein, all_schools=False, nces_id=None):
+    """Write the matched EIN back to the linked school(s).
+
+    Charter matches pass nces_id and link a single school precisely.
+    Non-charter matches pass lea_id and link every school in that LEA.
+    """
     conn = db.get_connection()
     cur = conn.cursor()
     charter_filter = "" if all_schools else "AND is_charter = 1"
-    if lea_id:
+    if nces_id:
+        cur.execute(
+            db.adapt_sql(
+                f"UPDATE schools SET ein = ?, updated_at = CURRENT_TIMESTAMP "
+                f"WHERE nces_id = ? {charter_filter}"
+            ),
+            (ein, nces_id),
+        )
+    elif lea_id:
         cur.execute(
             db.adapt_sql(
                 f"UPDATE schools SET ein = ?, updated_at = CURRENT_TIMESTAMP "
@@ -501,7 +530,8 @@ def match_schools(
                       f"-> {bmf_name[:45]:<45}  EIN={ein}  score={score:.2f}")
             if not dry_run:
                 _link_ein_to_schools(
-                    org["lea_id"], org["raw_name"], state, ein, all_schools
+                    org["lea_id"], org["raw_name"], state, ein, all_schools,
+                    nces_id=org.get("nces_id") if org.get("is_charter") else None,
                 )
                 if ein in bmf_by_ein:
                     _upsert_bmf_990(ein, bmf_by_ein[ein])

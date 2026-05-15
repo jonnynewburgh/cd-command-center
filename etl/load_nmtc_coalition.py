@@ -92,8 +92,8 @@ COALITION_COL_ALIASES = {
     # Our field           # Coalition column name variants (lowercase, normalised)
     "coalition_txn_id":   ["transaction id", "txn id", "transaction_id"],
     "cdfi_project_id":    ["cdfi project id", "cdfi_project_id", "project id", "cdfi id"],
-    "project_name":       ["project name", "project", "deal name", "borrower name",
-                           "purpose of investment"],
+    "project_name":       ["project name", "project", "deal name", "borrower name"],
+    "purpose_of_investment": ["purpose of investment", "investment purpose"],
     "cde_name":           ["cde name", "cde", "allocatee", "allocatee name",
                            "community development entity",
                            "community development entity (cde) name"],
@@ -315,12 +315,13 @@ def load_file(filepath: str, columns_only: bool, dry_run: bool,
             col = col_map.get(field)
             return row.get(col, "").strip() if col else None
 
-        project_name    = get("project_name")
-        cde_name        = get("cde_name")
-        state           = _normalize_state(get("state"))
-        investment_year = _clean_int(get("investment_year"))
+        project_name         = get("project_name")
+        purpose_of_investment = get("purpose_of_investment")
+        cde_name             = get("cde_name")
+        state                = _normalize_state(get("state"))
+        investment_year      = _clean_int(get("investment_year"))
 
-        if not cde_name and not project_name:
+        if not cde_name and not project_name and not purpose_of_investment:
             continue  # skip blank rows
 
         # Build a stable ID: prefer transaction ID, then project ID, then row index
@@ -328,10 +329,10 @@ def load_file(filepath: str, columns_only: bool, dry_run: bool,
         coalition_project_id = str(raw_id).strip()
 
         rec = {
-            "coalition_project_id": coalition_project_id,
-            "cdfi_project_id":      get("cdfi_project_id") or None,
-            "project_name":         project_name or None,
-            "cde_name":             cde_name or None,
+            "coalition_project_id":  coalition_project_id,
+            "cdfi_project_id":       get("cdfi_project_id") or None,
+            "purpose_of_investment": purpose_of_investment or None,
+            "cde_name":              cde_name or None,
             "address":              get("address") or None,
             "city":                 get("city") or None,
             "state":                state or None,

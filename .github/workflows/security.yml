@@ -1,0 +1,39 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "requirements.txt"
+      - ".github/workflows/security.yml"
+  pull_request:
+    paths:
+      - "requirements.txt"
+      - ".github/workflows/security.yml"
+  schedule:
+    # Weekly catch — re-audits the same lockless requirements against a
+    # newly-published CVE feed without needing a code change.
+    - cron: "0 11 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pip-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Audit project dependencies
+        # pipx isolates pip-audit's own transitives so they don't pollute the
+        # audit surface. `-r requirements.txt` resolves the project's deps and
+        # audits the full tree (including transitives), without installing them
+        # into this job's env.
+        run: pipx run pip-audit --strict -r requirements.txt

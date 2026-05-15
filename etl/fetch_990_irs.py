@@ -536,21 +536,27 @@ def fetch_990_from_irs(
     conn = db.get_connection()
     cur  = conn.cursor()
 
+    # Pull EINs from every table in the DB that carries one. The IRS index
+    # only contains filers (i.e. nonprofits), so for-profit / govt EINs we
+    # include here will simply not match — no extra filtering needed.
     target_eins: set[str] = set()
-    cur.execute("SELECT ein FROM irs_990 WHERE ein IS NOT NULL")
-    for (e,) in cur.fetchall():
-        target_eins.add(str(e).zfill(9))
-
-    cur.execute("SELECT ein FROM schools WHERE ein IS NOT NULL AND ein != ''")
-    for (e,) in cur.fetchall():
-        target_eins.add(str(e).zfill(9))
-
-    try:
-        cur.execute("SELECT ein FROM fqhc WHERE ein IS NOT NULL AND ein != ''")
-        for (e,) in cur.fetchall():
-            target_eins.add(str(e).zfill(9))
-    except Exception:
-        pass
+    ein_sources: list[tuple[str, str]] = [
+        ("irs_990",        "SELECT ein FROM irs_990 WHERE ein IS NOT NULL"),
+        ("schools",        "SELECT ein FROM schools WHERE ein IS NOT NULL AND ein != ''"),
+        ("fqhc",           "SELECT ein FROM fqhc WHERE ein IS NOT NULL AND ein != ''"),
+        ("v_cde_allocations","SELECT ein FROM v_cde_allocations WHERE ein IS NOT NULL AND ein != ''"),
+        ("federal_audits", "SELECT auditee_ein FROM federal_audits WHERE auditee_ein IS NOT NULL AND auditee_ein != ''"),
+    ]
+    for label, sql in ein_sources:
+        before = len(target_eins)
+        try:
+            cur.execute(sql)
+            for (e,) in cur.fetchall():
+                target_eins.add(str(e).zfill(9))
+            print(f"    +{len(target_eins) - before:>6,} from {label}  (total {len(target_eins):,})")
+        except Exception as exc:
+            print(f"    skipped {label}: {exc}")
+            conn.rollback()
 
     conn.close()
 

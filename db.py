@@ -1038,7 +1038,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             coalition_project_id TEXT UNIQUE,  -- Coalition's own project identifier (if any)
             cdfi_project_id TEXT,              -- CDFI Fund project ID (when known)
-            project_name TEXT,
+            purpose_of_investment TEXT,        -- e.g., "Real Estate – Construction", "Business Financing"
             cde_name TEXT,
             address TEXT,
             city TEXT,
@@ -2257,6 +2257,270 @@ def get_fqhc_summary() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# FQHC UDS reports (grantee-per-year)
+# ---------------------------------------------------------------------------
+
+def get_fqhc_uds_report(grant_number: str, data_year: int = None) -> dict:
+    """Return one UDS report row by grant_number + data_year.
+
+    If data_year is None, returns the most recent year on file for that grantee.
+    Returns empty dict if no rows found.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        if data_year is None:
+            cur.execute(adapt_sql(
+                "SELECT * FROM fqhc_uds_reports WHERE grant_number = ? "
+                "ORDER BY data_year DESC LIMIT 1"
+            ), (grant_number,))
+        else:
+            cur.execute(adapt_sql(
+                "SELECT * FROM fqhc_uds_reports WHERE grant_number = ? AND data_year = ?"
+            ), (grant_number, data_year))
+        row = cur.fetchone()
+        result = row_to_dict(cur, row)
+    except Exception:
+        logger.exception("get_fqhc_uds_report failed grant=%s year=%s", grant_number, data_year)
+        result = {}
+    conn.close()
+    return result if result else {}
+
+
+def get_fqhc_uds_history(grant_number: str) -> pd.DataFrame:
+    """All UDS years on file for one grantee, oldest first (for trend charts)."""
+    try:
+        return _pd_read_sql(
+            "SELECT * FROM fqhc_uds_reports WHERE grant_number = ? ORDER BY data_year ASC",
+            [grant_number],
+        )
+    except Exception:
+        logger.exception("get_fqhc_uds_history failed grant=%s", grant_number)
+        return pd.DataFrame()
+
+
+def get_fqhc_uds_for_site(bhcmis_id: str, data_year: int = None) -> dict:
+    """Resolve site → org grant_number → UDS report.
+
+    Site directory rows carry the site-level bhcmis_id; UDS data is reported
+    once per organization (grant_number). This helper does the join in one
+    query so callers (school detail page, FQHC detail page) don't have to.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        if data_year is None:
+            cur.execute(adapt_sql("""
+                SELECT u.* FROM fqhc_uds_reports u
+                JOIN fqhc f ON f.health_center_grant_number = u.grant_number
+                WHERE f.bhcmis_id = ?
+                ORDER BY u.data_year DESC LIMIT 1
+            """), (bhcmis_id,))
+        else:
+            cur.execute(adapt_sql("""
+                SELECT u.* FROM fqhc_uds_reports u
+                JOIN fqhc f ON f.health_center_grant_number = u.grant_number
+                WHERE f.bhcmis_id = ? AND u.data_year = ?
+            """), (bhcmis_id, data_year))
+        row = cur.fetchone()
+        result = row_to_dict(cur, row)
+    except Exception:
+        logger.exception("get_fqhc_uds_for_site failed bhcmis_id=%s year=%s", bhcmis_id, data_year)
+        result = {}
+    conn.close()
+    return result if result else {}
+
+
+def get_fqhc_uds_summary() -> dict:
+    """High-level UDS coverage stats: grantees, years, latest year."""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT
+                COUNT(*)                       AS total_reports,
+                COUNT(DISTINCT grant_number)   AS distinct_grantees,
+                COUNT(DISTINCT data_year)      AS distinct_years,
+                MIN(data_year)                 AS earliest_year,
+                MAX(data_year)                 AS latest_year,
+                COALESCE(SUM(total_patients), 0)  AS total_patients_latest_load
+            FROM fqhc_uds_reports
+        """)
+        row = cur.fetchone()
+        result = row_to_dict(cur, row) or {}
+    except Exception:
+        logger.exception("get_fqhc_uds_summary failed")
+        result = {}
+    conn.close()
+    return result
+
+
+# ---------------------------------------------------------------------------
+# HRSA shortage-area designations (HPSA + MUA)
+# ---------------------------------------------------------------------------
+
+def _hpsa_status_filter(active_only: bool) -> tuple[str, list]:
+    """Build (where-clause, params) fragment to filter on active designations only."""
+    if active_only:
+        return " AND hpsa_status = ?", ["Designated"]
+    return "", []
+
+
+def get_hpsa_for_county(
+    state_county_fips: str,
+    discipline: str = None,
+    active_only: bool = True,
+) -> pd.DataFrame:
+    """Return HPSA component rows for a county (5-digit state+county FIPS).
+
+    discipline: 'PC' / 'MH' / 'DH'. None returns all three.
+    active_only: True (default) filters to status='Designated'.
+    """
+    where = "WHERE county_fips = ?"
+    params: list = [state_county_fips]
+    if discipline:
+        where += " AND discipline = ?"
+        params.append(discipline.upper())
+    extra, ex_params = _hpsa_status_filter(active_only)
+    where += extra
+    params.extend(ex_params)
+    try:
+        return _pd_read_sql(
+            f"SELECT * FROM hrsa_hpsa_designations {where} ORDER BY discipline, hpsa_score DESC NULLS LAST",
+            params,
+        )
+    except Exception:
+        logger.exception("get_hpsa_for_county failed county_fips=%s discipline=%s", state_county_fips, discipline)
+        return pd.DataFrame()
+
+
+def get_hpsa_for_facility(bhcmis_org_id: str, active_only: bool = True) -> pd.DataFrame:
+    """Return HPSA designations attached to an FQHC org (auto-HPSA facility designation)."""
+    extra, ex_params = _hpsa_status_filter(active_only)
+    try:
+        return _pd_read_sql(
+            f"SELECT * FROM hrsa_hpsa_designations WHERE bhcmis_org_id = ? {extra} ORDER BY discipline, hpsa_score DESC NULLS LAST",
+            [bhcmis_org_id, *ex_params],
+        )
+    except Exception:
+        logger.exception("get_hpsa_for_facility failed bhcmis_org_id=%s", bhcmis_org_id)
+        return pd.DataFrame()
+
+
+def get_mua_for_county(state_county_fips: str, active_only: bool = True) -> pd.DataFrame:
+    """Return MUA component rows for a county."""
+    where = "WHERE county_fips = ?"
+    params: list = [state_county_fips]
+    if active_only:
+        where += " AND mua_status = ?"
+        params.append("Designated")
+    try:
+        return _pd_read_sql(
+            f"SELECT * FROM hrsa_mua_designations {where} ORDER BY imu_score ASC NULLS LAST",
+            params,
+        )
+    except Exception:
+        logger.exception("get_mua_for_county failed county_fips=%s", state_county_fips)
+        return pd.DataFrame()
+
+
+def get_mua_for_tract(census_tract: str, active_only: bool = True) -> pd.DataFrame:
+    """Return MUA component rows for a census tract code (e.g., '9301.01')."""
+    where = "WHERE census_tract = ?"
+    params: list = [census_tract]
+    if active_only:
+        where += " AND mua_status = ?"
+        params.append("Designated")
+    try:
+        return _pd_read_sql(
+            f"SELECT * FROM hrsa_mua_designations {where} ORDER BY imu_score ASC NULLS LAST",
+            params,
+        )
+    except Exception:
+        logger.exception("get_mua_for_tract failed census_tract=%s", census_tract)
+        return pd.DataFrame()
+
+
+def get_shortage_summary_for_site(bhcmis_id: str) -> dict:
+    """Resolve site → org BHCMIS + county FIPS → HPSA + MUA flags + scores.
+
+    Returns counts per discipline plus the worst-shortage HPSA scores
+    covering the FQHC site. Used by the dashboard to badge each FQHC
+    detail page with its federal shortage-area context.
+    """
+    site = get_fqhc_by_id(bhcmis_id)
+    if not site:
+        return {}
+
+    # FQHC's own auto-HPSA designations (facility-level)
+    org_id = site.get("org_bhcmis_id")
+    facility_hpsa = get_hpsa_for_facility(org_id) if org_id else pd.DataFrame()
+
+    # Resolve county FIPS for the site (via census_tracts table)
+    tract_id = site.get("census_tract_id")
+    county_fips = None
+    if tract_id:
+        # 11-digit GEOID → first 5 digits are state+county
+        ct = str(tract_id).strip()
+        if len(ct) >= 5 and ct.isdigit():
+            county_fips = ct[:5]
+
+    geographic_hpsa = get_hpsa_for_county(county_fips) if county_fips else pd.DataFrame()
+    mua = get_mua_for_county(county_fips) if county_fips else pd.DataFrame()
+
+    def _max_score(df, discipline):
+        if df.empty:
+            return None
+        sub = df[df["discipline"] == discipline] if "discipline" in df.columns else df
+        if sub.empty: return None
+        v = sub["hpsa_score"].max()
+        return None if pd.isna(v) else float(v)
+
+    return {
+        "bhcmis_id":              bhcmis_id,
+        "county_fips":            county_fips,
+        "facility_hpsa_count":    len(facility_hpsa),
+        "geographic_hpsa_count":  len(geographic_hpsa),
+        "mua_designated_count":   len(mua),
+        "max_hpsa_score_pc":      _max_score(geographic_hpsa, "PC"),
+        "max_hpsa_score_mh":      _max_score(geographic_hpsa, "MH"),
+        "max_hpsa_score_dh":      _max_score(geographic_hpsa, "DH"),
+        "min_imu_score":          float(mua["imu_score"].min()) if not mua.empty and not pd.isna(mua["imu_score"].min()) else None,
+    }
+
+
+def get_shortage_summary() -> dict:
+    """Top-level coverage stats for the HPSA + MUA tables."""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT
+                COUNT(*)                                                AS hpsa_total,
+                COUNT(*) FILTER (WHERE hpsa_status = 'Designated')      AS hpsa_designated,
+                COUNT(DISTINCT hpsa_id)                                 AS hpsa_distinct_designations,
+                COUNT(DISTINCT discipline)                              AS hpsa_disciplines
+            FROM hrsa_hpsa_designations
+        """)
+        h = row_to_dict(cur, cur.fetchone()) or {}
+        cur.execute("""
+            SELECT
+                COUNT(*)                                                AS mua_total,
+                COUNT(*) FILTER (WHERE mua_status = 'Designated')       AS mua_designated,
+                COUNT(DISTINCT mua_id)                                  AS mua_distinct_designations,
+                COUNT(DISTINCT census_tract) FILTER (WHERE census_tract IS NOT NULL) AS mua_distinct_tracts
+            FROM hrsa_mua_designations
+        """)
+        m = row_to_dict(cur, cur.fetchone()) or {}
+        result = {**h, **m}
+    except Exception:
+        logger.exception("get_shortage_summary failed")
+        result = {}
+    conn.close()
+    return result
+
+
+# ---------------------------------------------------------------------------
 # ECE center queries
 # ---------------------------------------------------------------------------
 
@@ -2484,6 +2748,23 @@ def upsert_charter_school(record: dict):
     record = dict(record)
     record["is_charter"] = 1
     upsert_school(record)
+
+
+def update_school_fields(nces_id: str, fields: dict):
+    """Update specific columns on an existing schools row (no insert).
+
+    Useful when an ETL only knows a subset of columns — upsert_school would
+    require populating NOT NULL columns even on the no-op insert path.
+    """
+    if not fields:
+        return
+    conn = get_connection()
+    cur = conn.cursor()
+    set_clause = ",".join(f"{col}=?" for col in fields)
+    sql = f"UPDATE schools SET {set_clause}, updated_at=CURRENT_TIMESTAMP WHERE nces_id=?"
+    cur.execute(adapt_sql(sql), [*fields.values(), nces_id])
+    conn.commit()
+    conn.close()
 
 
 def upsert_nmtc_project(record: dict):
@@ -2919,6 +3200,7 @@ def upsert_990(record: dict):
     conn.close()
 
 
+@_cached(ttl=300)
 def get_990_by_ein(ein: str) -> dict:
     """Look up a single 990 record by EIN. Returns a dict or empty dict."""
     conn = get_connection()
@@ -4466,7 +4748,7 @@ def get_nmtc_coalition_projects(state=None, cde_name=None, investment_year=None,
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
     limit_clause = f"LIMIT {int(limit)}" if limit else ""
     query = f"""
-        SELECT coalition_project_id, cdfi_project_id, project_name,
+        SELECT coalition_project_id, cdfi_project_id, purpose_of_investment,
                cde_name, address, city, state, zip_code, census_tract_id,
                total_project_costs, nmtc_allocation_used,
                jobs_created, jobs_retained, project_type, investment_year,
@@ -4692,5 +4974,166 @@ def get_headstart_by_id(grant_number, program_number, pir_year):
     if df.empty:
         return None
     return df.iloc[0].to_dict()
+
+
+# ---------------------------------------------------------------------------
+# Charter authorizer registry (NACSA statute snapshot + operational entities)
+# ---------------------------------------------------------------------------
+
+def upsert_statutory_charter_authorizer_policy(record: dict):
+    """Insert or update a row in statutory_charter_authorizer_policy (key: state_usps)."""
+    columns = list(record.keys())
+    values = list(record.values())
+    placeholders = ",".join("?" * len(values))
+    update_cols = [c for c in columns if c != "state_usps"]
+    update_clause = ",".join(f"{c}=excluded.{c}" for c in update_cols)
+    sql = f"""
+        INSERT INTO statutory_charter_authorizer_policy ({",".join(columns)})
+        VALUES ({placeholders})
+        ON CONFLICT(state_usps) DO UPDATE SET {update_clause}
+    """
+    conn = get_connection()
+    conn.cursor().execute(adapt_sql(sql), values)
+    conn.commit()
+    conn.close()
+
+
+def get_statutory_charter_authorizer_policy(state_usps=None) -> pd.DataFrame:
+    """Return NACSA-derived statutory authorizer-type columns by state/DC."""
+    conditions, params = [], []
+    if state_usps:
+        conditions.append("state_usps = ?")
+        params.append(state_usps.upper())
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    query = f"""
+        SELECT state_usps, state_name, nacsa_col_1, nacsa_col_2, nacsa_col_3, nacsa_col_4,
+               source_url, retrieved
+        FROM statutory_charter_authorizer_policy {where}
+        ORDER BY state_usps
+    """
+    conn = get_connection()
+    try:
+        df = _pd_read_sql(query, params)
+    except Exception:
+        logger.exception("get_statutory_charter_authorizer_policy failed")
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+def upsert_authorizer(record: dict):
+    """Insert or update an authorizing entity (unique on state + name)."""
+    columns = list(record.keys())
+    values = list(record.values())
+    placeholders = ",".join("?" * len(values))
+    update_cols = [c for c in columns if c not in ("id", "state", "name")]
+    update_clause = ",".join(f"{c}=excluded.{c}" for c in update_cols)
+    sql = f"""
+        INSERT INTO authorizers ({",".join(columns)})
+        VALUES ({placeholders})
+        ON CONFLICT(state, name) DO UPDATE SET {update_clause}
+    """
+    conn = get_connection()
+    conn.cursor().execute(adapt_sql(sql), values)
+    conn.commit()
+    conn.close()
+
+
+def get_authorizers(
+    states=None,
+    name_substring=None,
+    authorizer_kind=None,
+    active_only=True,
+) -> pd.DataFrame:
+    """Return operational authorizer rows."""
+    conditions, params = [], []
+    if states:
+        placeholders = ",".join("?" * len(states))
+        conditions.append(f"state IN ({placeholders})")
+        params.extend([s.upper() for s in states])
+    if name_substring:
+        conditions.append("name LIKE ?")
+        params.append(f"%{name_substring}%")
+    if authorizer_kind:
+        conditions.append("authorizer_kind = ?")
+        params.append(authorizer_kind)
+    if active_only:
+        conditions.append("(is_active = 1 OR is_active IS NULL)")
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    query = f"""
+        SELECT id, state, name, authorizer_kind, nces_lea_id, state_authorizer_id,
+               source_system, source_url, notes, is_active, created_at, updated_at
+        FROM authorizers {where}
+        ORDER BY state, name
+    """
+    conn = get_connection()
+    try:
+        df = _pd_read_sql(query, params)
+    except Exception:
+        logger.exception("get_authorizers failed")
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+def upsert_school_authorizer(record: dict):
+    """Link an NCES school to an authorizer for a school year."""
+    columns = list(record.keys())
+    values = list(record.values())
+    placeholders = ",".join("?" * len(values))
+    key_cols = ("nces_school_id", "authorizer_id", "school_year")
+    update_cols = [c for c in columns if c not in ("id",) + key_cols]
+    update_clause = ",".join(f"{c}=excluded.{c}" for c in update_cols)
+    sql = f"""
+        INSERT INTO school_authorizer ({",".join(columns)})
+        VALUES ({placeholders})
+        ON CONFLICT(nces_school_id, authorizer_id, school_year) DO UPDATE SET {update_clause}
+    """
+    conn = get_connection()
+    conn.cursor().execute(adapt_sql(sql), values)
+    conn.commit()
+    conn.close()
+
+
+def get_school_authorizers(
+    nces_school_id=None,
+    authorizer_id=None,
+    school_year=None,
+    states=None,
+) -> pd.DataFrame:
+    """Return school ↔ authorizer links, optionally filtered."""
+    conditions, params = [], []
+    if nces_school_id:
+        conditions.append("sa.nces_school_id = ?")
+        params.append(nces_school_id)
+    if authorizer_id:
+        conditions.append("sa.authorizer_id = ?")
+        params.append(authorizer_id)
+    if school_year:
+        conditions.append("sa.school_year = ?")
+        params.append(school_year)
+    if states:
+        placeholders = ",".join("?" * len(states))
+        conditions.append(f"a.state IN ({placeholders})")
+        params.extend([s.upper() for s in states])
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    query = f"""
+        SELECT sa.id, sa.nces_school_id, sa.authorizer_id, sa.school_year,
+               sa.relationship, sa.source_system, sa.created_at,
+               a.state, a.name AS authorizer_name, a.authorizer_kind,
+               a.nces_lea_id, a.state_authorizer_id
+        FROM school_authorizer sa
+        JOIN authorizers a ON a.id = sa.authorizer_id
+        {where}
+        ORDER BY sa.school_year DESC, a.state, a.name
+    """
+    conn = get_connection()
+    try:
+        df = _pd_read_sql(query, params)
+    except Exception:
+        logger.exception("get_school_authorizers failed")
+        df = pd.DataFrame()
+    conn.close()
+    return df
 
 

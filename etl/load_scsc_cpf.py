@@ -6,8 +6,10 @@ Data source: State Charter Schools Commission of Georgia (SCSC)
   CPF scores are not subject to commercial use restrictions — they are
   published by a state government agency as public records.
 
-The source file lives in the companion charters repo:
-  C:/Users/jonny/Documents/GitHub/charters/data/cpf_all_years.csv
+The source file lives in the companion `charters` repo, expected at a
+sibling path to this repo:
+  ../charters/data/cpf_all_years.csv
+Override with --file or set the SCSC_CPF_FILE env var.
 
 Columns in the source file:
   school_year   — e.g. "2023-24"
@@ -49,8 +51,8 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import db
 
-# Default path — charters repo relative to this repo's parent directory
-DEFAULT_FILE = os.path.join(
+# Default path — SCSC_CPF_FILE env var, else charters repo as sibling directory
+DEFAULT_FILE = os.environ.get("SCSC_CPF_FILE") or os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     "charters", "data", "cpf_all_years.csv",
 )
