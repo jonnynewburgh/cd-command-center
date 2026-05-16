@@ -1,0 +1,13 @@
+school_name,nces_school_id,note
+Centennial Academy,130012002290,Centennial Place Academy (Charter) -- only APS Centennial charter
+Charles R. Drew Charter School (ES),130012002453,elementary campus
+Charles R. Drew Charter School (JA/SA),130123003855,junior/senior academy -- maps to Drew High School
+The Kindezi School Old 4th Ward,130012004277,exact campus
+George Walton Comprehensive High School,130129000513,only charter Walton in Cobb
+The GLOBE Academy,130174004142,GLOBE Academy Charter School I
+Amana Academy,130228003535,Roswell/Fulton; West Atlanta variant is SCSC-authorized (different nces)
+KIPP South Fulton Academy,130228002885,naming variance ('Academy School')
+Skyview Charter School,130228004225,Skyview High School -- only Skyview charter in schools table
+BIA Charter School,130024204249,BIA = Brookhaven Innovation Academy
+Ivy Prep Academy at Kirkwood,130022604023,only Ivy Prep in schools table; campus distinction not surfaced in NCES
+Zest Preparatory Academy Charter School,130585904667,naming variance

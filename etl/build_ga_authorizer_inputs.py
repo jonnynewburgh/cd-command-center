@@ -106,8 +106,35 @@ def _build_match_index(schools: pd.DataFrame):
     return exact_map, norm_map, fuzzy_choices
 
 
+def _overrides_path() -> str:
+    return os.path.join(_repo_root(), "data", "seed", "authorizers", "ga_authorizer_overrides.csv")
+
+
+def _load_overrides() -> dict[str, str]:
+    """Read data/seed/authorizers/ga_authorizer_overrides.csv if present.
+
+    Format: school_name, nces_school_id (extra columns like 'note' are ignored).
+    Analyst-curated and tracked in git -- takes priority over exact /
+    normalized / fuzzy resolution. Use this for cases the matcher can't handle:
+    parenthetical campus markers, acronyms, name changes, etc.
+    """
+    path = _overrides_path()
+    if not os.path.isfile(path):
+        return {}
+    df = pd.read_csv(path, dtype=str)
+    df.columns = [c.strip().lower() for c in df.columns]
+    out: dict[str, str] = {}
+    for _, row in df.iterrows():
+        name = (row.get("school_name") or "").strip()
+        nces = (row.get("nces_school_id") or "").strip()
+        if name and nces:
+            out[name] = nces
+    return out
+
+
 def _resolve_nces(
     school_name: str,
+    overrides: dict,
     exact_map: dict,
     norm_map: dict,
     fuzzy_choices: list,
@@ -115,12 +142,15 @@ def _resolve_nces(
 ):
     """Return (nces_id, method, score).
 
-    method is one of: 'exact', 'norm', 'fuzzy', 'unmatched'.
-    score is 1.0 for exact/norm, the SequenceMatcher ratio for fuzzy,
+    method is one of: 'override', 'exact', 'norm', 'fuzzy', 'unmatched'.
+    score is 1.0 for override/exact/norm, the SequenceMatcher ratio for fuzzy,
     and 0.0 for unmatched.
     """
     if not school_name:
         return None, "unmatched", 0.0
+
+    if school_name in overrides:
+        return overrides[school_name], "override", 1.0
 
     if school_name in exact_map:
         return exact_map[school_name], "exact", 1.0
@@ -296,6 +326,7 @@ def main():
         print("WARNING: schools table has 0 GA charters — all links will be unmatched.")
         print("         Run etl/fetch_nces_schools.py --states GA --charter-only first.")
     exact_map, norm_map, fuzzy_choices = _build_match_index(schools)
+    overrides = _load_overrides()
 
     links = _build_links(local, scsc, cpf, args.school_year)
 
@@ -303,7 +334,7 @@ def main():
     for name in links["school_name"]:
         nces_id, method, score = _resolve_nces(
             str(name) if pd.notna(name) else "",
-            exact_map, norm_map, fuzzy_choices, args.match_threshold,
+            overrides, exact_map, norm_map, fuzzy_choices, args.match_threshold,
         )
         ids.append(nces_id)
         methods.append(method)
@@ -334,10 +365,11 @@ def main():
     print(f"Wrote: {out_missing}")
     print(f"\nAuthorizers: {len(authorizers)}")
     print(f"Links total: {len(links_out)}")
-    print(f"  matched exact: {method_counts.get('exact', 0)}")
-    print(f"  matched norm:  {method_counts.get('norm', 0)}")
-    print(f"  matched fuzzy: {method_counts.get('fuzzy', 0)} (threshold {args.match_threshold})")
-    print(f"  unmatched:     {method_counts.get('unmatched', 0)} -> {os.path.basename(out_missing)}")
+    print(f"  matched override: {method_counts.get('override', 0)}")
+    print(f"  matched exact:    {method_counts.get('exact', 0)}")
+    print(f"  matched norm:     {method_counts.get('norm', 0)}")
+    print(f"  matched fuzzy:    {method_counts.get('fuzzy', 0)} (threshold {args.match_threshold})")
+    print(f"  unmatched:        {method_counts.get('unmatched', 0)} -> {os.path.basename(out_missing)}")
     print("\nBy authorizer:")
     for name, n in by_authorizer.items():
         print(f"  {n:>4}  {name}")
