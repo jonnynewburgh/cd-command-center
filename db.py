@@ -4664,6 +4664,24 @@ def upsert_scsc_cpf(record: dict):
     conn.close()
 
 
+def upsert_ga_charter_pilot(record: dict):
+    """Insert or update a GA local charter pilot snapshot row (school_name + school_year)."""
+    columns = list(record.keys())
+    values = list(record.values())
+    placeholders = ",".join("?" * len(values))
+    update_cols = [c for c in columns if c not in ("school_name", "school_year")]
+    update_clause = ",".join(f"{c}=excluded.{c}" for c in update_cols)
+    sql = f"""
+        INSERT INTO ga_charter_pilot ({",".join(columns)})
+        VALUES ({placeholders})
+        ON CONFLICT(school_name, school_year) DO UPDATE SET {update_clause}
+    """
+    conn = get_connection()
+    conn.cursor().execute(adapt_sql(sql), values)
+    conn.commit()
+    conn.close()
+
+
 def get_scsc_cpf(school_year=None, nces_id=None, school_name=None, designation=None):
     """
     Return SCSC CPF scores for GA charter schools.
