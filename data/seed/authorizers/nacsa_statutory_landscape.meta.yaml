@@ -1,6 +1,6 @@
 # Companion metadata for nacsa_statutory_landscape.csv
 source_url: https://www.qualitycharters.org/state-policy/multiple-authorizers/list-of-charter-school-authorizers-by-state/
-retrieved: "2026-05-04"
+retrieved: "2026-05-17"
 description: >
   Statutory categories of charter authorizer types permitted in each U.S. state
   and D.C., transcribed from NACSA Quality Charters public policy reference.
@@ -8,12 +8,40 @@ description: >
   belong in a separate operational registry (state DOE open data + NCES CCD joins).
 
 columns:
-  nacsa_col_1: First policy column on the NACSA page (typically primary paths).
-  nacsa_col_2: Second policy column (often appeal-limited or alternate paths).
-  nacsa_col_3: Third policy column where present.
-  nacsa_col_4: Fourth policy column where present.
+  allowed_by_law: >
+    NACSA header "AUTHORIZERS ALLOWED BY LAW". Primary statutory authorization
+    paths — authorizer types that may grant new charters without restriction.
+  appeal_only: >
+    NACSA header "ON APPEAL ONLY". Authorizer types that may act only when
+    another authorizer has denied an application (live fallback path).
+  limited_jurisdiction: >
+    NACSA header "LIMITED JURISDICTION". Authorizer types permitted with
+    restricted scope (geographic, grade-level, school-type, etc.).
+  allowed_not_operating: >
+    NACSA header "ALLOWED BUT NOT CURRENTLY IN OPERATION". Statute permits this
+    authorizer type but no entity is actively exercising the authority.
+
+cell_value_vocabulary:
+  LEA: Local Education Agency (school district)
+  SEA: State Education Agency
+  ICB: Independent Chartering Board
+  HEI: Higher Education Institution
+  NEG: Non-Educational Governmental entity
+  NFP: Not-for-Profit organization
+  "No Charter Law": State has no statutory charter framework
 
 notes:
-  - Colorado lists ICB twice in the source table; values are transcribed as-is.
-  - Hawaii lists HEI, NEG, NFP as shown on the source page at retrieval time.
-  - Where the source states "No Charter Law", treat as no statutory charter framework.
+  - >
+    Re-transcribed 2026-05-17. Prior CSV used generic nacsa_col_1..4 headers and
+    pack-left transcription, which mis-located values for AZ, HI, ME, MO, AL, FL,
+    TN, WI, KY, OR (and others). Column positions now match NACSA's source table
+    headers exactly.
+  - >
+    Colorado lists ICB under both "ON APPEAL ONLY" and "LIMITED JURISDICTION" —
+    two separate ICB entities with different scopes per the source page.
+  - >
+    Kentucky has no general-purpose authorizers; LEA + NEG sit only in
+    limited_jurisdiction.
+  - >
+    Multi-code cells (e.g. Hawaii "HEI, NEG, NFP") preserve NACSA's
+    comma-separated listing as-is.

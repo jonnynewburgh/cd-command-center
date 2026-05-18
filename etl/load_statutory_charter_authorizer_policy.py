@@ -76,10 +76,10 @@ def main():
         rec = {
             "state_usps": str(row["state_usps"]).strip().upper(),
             "state_name": str(row["state_name"]).strip(),
-            "nacsa_col_1": _clean(row.get("nacsa_col_1")),
-            "nacsa_col_2": _clean(row.get("nacsa_col_2")),
-            "nacsa_col_3": _clean(row.get("nacsa_col_3")),
-            "nacsa_col_4": _clean(row.get("nacsa_col_4")),
+            "allowed_by_law": _clean(row.get("allowed_by_law")),
+            "appeal_only": _clean(row.get("appeal_only")),
+            "limited_jurisdiction": _clean(row.get("limited_jurisdiction")),
+            "allowed_not_operating": _clean(row.get("allowed_not_operating")),
             "source_url": source_url,
             "retrieved": retrieved,
         }

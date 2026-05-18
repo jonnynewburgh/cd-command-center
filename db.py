@@ -5025,8 +5025,9 @@ def get_statutory_charter_authorizer_policy(state_usps=None) -> pd.DataFrame:
         params.append(state_usps.upper())
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
     query = f"""
-        SELECT state_usps, state_name, nacsa_col_1, nacsa_col_2, nacsa_col_3, nacsa_col_4,
-               source_url, retrieved
+        SELECT state_usps, state_name,
+               allowed_by_law, appeal_only, limited_jurisdiction, allowed_not_operating,
+               has_charter_law, source_url, retrieved
         FROM statutory_charter_authorizer_policy {where}
         ORDER BY state_usps
     """
