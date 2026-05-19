@@ -24,21 +24,31 @@ from etl.state_accountability.types import FileHandler, SkipHandler
 # Shared helpers
 # ---------------------------------------------------------------------
 
+# TDOE TVAAS uses '*' as a small-N suppression marker in numeric cells
+# (Growth Measure, Standard Error, Index — observed in 2019 subject-level
+# files; treat as NULL). Analogous to A-F's '<5%'/'>95%' privacy buckets.
+_TVAAS_SUPPRESSION_MARKERS = {"*", "**", "N/A", "n/a"}
+
+
+def _is_suppressed(v) -> bool:
+    return isinstance(v, str) and v.strip() in _TVAAS_SUPPRESSION_MARKERS
+
+
 def _maybe_int(v) -> int | None:
-    if pd.isna(v):
+    if pd.isna(v) or _is_suppressed(v):
         return None
     return int(v)
 
 
 def _maybe_float(v) -> float | None:
-    if pd.isna(v):
+    if pd.isna(v) or _is_suppressed(v):
         return None
     return float(v)
 
 
 def _maybe_smallint_1_5(v) -> int | None:
     """Coerce a composite value to a 1-5 smallint. Returns None for NaN/blank."""
-    if pd.isna(v) or v == "":
+    if pd.isna(v) or v == "" or _is_suppressed(v):
         return None
     iv = int(v)
     if iv < 1 or iv > 5:
@@ -52,7 +62,7 @@ def _normalize_level(v) -> int | None:
     Source files write the level as text ("Level 3"). Schema stores it as
     smallint with CHECK (level BETWEEN 1 AND 5). This helper converts.
     """
-    if pd.isna(v) or v == "":
+    if pd.isna(v) or v == "" or _is_suppressed(v):
         return None
     if isinstance(v, (int, float)):
         iv = int(v)

@@ -106,12 +106,12 @@ Schema CHECK originally required all four weights NOT NULL + sum=1.0 when eligib
 
 Loader rule: for eligible rows with at least one non-NaN weight, coerce missing weights to 0.0. For all-NaN eligible rows (the anomaly), leave NULL and let the relaxed CHECK admit them.
 
-### Two A-F-only sentinel additions during build
-Loud-failure design caught two sentinels not visible in initial inspection:
-- `<5%` / `>95%` — privacy buckets (added)
-- (None others surfaced)
+### Sentinel additions surfaced by loud-failure design
+- A-F: `<5%` / `>95%` — privacy buckets (added during build)
+- TVAAS: `*` / `**` / `N/A` — small-N suppression markers (added during canonical reload 2026-05-18; observed in 2019 subject-level file's `Growth Measure`/`Standard Error`/`Index`)
+- TVAAS: `Grade 2` Test value — only in the 2017 subject-level file (K-2 assessment reported separately); CHECK constraint relaxed via migration `f6c7d8e9f0a1`
 
-The loader raises `ValueError("unrecognized A-F cell value: ...")` on any unknown text — preserves the property that TDOE-added sentinels surface as loader bugs, not silent data loss.
+The loader raises `ValueError("unrecognized A-F cell value: ...")` on any unknown A-F text — preserves the property that TDOE-added sentinels surface as loader bugs, not silent data loss. TVAAS uses the shared `_is_suppressed` helper in `etl/state_accountability/tn/handlers.py`.
 
 ---
 
@@ -147,10 +147,15 @@ Protocol is in the CLEANUP_LOG.md itself. The `_quarantine` dir is gitignored (u
 
 ## What's not yet done
 
-1. `tn_school_crosswalk` ETL — schema exists; needs TDOE→NCES source file + loader (its own pipeline per the standalone-crosswalk rule)
-2. Load remaining TVAAS years (currently only 2024 composite, 2024 subject loaded; need 2015-2023, 2025)
-3. Canonical wipe + reload with documented `load_id ↔ filename` mapping
-4. Optional: `suppression_bucket` column on `tn_letter_grade_metric` if directional `<5%`/`>95%` info becomes valuable
-5. Optional: integration test harness against a real test database
+1. Optional: `suppression_bucket` column on `tn_letter_grade_metric` if directional `<5%`/`>95%` info becomes valuable
+2. Optional: integration test harness against a real test database
+3. Refresh `tn_school_crosswalk` when CCD 2023-24 / 2024-25 directory files are published (will lift coverage from 94.2% → ~99% of TVAAS universe; virtual + newly-opened schools currently unmatched)
 
-See `etl/canonical_load_order.md` for the canonical reload order and expected row counts.
+## What got done (2026-05-18)
+
+- **Canonical reload.** All 39 TN files loaded; `load_id` matches canonical position 1:1.
+- **Loader fixes during reload:** `*`/`**`/`N/A` suppression marker handling (`handlers.py:_is_suppressed`), `Grade 2` Test value (migration `f6c7d8e9f0a1`).
+- **2016 anomaly investigated:** 631-row school-composite count is real source data — spring 2016 TNReady cancellation context.
+- **`tn_school_crosswalk` ETL built and run.** Source: NCES CCD school directory files (`ccd_sch_129_*`, 4 years 2019-20 through 2022-23). Loader: `etl/load_tn_school_crosswalk.py`. Coverage: 1,987 validity bands, 94.2% of TVAAS / 97.3% of A-F schools matched. Idempotent with `--truncate`.
+
+See `etl/canonical_load_order.md` for the verified `load_id ↔ filename ↔ row count` mapping.
