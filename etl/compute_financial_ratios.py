@@ -5,7 +5,11 @@ Reads irs_990_history (multi-year 990 filings) and computes financial health
 ratios per EIN per fiscal year. Results go into the financial_ratios table.
 
 Ratios computed from 990 data (~approximate, marked acid_ratio_990):
-  Acid ratio:    cash_savings / (accounts_payable + accrued_expenses)
+  Acid ratio:    cash_savings / accts_payable_accrued
+                 accts_payable_accrued holds Part X line 17 — the combined
+                 "Accounts payable and accrued expenses" line on the 990
+                 (the IRS doesn't split them). accrued_expenses is reserved
+                 for audit-PDF uploads and stays NULL for 990-source rows.
                  Measures liquidity: can the org pay short-term obligations?
                  < 1.0 = potential cash stress; > 1.5 = healthy
 
@@ -58,7 +62,7 @@ def compute_ratios(limit: int = None):
     try:
         sql = """
             SELECT ein, tax_year, total_revenue, total_expenses,
-                   cash_savings, accounts_payable, accrued_expenses,
+                   cash_savings, accts_payable_accrued, accrued_expenses,
                    total_liabilities, unrestricted_net_assets
             FROM irs_990_history
             WHERE ein IS NOT NULL
@@ -74,7 +78,7 @@ def compute_ratios(limit: int = None):
             placeholders = ",".join("?" * len(ein_list))
             sql = f"""
                 SELECT ein, tax_year, total_revenue, total_expenses,
-                       cash_savings, accounts_payable, accrued_expenses,
+                       cash_savings, accts_payable_accrued, accrued_expenses,
                        total_liabilities, unrestricted_net_assets
                 FROM irs_990_history
                 WHERE ein IN ({placeholders})
@@ -95,7 +99,7 @@ def compute_ratios(limit: int = None):
 
     # Coerce numeric columns
     num_cols = ["total_revenue", "total_expenses", "cash_savings",
-                "accounts_payable", "accrued_expenses",
+                "accts_payable_accrued", "accrued_expenses",
                 "total_liabilities", "unrestricted_net_assets"]
     for col in num_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -106,8 +110,12 @@ def compute_ratios(limit: int = None):
     # --- Per-year ratios ---
     df["net_income_proxy"] = df["total_revenue"] - df["total_expenses"]
 
-    # Acid ratio: cash / (AP + accrued)
-    df["current_liabilities"] = df["accounts_payable"].fillna(0) + df["accrued_expenses"].fillna(0)
+    # Acid ratio: cash / current_liabilities.
+    # `accts_payable_accrued` already holds Part X line 17 (AP + accrued combined);
+    # `accrued_expenses` is structurally NULL for 990-source rows, so the sum
+    # equals `accts_payable_accrued` for IRS-derived history. The .fillna(0)
+    # on accrued stays so any future audit-source rows reaching this path sum.
+    df["current_liabilities"] = df["accts_payable_accrued"].fillna(0) + df["accrued_expenses"].fillna(0)
     df["acid_ratio_990"] = df.apply(
         lambda r: safe_divide(r["cash_savings"], r["current_liabilities"])
         if r["current_liabilities"] and r["current_liabilities"] > 0 else None,
@@ -137,7 +145,7 @@ def compute_ratios(limit: int = None):
             "leverage_ratio":           r["leverage_ratio"] if pd.notna(r.get("leverage_ratio")) else None,
             "avg_operating_cash_flow":  float(r["avg_operating_cash_flow"]) if pd.notna(r.get("avg_operating_cash_flow")) else None,
             "cash_and_equivalents":     float(r["cash_savings"]) if pd.notna(r.get("cash_savings")) else None,
-            "accounts_payable":         float(r["accounts_payable"]) if pd.notna(r.get("accounts_payable")) else None,
+            "accts_payable_accrued":    float(r["accts_payable_accrued"]) if pd.notna(r.get("accts_payable_accrued")) else None,
             "accrued_expenses":         float(r["accrued_expenses"]) if pd.notna(r.get("accrued_expenses")) else None,
             "current_liabilities_audit":None,
             "unrestricted_net_assets":  float(r["unrestricted_net_assets"]) if pd.notna(r.get("unrestricted_net_assets")) else None,

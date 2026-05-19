@@ -54,6 +54,7 @@ import sys
 import time
 import zipfile
 import xml.etree.ElementTree as ET
+from datetime import date
 from pathlib import Path
 
 import requests
@@ -67,7 +68,9 @@ import db
 
 IRS_BASE       = "https://apps.irs.gov/pub/epostcard/990/xml"
 CACHE_DIR      = Path("data/raw/irs990")
-DEFAULT_YEARS  = [2022, 2023, 2024]
+# 2020 through the current calendar year. Missing/future years return [] from
+# _load_index_csv (404 on the index CSV), so the upper bound is self-trimming.
+DEFAULT_YEARS  = list(range(2020, date.today().year + 1))
 API_SLEEP      = 0.1   # seconds between XML range requests
 
 # Form types we care about (990T = unrelated business income, skip it)
@@ -369,7 +372,10 @@ def parse_990_xml(xml_bytes: bytes) -> dict | None:
                               "NetAssetsOrFundBalancesEOYAmt")
         # Accounts payable group — IRS abbreviates "Accrued Expenses" to
         # "AccrExpnss" in the modern schema; older filings use the full word.
-        accts_payable  = _amt(form,
+        # Part X line 17 is a SINGLE combined line — "Accounts payable and
+        # accrued expenses" — so this value already includes accrued. The
+        # 990 XML doesn't split them; stored in the combined column.
+        ap_accrued     = _amt(form,
                               "AccountsPayableAccrExpnssGrp/EOYAmt",
                               "AccountsPayableAccruedExpensesGrp/EOYAmt",
                               "AccountsPayableEOYAmt")
@@ -388,7 +394,7 @@ def parse_990_xml(xml_bytes: bytes) -> dict | None:
         officer_comp   = _amt(form, "SalariesOtherCompEmplBnftAmt")
         cash           = _amt(form, "CashSavingsAndInvestmentsGrp/EOYAmt")
         unrestricted   = _amt(form, "NetAssetsOrFundBalancesEOYAmt")
-        accts_payable  = None
+        ap_accrued     = None
         notes_payable  = _amt(form, "LoansFromOfficersDirectorsEtcGrp/EOYAmt")
 
     elif form_type == "IRS990PF":
@@ -402,7 +408,7 @@ def parse_990_xml(xml_bytes: bytes) -> dict | None:
         officer_comp   = None
         cash           = _amt(form, "CashAndCashEquivalentsEOYAmt")
         unrestricted   = _amt(form, "NetAssetsOrFundBalancesEOYAmt")
-        accts_payable  = None
+        ap_accrued     = None
         notes_payable  = None
 
     else:
@@ -428,7 +434,7 @@ def parse_990_xml(xml_bytes: bytes) -> dict | None:
         "officer_compensation":     officer_comp,
         "cash_savings":             cash,
         "unrestricted_net_assets":  unrestricted,
-        "accounts_payable":         accts_payable,
+        "accts_payable_accrued":    ap_accrued,
         "notes_payable":            notes_payable,
         "data_source":              "IRS",
         # IRS XML doesn't have a PDF URL — filing_pdf_url is left
@@ -477,7 +483,7 @@ _HISTORY_COLS = {
     "ein", "org_name", "total_revenue", "total_expenses", "total_assets",
     "total_liabilities", "net_income", "program_service_revenue",
     "program_service_expenses", "officer_compensation", "cash_savings",
-    "unrestricted_net_assets", "accounts_payable", "accrued_expenses",
+    "unrestricted_net_assets", "accts_payable_accrued", "accrued_expenses",
     "notes_payable", "tax_year", "data_source",
 }
 
@@ -688,7 +694,7 @@ def main():
     )
     parser.add_argument(
         "--years", nargs="+", type=int, default=DEFAULT_YEARS, metavar="YEAR",
-        help=f"IRS submission years to search (default: {DEFAULT_YEARS})",
+        help=f"IRS submission years to search (default: 2020–{date.today().year})",
     )
     parser.add_argument(
         "--limit", type=int,

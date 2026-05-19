@@ -512,8 +512,8 @@ def init_db():
             officer_compensation REAL,
             cash_savings REAL,
             unrestricted_net_assets REAL,
-            accounts_payable REAL,
-            accrued_expenses REAL,
+            accts_payable_accrued REAL,  -- Part X line 17 — AP + accrued combined
+            accrued_expenses REAL,        -- audit-PDF only; NULL for 990-source rows
             notes_payable REAL,
             tax_year INTEGER NOT NULL,
             filing_pdf_url TEXT,
@@ -525,7 +525,7 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_990h_ein ON irs_990_history(ein)")
     # Backfill columns on pre-existing tables — _try_exec ignores already-exists.
     for col in ("total_liabilities REAL", "cash_savings REAL",
-                "unrestricted_net_assets REAL", "accounts_payable REAL",
+                "unrestricted_net_assets REAL", "accts_payable_accrued REAL",
                 "accrued_expenses REAL", "notes_payable REAL"):
         _try_exec(cur, f"ALTER TABLE irs_990_history ADD COLUMN {col}")
 
@@ -577,13 +577,18 @@ def init_db():
 
     # Add extra financial columns to irs_990 and irs_990_history for ratio calculations.
     # These map to Part X of the 990 form: balance sheet items.
+    #
+    # Part X line 17 is a SINGLE combined line ("Accounts payable and accrued
+    # expenses") — the 990 XML doesn't split them, so `accts_payable_accrued`
+    # holds the combined total. `accrued_expenses` stays NULL for 990-source
+    # rows; it's reserved for audit-PDF uploads that can separate the two.
     extra_990_cols = [
-        ("total_liabilities",        "REAL"),   # Part X line 26 total liabilities
-        ("unrestricted_net_assets",  "REAL"),   # Part X line 27
-        ("cash_savings",             "REAL"),   # Part X line 1 (cash & savings) — acid ratio numerator
-        ("accounts_payable",         "REAL"),   # Part X line 17 — proxy current liabilities
-        ("accrued_expenses",         "REAL"),   # Part X line 18 — proxy current liabilities
-        ("notes_payable",            "REAL"),   # Part X lines 19-20 — component of total debt
+        ("total_liabilities",        "REAL"),   # Part X line 26 — total liabilities
+        ("unrestricted_net_assets",  "REAL"),   # Part X line 27 (or "Without Donor Restrictions" post-ASU-2016-14)
+        ("cash_savings",             "REAL"),   # Part X lines 1-2 — acid ratio numerator
+        ("accts_payable_accrued",    "REAL"),   # Part X line 17 — AP + accrued combined
+        ("accrued_expenses",         "REAL"),   # audit-PDF only; NULL for 990-source rows
+        ("notes_payable",            "REAL"),   # Part X lines 23-24 — component of total debt
     ]
     for col, col_type in extra_990_cols:
         for tbl in ("irs_990", "irs_990_history"):
@@ -687,7 +692,10 @@ def init_db():
             ein TEXT NOT NULL,
             fiscal_year INTEGER NOT NULL,
             -- Acid ratio = cash / current_liabilities
-            --   990-based: cash_savings / (accounts_payable + accrued_expenses) — approximate
+            --   990-based: cash_savings / accts_payable_accrued (which already holds Part X
+            --              line 17, the combined AP + accrued line; the 990 XML doesn't
+            --              split them). Approximate because 990 lumps non-current items
+            --              like deferred revenue into "other liabilities".
             --   audit-based: precise current asset / current liability split
             acid_ratio_990 REAL,
             acid_ratio_audit REAL,
@@ -697,8 +705,8 @@ def init_db():
             avg_operating_cash_flow REAL,
             -- Raw inputs stored for transparency / manual override
             cash_and_equivalents REAL,
-            accounts_payable REAL,
-            accrued_expenses REAL,
+            accts_payable_accrued REAL,        -- mirrors irs_990_history; AP + accrued combined
+            accrued_expenses REAL,             -- audit-PDF only; NULL for 990-source rows
             current_liabilities_audit REAL,   -- from audit PDF (more accurate)
             unrestricted_net_assets REAL,
             total_liabilities REAL,
@@ -4045,8 +4053,10 @@ def compute_and_store_ratios(ein: str):
     Compute financial ratios from 990 history and store them.
 
     For each year in irs_990_history:
-      - acid_ratio_990: cash_savings / (accounts_payable + accrued_expenses)
-        Labeled approximate because 990 doesn't isolate current liabilities.
+      - acid_ratio_990: cash_savings / accts_payable_accrued
+        accts_payable_accrued holds Part X line 17 — the combined "Accounts
+        payable and accrued expenses" line on the 990. Approximate because
+        the 990 lumps other non-current items into "other liabilities".
       - leverage_ratio: unrestricted_net_assets / total_liabilities
       - avg_operating_cash_flow: 3-year rolling average of net_income
         (net_income is the 990 approximation of operating cash flow)
@@ -4066,15 +4076,14 @@ def compute_and_store_ratios(ein: str):
             continue
 
         cash       = row.get("cash_savings")
-        ap         = row.get("accounts_payable") or 0
-        accrued    = row.get("accrued_expenses") or 0
+        ap_accrued = row.get("accts_payable_accrued") or 0   # Part X line 17 — AP + accrued combined
+        accrued    = row.get("accrued_expenses") or 0        # NULL for 990; non-zero only via audit-upload paths
         unrest_na  = row.get("unrestricted_net_assets")
         total_liab = row.get("total_liabilities")
         net_income = row.get("net_income")
 
-        acid_990 = None
-        if cash is not None and (ap + accrued) > 0:
-            acid_990 = round(cash / (ap + accrued), 3)
+        current_liab = ap_accrued + accrued
+        acid_990 = round(cash / current_liab, 3) if cash is not None and current_liab > 0 else None
 
         leverage = None
         if unrest_na is not None and total_liab and total_liab > 0:
@@ -4098,8 +4107,10 @@ def compute_and_store_ratios(ein: str):
             _conn = get_connection()
             _cur  = _conn.cursor()
             _cur.execute(
-                "SELECT acid_ratio_audit, current_liabilities_audit, has_audit_data "
-                "FROM financial_ratios WHERE ein = ? AND fiscal_year = ?",
+                adapt_sql(
+                    "SELECT acid_ratio_audit, current_liabilities_audit, has_audit_data "
+                    "FROM financial_ratios WHERE ein = ? AND fiscal_year = ?"
+                ),
                 (ein, fiscal_year),
             )
             _row = _cur.fetchone()
@@ -4122,7 +4133,7 @@ def compute_and_store_ratios(ein: str):
             "leverage_ratio":            leverage,
             "avg_operating_cash_flow":   avg_cf,
             "cash_and_equivalents":      cash,
-            "accounts_payable":          ap or None,
+            "accts_payable_accrued":     ap_accrued or None,
             "accrued_expenses":          accrued or None,
             "current_liabilities_audit": cl_audit,
             "unrestricted_net_assets":   unrest_na,
@@ -5155,5 +5166,7 @@ def get_school_authorizers(
         df = pd.DataFrame()
     conn.close()
     return df
+
+
 
 
